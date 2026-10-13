@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IDS Dashboard — Network Security Monitor</title>
+  <meta name="description" content="Lightweight network intrusion detection system dashboard with plain-language alerts and real-time monitoring." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════ HEADER -->
+<header class="header">
+  <div class="header-inner">
+    <div class="logo">
+      <div class="logo-icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2L3 7V12C3 16.55 6.84 20.74 12 22C17.16 20.74 21 16.55 21 12V7L12 2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+          <path d="M9 12L11 14L15 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <span class="logo-text">NetGuard IDS</span>
+    </div>
+
+    <div class="header-right">
+      <div class="status-pill" id="status-pill">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-label">Loading…</span>
+      </div>
+      <div class="server-time" id="server-time">--:--:--</div>
+      <button class="refresh-btn" id="refresh-btn" onclick="refreshAll()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+          <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+        </svg>
+        Refresh
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- ══════════════════════════════════════════════════════════ MAIN CONTENT -->
+<main class="main">
+
+  <!-- ─── STAT CARDS ─── -->
+  <section class="stats-grid" aria-label="Summary statistics">
+
+    <div class="stat-card" id="card-threat">
+      <div class="stat-icon threat-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 2L3 7V12C3 16.55 6.84 20.74 12 22C17.16 20.74 21 16.55 21 12V7L12 2Z"/>
+        </svg>
+      </div>
+      <div class="stat-body">
+        <div class="stat-label">Threat Level</div>
+        <div class="stat-value" id="threat-level">—</div>
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-icon alert-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+          <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+      </div>
+      <div class="stat-body">
+        <div class="stat-label">Alerts (1h)</div>
+        <div class="stat-value" id="alert-count">—</div>
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-icon device-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/>
+          <line x1="12" y1="17" x2="12" y2="21"/>
+        </svg>
+      </div>
+      <div class="stat-body">
+        <div class="stat-label">Devices Seen</div>
+        <div class="stat-value" id="device-count">—</div>
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-icon scan-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+      </div>
+      <div class="stat-body">
+        <div class="stat-label">Port Scans (1h)</div>
+        <div class="stat-value" id="scan-count">—</div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ─── OBSERVATIONS + CHART ─── -->
+  <section class="two-col">
+
+    <!-- Plain-language observations feed -->
+    <div class="panel observations-panel">
+      <div class="panel-header">
+        <h2 class="panel-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+          </svg>
+          Plain-Language Summary
+        </h2>
+        <span class="badge" id="obs-count">0</span>
+      </div>
+      <div class="observations-list" id="observations-list">
+        <div class="loading-state">Loading observations…</div>
+      </div>
+    </div>
+
+    <!-- Activity chart -->
+    <div class="panel chart-panel">
+      <div class="panel-header">
+        <h2 class="panel-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/>
+            <line x1="6" y1="20" x2="6" y2="14"/><line x1="2" y1="20" x2="22" y2="20"/>
+          </svg>
+          Alert Activity (24h)
+        </h2>
+      </div>
+      <div class="chart-container">
+        <canvas id="activityChart" aria-label="Alert activity chart"></canvas>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ─── CALENDAR LOG VIEWER ─── -->
+  <section class="panel" id="calendar-section" style="margin-bottom:24px">
+    <div class="panel-header">
+      <h2 class="panel-title">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="4" width="18" height="18" rx="2"/>
+          <line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/>
+          <line x1="3" y1="10" x2="21" y2="10"/>
+        </svg>
+        Alert Calendar
+      </h2>
+      <span style="font-size:0.72rem;color:var(--text-muted)">Click any day to inspect logs</span>
+    </div>
+
+    <div class="cal-layout">
+
+      <!-- ── LEFT: Mini calendar ── -->
+      <div class="cal-left">
+        <div class="cal-nav">
+          <button class="cal-nav-btn" onclick="calPrevMonth()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <span class="cal-month-label" id="cal-month-label">October 2026</span>
+          <button class="cal-nav-btn" onclick="calNextMonth()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+
+        <div class="cal-grid">
+          <div class="cal-weekday">Mo</div>
+          <div class="cal-weekday">Tu</div>
+          <div class="cal-weekday">We</div>
+          <div class="cal-weekday">Th</div>
+          <div class="cal-weekday">Fr</div>
+          <div class="cal-weekday cal-weekend">Sa</div>
+          <div class="cal-weekday cal-weekend">Su</div>
+          <div id="cal-days-container" style="display:contents"></div>
+        </div>
+
+        <div class="cal-legend">
+          <span class="cal-legend-item"><span class="cal-dot dot-none"></span>Quiet</span>
+          <span class="cal-legend-item"><span class="cal-dot dot-low"></span>Low</span>
+          <span class="cal-legend-item"><span class="cal-dot dot-mid"></span>Medium</span>
+          <span class="cal-legend-item"><span class="cal-dot dot-high"></span>High</span>
+        </div>
+      </div>
+
+      <!-- ── RIGHT: Summary / Day log panel ── -->
+      <div class="cal-right">
+
+        <!-- Today summary (default view) -->
+        <div id="cal-summary" class="cal-summary-panel">
+          <div class="cal-summary-header">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <span id="cal-summary-label">Today's Summary</span>
+          </div>
+
+          <!-- Mini stat row -->
+          <div class="cal-mini-stats">
+            <div class="cal-mini-stat">
+              <span class="cal-mini-val" id="cal-stat-total">—</span>
+              <span class="cal-mini-key">Alerts</span>
+            </div>
+            <div class="cal-mini-stat">
+              <span class="cal-mini-val cal-val-high" id="cal-stat-high">—</span>
+              <span class="cal-mini-key">High</span>
+            </div>
+            <div class="cal-mini-stat">
+              <span class="cal-mini-val cal-val-rule" id="cal-stat-rule">—</span>
+              <span class="cal-mini-key">Top Rule</span>
+            </div>
+          </div>
+
+          <!-- Plain-language observations -->
+          <div class="cal-obs-label">Plain-language activity</div>
+          <div class="cal-obs-list" id="cal-obs-list">
+            <div class="cal-obs-item cal-obs-empty">Loading today's activity…</div>
+          </div>
+        </div>
+
+        <!-- Day log view (shown on day click, replaces summary) -->
+        <div id="cal-day-view" class="cal-day-view hidden">
+          <div class="cal-day-header">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+            <span class="cal-day-title" id="cal-day-title">—</span>
+            <span class="badge" id="cal-day-badge">0</span>
+            <button class="cal-close-day" onclick="calCloseDayView()">↩ Today</button>
+          </div>
+          <div class="table-wrapper" style="max-height:268px;overflow-y:auto">
+            <table class="alerts-table">
+              <thead>
+                <tr>
+                  <th>Time</th><th>Rule</th><th>Source IP</th>
+                  <th>Port</th><th>Severity</th><th>Details</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="cal-day-tbody">
+                <tr><td colspan="7" class="empty-state">Select a day to view logs.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div><!-- /.cal-right -->
+    </div><!-- /.cal-layout -->
+  </section>
+
+  <!-- ─── ALERTS PANEL (Live + History tabs) ─── -->
+  <section class="panel alerts-panel">
+    <div class="panel-header">
+      <h2 class="panel-title">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+        </svg>
+        Alerts
+      </h2>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span class="badge" id="alerts-badge">0</span>
+        <!-- Tab switcher -->
+        <div class="tab-group" id="alerts-tab-group">
+          <button class="tab-btn active" id="tab-live" onclick="switchAlertsTab('live')">⚡ Live (1h)</button>
+          <button class="tab-btn" id="tab-history" onclick="switchAlertsTab('history')">🗓 History</button>
+        </div>
+        <!-- History range selector (hidden until history tab active) -->
+        <div id="history-range" style="display:none;gap:6px;align-items:center;" class="range-group">
+          <span style="font-size:0.75rem;color:var(--text-muted);">Show:</span>
+          <button class="range-btn active" id="range-1" onclick="loadHistory(1)">1d</button>
+          <button class="range-btn" id="range-3" onclick="loadHistory(3)">3d</button>
+          <button class="range-btn" id="range-7" onclick="loadHistory(7)">7d</button>
+        </div>
+      </div>
+    </div>
+    <div class="table-wrapper">
+      <table class="alerts-table" id="alerts-table">
+        <thead id="alerts-thead">
+          <tr>
+            <th>Time</th>
+            <th>Rule</th>
+            <th>Source IP</th>
+            <th>Destination IP</th>
+            <th>Port</th>
+            <th>Origin</th>
+            <th>Severity</th>
+            <th>Details</th>
+            <th>Classify</th>
+          </tr>
+        </thead>
+        <tbody id="alerts-tbody">
+          <tr><td colspan="9" class="empty-state">Loading alerts…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+
+  <!-- ─── INVESTIGATION MODAL ─── -->
+  <div class="modal-overlay" id="modal-overlay" onclick="closeModal()"></div>
+  <div class="modal" id="investigation-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-header">
+      <h3 class="modal-title" id="modal-title">Alert Investigation</h3>
+      <button class="modal-close" onclick="closeModal()" aria-label="Close">✕</button>
+    </div>
+
+    <div class="modal-body">
+      <!-- Alert metadata -->
+      <div class="modal-meta" id="modal-meta"></div>
+
+      <!-- What caused it -->
+      <div class="modal-section">
+        <div class="modal-section-title">🔍 Why did this alert fire?</div>
+        <div class="modal-explanation" id="modal-explanation"></div>
+      </div>
+
+      <!-- Raw detail -->
+      <div class="modal-section">
+        <div class="modal-section-title">📋 Raw Detail</div>
+        <div class="modal-detail-box" id="modal-detail"></div>
+      </div>
+
+      <!-- Existing feedback -->
+      <div class="modal-section" id="existing-feedback-section" style="display:none">
+        <div class="modal-section-title">✅ Previously Classified</div>
+        <div class="modal-existing-feedback" id="existing-feedback"></div>
+      </div>
+
+      <!-- Classification -->
+      <div class="modal-section">
+        <div class="modal-section-title">📝 Classify This Alert</div>
+        <textarea class="modal-note" id="analyst-note" placeholder="Optional note: why is this a TP or FP? (e.g. 'This is our Nmap inventory scan', 'Known malware on guest device')"></textarea>
+        <div class="modal-buttons">
+          <button class="btn-fp" id="btn-fp" onclick="submitFeedback('false_positive')">
+            ❌ False Positive
+          </button>
+          <button class="btn-tp" id="btn-tp" onclick="submitFeedback('true_positive')">
+            ✅ True Positive (Real Threat)
+          </button>
+        </div>
+        <div class="modal-feedback-result" id="modal-feedback-result"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── DEVICE LIST ─── -->
+  <section class="panel devices-panel">
+    <div class="panel-header">
+      <h2 class="panel-title">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="3" width="20" height="14" rx="2"/>
+          <line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+        </svg>
+        Network Devices
+      </h2>
+      <span class="badge" id="devices-badge">0</span>
+    </div>
+    <div class="table-wrapper">
+      <table class="devices-table" id="devices-table">
+        <thead>
+          <tr>
+            <th>MAC Address</th>
+            <th>IP Address</th>
+            <th>Vendor</th>
+            <th>First Seen</th>
+            <th>Last Seen</th>
+          </tr>
+        </thead>
+        <tbody id="devices-tbody">
+          <tr><td colspan="5" class="empty-state">Loading devices…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <span>NetGuard IDS — J.C. Bose University of Science &amp; Technology, YMCA</span>
+  <span>⚡ Live alerts via SSE · 30s sync</span>
+</footer>
+
+<script src="/static/dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,73 @@
+# =============================================================================
+# Networking Project / NetGuard IDS — Root Git Ignore Rules
+# =============================================================================
+
+# --- Environment & Secrets (CRITICAL) ---
+.env
+.env.*
+*.env
+!.env.example
+!ids_project/.env.example
+
+# --- Python Bytecode & Packaging ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+
+# --- Virtual Environments ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- Databases & Runtime Data (Private Network Telemetry) ---
+*.db
+*.sqlite
+*.sqlite3
+storage/*.db
+alerts.db
+**/storage/*.db
+
+# --- Dynamic State & Logs ---
+data/arp_table.json
+**/data/arp_table.json
+data/feedback.jsonl
+**/data/feedback.jsonl
+data/blocklist_update.log
+**/data/blocklist_update.log
+*.log
+
+# --- Packet Capture Dumps ---
+# Ignore all raw pcap captures (including test.pcap, test2.pcap, capture.pcap)
+*.pcap
+*.pcapng
+*.cap
+# Allow synthetic test attack PCAP fixture
+!ids_project/data/test_attacks.pcap
+!data/test_attacks.pcap
+
+# --- Benchmark & Suricata Outputs ---
+eve.json
+suricata/
+/tmp/suricata/
+fast.log
+stats.log
+
+# --- IDEs and Text Editors ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- Operating System Artifacts ---
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db

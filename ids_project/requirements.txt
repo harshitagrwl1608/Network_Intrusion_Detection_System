@@ -1,0 +1,6 @@
+scapy>=2.5.0
+flask>=3.0.0
+pandas>=2.0.0
+requests>=2.31.0
+psycopg2-binary>=2.9.9   # PostgreSQL driver (used when DB_BACKEND=postgres)
+python-dotenv>=1.0.0     # optional: load .env file
