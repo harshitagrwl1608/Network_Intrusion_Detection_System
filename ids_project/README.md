@@ -131,21 +131,66 @@ The web dashboard is designed for both security analysts and non-technical stake
 
 ---
 
-## 📊 Evaluation vs. Suricata
+## 📊 Evaluation & PCAP Replay
 
-NetGuard includes a complete evaluation pipeline to benchmark its detection accuracy and latency against the industry standard **Suricata**:
+NetGuard includes a complete evaluation pipeline to benchmark detection accuracy against **Suricata** and run offline analysis on real or synthetic capture files (e.g., `log.pcap`).
+
+### 1. Capturing Real Network Traffic (`log.pcap`)
+
+You can capture live traffic from your network into a `log.pcap` file using `tcpdump` or Wireshark:
 
 ```bash
-# 1. Generate synthetic attack traffic (.pcap with port scans, syn floods, blocklist hits, ARP spoofing)
+# Method A: Standard binary PCAP capture (recommended)
+sudo tcpdump -i <interface> -s 0 -w log.pcap
+
+# Capture 500 packets and stop automatically:
+sudo tcpdump -i <interface> -c 500 -s 0 -w log.pcap
+
+# Method B: ASCII text log format (NetGuard's sniffer auto-detects and parses this too!)
+sudo tcpdump -nn -tttt -i <interface> > log.pcap
+```
+
+> **Note:** Replace `<interface>` with your active network card (e.g., `eth0` or `wlan0`, found via `ip link show`).
+
+### 2. Replaying `log.pcap` Through NetGuard
+
+To analyze `log.pcap` offline without needing raw socket privileges or live root sniffing:
+
+```bash
+# Replay your custom log.pcap file through NetGuard's engine
+python evaluation/replay.py --pcap log.pcap
+
+# Or if you generated the synthetic fixture:
+python evaluation/replay.py --pcap data/test_attacks.pcap
+```
+
+**How NetGuard processes `log.pcap`:**
+* **Dual Format Auto-Detection:** Automatically detects whether `log.pcap` is a binary libpcap capture or an ASCII `tcpdump` text dump.
+* **Protocol & Field Extraction:** Decodes IP endpoints, ports, protocol flags, ARP mappings, raw payloads (DPI), and DNS queries.
+* **Rule Engine Execution:** Evaluates all 6 detection rules against every packet.
+* **Database Storage:** Inserts all detected security incidents directly into `storage/alerts.db`.
+
+### 3. Visualizing Replayed Alerts
+
+After replaying `log.pcap`, launch the dashboard to inspect the detected incidents:
+
+```bash
+python -c "from dashboard.app import app; app.run(host='0.0.0.0', port=5000)"
+```
+Open **`http://localhost:5000`** in your browser to inspect the incident feed, plain-language summaries, threat gauge, and GeoIP map generated from `log.pcap`.
+
+### 4. Benchmarking Against Suricata
+
+To compare NetGuard against Suricata on the exact same capture:
+
+```bash
+# 1. (Optional) Generate synthetic attack traffic (.pcap with port scans, syn floods, blocklist hits, ARP spoofing)
 python evaluation/generate_test_pcap.py
 
-# 2. Replay the pcap through NetGuard's engine
-python evaluation/replay.py --pcap data/test_attacks.pcap
+# 2. Run Suricata against the capture file (log.pcap or test_attacks.pcap)
+suricata -r log.pcap -l /tmp/suricata/
 
-# 3. Run Suricata against the exact same capture
-suricata -r data/test_attacks.pcap -l /tmp/suricata/
-
-# 4. Compare detections and output precision/recall stats
+# 3. Compare detections and output precision, recall, and F1 score
 python evaluation/compare.py --eve /tmp/suricata/eve.json
 ```
 
@@ -225,11 +270,25 @@ nano .env
 
 ### 4. Run NetGuard
 
+NetGuard can be executed in two modes:
+
+#### Option A: Live Monitoring Mode (Real-Time Sniffing)
 Because packet capture operates on raw sockets, root or capability privileges are required:
 
 ```bash
 # Start NetGuard (sniffer thread + analysis loop + web dashboard)
 sudo .venv/bin/python main.py
+```
+
+#### Option B: Offline PCAP Analysis Mode (`log.pcap`)
+If you want to analyze pre-recorded network traffic or do not have root capture permissions:
+
+```bash
+# 1. Replay your log.pcap file through the IDS engine
+.venv/bin/python evaluation/replay.py --pcap log.pcap
+
+# 2. Launch the web dashboard to inspect the alerts and plain-language report
+.venv/bin/python -c "from dashboard.app import app; app.run(host='0.0.0.0', port=5000)"
 ```
 
 Open your browser and navigate to:
@@ -283,7 +342,7 @@ python main.py
 When running and deploying NetGuard, adhere to the following security practices:
 
 1. **Never Commit Live Secrets:** `.env` is ignored by `.gitignore`. Keep your database passwords, API credentials, and network secrets in `.env` only. Use `.env.example` as a sanitized template.
-2. **Never Commit Network Telemetry:** Live SQLite databases (`alerts.db`), runtime ARP tables (`arp_table.json`), and raw packet capture files (`*.pcap`) are explicitly ignored by `.gitignore`. They contain MAC addresses, internal IP schemes, and potentially sensitive plaintext communications from your network.
+2. **Never Commit Network Telemetry:** Live SQLite databases (`alerts.db`), runtime ARP tables (`arp_table.json`), and raw packet capture files (`log.pcap`, `test.pcap`, `*.pcap`) are explicitly ignored by `.gitignore`. They contain MAC addresses, internal IP schemes, and potentially sensitive plaintext communications from your network.
 3. **Synthetic PCAPs Only:** The repository only ships with synthetic, sanitized test traffic (`data/test_attacks.pcap`) generated strictly for algorithmic validation.
 
 ---
