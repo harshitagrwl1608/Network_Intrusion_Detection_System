@@ -230,6 +230,19 @@ async function openInvestigation(alertId) {
     document.getElementById("modal-explanation").textContent = alert.explanation || "";
     document.getElementById("modal-detail").textContent = alert.detail || "No detail available.";
 
+    const evBox = document.getElementById("modal-evidence");
+    const evSec = document.getElementById("modal-evidence-section");
+    if (evBox && evSec) {
+      if (alert.evidence) {
+        evBox.textContent = typeof alert.evidence === "object"
+          ? JSON.stringify(alert.evidence, null, 2)
+          : String(alert.evidence);
+        evSec.style.display = "block";
+      } else {
+        evSec.style.display = "none";
+      }
+    }
+
     if (alert.feedback) {
       const fb = alert.feedback;
       const cls = fb.classification === "true_positive" ? "✅ True Positive" : "❌ False Positive";

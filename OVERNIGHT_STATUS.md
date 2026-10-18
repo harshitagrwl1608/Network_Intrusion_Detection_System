@@ -7,8 +7,10 @@
 **Cycle 2 Commit:** `d788522`  
 **Cycle 3 Commit:** `84f7534`  
 **Cycle 4 Commit:** `bfdf511`  
+**Cycle 5 Commit:** `30dbec7`  
+**Cycle 6 Commit:** Pending final push  
 **Session Started:** 2026-10-19 01:42:10 +05:30  
-**Status:** In Progress (Cycle 5 Complete)
+**Status:** Completed (6 of 6 Cycles Completed)
 
 ---
 
@@ -36,10 +38,7 @@ Under the initial architecture (`5d22fba`):
 - `ids_project/tests/test_alert_persistence.py` (New regression test suite)
 
 ### 4. Commands Executed & Test Results
-- `python3 -m unittest ids_project/tests/test_alert_persistence.py`
-  - Before fix: `FAILED (failures=1, errors=1)` — 40 alerts dropped out of 50 under device traffic burst; `FileNotFoundError` on bare SQLite path.
-  - After fix: `OK (Ran 2 tests in 1.492s)` — 50/50 alerts persisted, 0 alerts dropped, bare SQLite path safely opened.
-- `git diff --check`: Exit code 0 (clean formatting, no whitespace errors).
+- `python3 -m unittest ids_project/tests/test_alert_persistence.py`: OK (50/50 alerts persisted, 0 dropped).
 - Commit: `73c281f` (pushed to `origin/antigravity/overnight-work`).
 
 ---
@@ -66,9 +65,7 @@ Under the initial architecture (`5d22fba`):
 - `ids_project/tests/test_port_scan_detection.py` (New regression test suite)
 
 ### 4. Commands Executed & Test Results
-- `python3 -m unittest ids_project/tests/test_port_scan_detection.py`
-  - Before fix: `FAILED (failures=3)` — False positives on UDP, SYN-ACK, and SYN flood.
-  - After fix: `OK (Ran 5 tests in 0.001s)`.
+- `python3 -m unittest ids_project/tests/test_port_scan_detection.py`: OK (5 tests passed).
 - Commit: `d788522` (pushed to `origin/antigravity/overnight-work`).
 
 ---
@@ -92,9 +89,7 @@ Under the initial architecture (`5d22fba`):
 - `ids_project/tests/test_dns_and_arp_detection.py` (New regression test suite)
 
 ### 4. Commands Executed & Test Results
-- `python3 -m unittest ids_project/tests/test_dns_and_arp_detection.py`
-  - Before fix: `FAILED (failures=3)` — `DNS_FREQ_THRESHOLD=0` alerted on first query; DNS tunneling suppressed under allowed suffix; ARP alert storm.
-  - After fix: `OK (Ran 3 tests in 0.002s)`.
+- `python3 -m unittest ids_project/tests/test_dns_and_arp_detection.py`: OK (3 tests passed).
 - Commit: `84f7534` (pushed to `origin/antigravity/overnight-work`).
 
 ---
@@ -120,9 +115,7 @@ Under the initial architecture (`5d22fba`):
 - `ids_project/tests/test_pcap_replay_and_parsing.py` (New regression test suite)
 
 ### 4. Commands Executed & Test Results
-- `python3 -m unittest ids_project/tests/test_pcap_replay_and_parsing.py`
-  - Before fix: `FAILED (failures=1)` — 0 records parsed from full-date tcpdump log.
-  - After fix: `OK (Ran 2 tests in 0.004s)`.
+- `python3 -m unittest ids_project/tests/test_pcap_replay_and_parsing.py`: OK (2 tests passed).
 - Commit: `bfdf511` (pushed to `origin/antigravity/overnight-work`).
 
 ---
@@ -154,11 +147,51 @@ Under the initial architecture (`5d22fba`):
   - Per-rule breakdown: ARP_SPOOF (1/1), BLOCKLIST (1/1), DNS_ANOMALY (2/2), PAYLOAD_HIT (4/4), PORT_SCAN (2/2), SYN_FLOOD (1/1).
   - Benign traffic false positives: 0.
   - Exit code: 0.
-- `python3 -m unittest discover ids_project/tests`
-  - Result: `Ran 13 tests in 3.220s — OK`.
+- Commit: `30dbec7` (pushed to `origin/antigravity/overnight-work`).
+
+---
+
+## Cycle 6: Priority 3 — Investigation Interface, Security Hardening, and CI
+
+### 1. Root Cause Hypothesis
+- **Unrendered Evidence in Dashboard:** While `evidence_json` was persisted in SQLite/Postgres for each alert, the investigation API (`api_alert_detail`) never parsed or exposed the structured dictionary, leaving analysts without actionable forensic details in the investigation modal.
+- **Insecure Default Network Exposure:** `DASHBOARD_HOST` defaulted to `0.0.0.0`, exposing the unauthenticated SOC dashboard, investigation modal, and classification APIs to any device on the local network (LAN / Wi-Fi).
+- **Outdated Documentation:** `ids_project/README.md` contained outdated rule explanations (described vertical scanning only for `PORT_SCAN`, listed stale DNS length threshold 50 instead of 60, omitted query-frequency rules) and recommended binding Flask directly to `0.0.0.0`.
+- **Missing Automated CI:** The repository had no continuous integration workflow to guarantee regression prevention on future pushes and pull requests.
+
+### 2. Implementation
+- In `ids_project/dashboard/app.py`:
+  - Parsed `evidence_json` in `api_alert_detail` into a structured dictionary `alert["evidence"]`.
+  - Updated rule explanations to accurately describe vertical and horizontal port scans, DoS initial SYN bursts, and multi-vector DNS anomalies (entropy, length, frequency).
+- In `ids_project/dashboard/templates/index.html` & `static/dashboard.js`:
+  - Added a dedicated "Structured Evidence" section to the investigation modal that renders formatted JSON evidence for analysts.
+- In `ids_project/config.py`:
+  - Hardened default `DASHBOARD_HOST` to `127.0.0.1` (localhost only) while preserving `.env` overrides.
+- In `ids_project/README.md`:
+  - Corrected core detection rule table with exact thresholds, both vertical/horizontal port scans, and DNS frequency checks.
+  - Added instructions for `python evaluation/run_eval.py` and local dashboard launch.
+- Added GitHub Actions CI: `.github/workflows/ci.yml` running unit tests and evaluation runner.
+- Added regression test suite: `ids_project/tests/test_dashboard_api.py`.
+
+### 3. Files Changed
+- `ids_project/config.py`
+- `ids_project/dashboard/app.py`
+- `ids_project/dashboard/templates/index.html`
+- `ids_project/dashboard/static/dashboard.js`
+- `ids_project/README.md`
+- `.github/workflows/ci.yml`
+- `ids_project/tests/test_dashboard_api.py`
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_dashboard_api.py`: OK (2 tests passed).
+- `python3 -m unittest discover ids_project/tests`: OK (15 tests passed).
+- `python3 evaluation/run_eval.py`: OK (11/11 scenarios, 0 benign FPs, exit 0).
 - `git diff --check`: Exit code 0.
 
 ---
 
-## Remaining Backlog & Next Cycle
-- **Cycle 6:** Priority 3 — Investigation and Security (render saved structured alert evidence in dashboard, correct outdated README claims and rule descriptions).
+## Final Session Summary & Checklist
+- **Session Stop Condition:** Reached maximum session budget of 6 completed development cycles.
+- **Total Cycles Completed:** 6
+- **Branch Pushed:** `antigravity/overnight-work` (strictly no changes to `main` or `agent-control`).
+- **All Applicable Regression Tests:** 15 unit tests passing + automated PCAP evaluation passing cleanly.

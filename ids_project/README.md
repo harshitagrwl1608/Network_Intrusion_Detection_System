@@ -103,11 +103,11 @@ NetGuard implements 6 distinct detection rules spanning stateless lookups, state
 | Rule ID | Detection Mechanism | Methodology | Tunable Defaults |
 |---|---|---|---|
 | **`BLOCKLIST`** | Known C2 Botnets & Ransomware IPs | Stateless $O(1)$ set lookup against synced feeds (abuse.ch Feodo Tracker, CINS Army). | Auto-updated every 24h |
-| **`PORT_SCAN`** | Network Reconnaissance & Port Sweeps | Stateful sliding window tracking distinct destination ports probed per source IP. Excludes legitimate server response traffic. | $> 15$ ports in $10\text{s}$ |
-| **`SYN_FLOOD`** | Denial-of-Service (DoS) Attacks | Stateful sliding window tracking rapid bursts of TCP SYN packets directed toward service ports ($< 49152$). | $> 100$ SYNs in $10\text{s}$ |
-| **`ARP_SPOOF`** | Man-in-the-Middle (MITM) & Cache Poisoning | Stateful persistent table tracking IP $\leftrightarrow$ MAC pairings. Alerts if a recognized IP suddenly claims a new hardware identity. | Thread-safe auto-persist |
-| **`PAYLOAD_HIT`** | Deep Packet Inspection (DPI) | Regex inspection of packet data payload for SQL Injection (`UNION SELECT`, `' OR 1=1`), XSS (`<script>`), and plaintext credentials (`password=`, `Authorization: Basic`). | First 512 bytes scanned |
-| **`DNS_ANOMALY`** | Domain Generation Algorithms (DGA) & DNS Tunneling | Computes Shannon Entropy ($H = -\sum p(x) \log_2 p(x)$) on DNS queries. Flags high-randomness domains ($> 3.8\text{ bits/char}$) and oversized FQDNs ($> 50\text{ chars}$). | Entropy $> 3.8$, Length $> 50$ |
+| **`PORT_SCAN`** | Network Reconnaissance & Port Sweeps | Stateful sliding window tracking distinct ports on a single host (vertical) or across distinct hosts (horizontal). Restricts to initial TCP SYN attempts. | $\ge 15$ ports or hosts in $10\text{s}$ |
+| **`SYN_FLOOD`** | Denial-of-Service (DoS) Attacks | Stateful sliding window tracking rapid bursts of initial TCP SYN packets directed toward service ports ($< 49152$). | $\ge 100$ SYNs in $10\text{s}$ |
+| **`ARP_SPOOF`** | Man-in-the-Middle (MITM) & Cache Poisoning | Stateful persistent table tracking IP $\leftrightarrow$ MAC pairings with alert cooldown deduplication. Alerts if a recognized IP suddenly claims a new hardware identity. | 120s alert cooldown |
+| **`PAYLOAD_HIT`** | Deep Packet Inspection (DPI) | Regex inspection of packet data payload for SQL Injection (`UNION SELECT`, `' OR 1=1`), command injection, SSRF, Log4Shell, and plaintext credentials. | First 512 bytes scanned |
+| **`DNS_ANOMALY`** | Domain Generation Algorithms (DGA) & DNS Tunneling | Computes Shannon Entropy ($H = -\sum p(x) \log_2 p(x)$) on DNS queries. Flags high-randomness subdomains ($\ge 3.8\text{ bits/char}$), oversized FQDNs ($> 60\text{ chars}$), and high-frequency repeat queries. | Entropy $\ge 3.8$, Length $> 60$, Freq $\ge 20$ in 60s |
 
 ### 🛡️ False-Positive Mitigations
 - **Source Service Port Exemption:** Packets originating *from* well-known service ports (e.g., `53/DNS`, `80/HTTP`, `443/HTTPS`, `123/NTP`) are exempted from scanner rules to prevent high-volume DNS/Web servers from being flagged as attackers.
@@ -170,16 +170,31 @@ python evaluation/replay.py --pcap data/test_attacks.pcap
 * **Rule Engine Execution:** Evaluates all 6 detection rules against every packet.
 * **Database Storage:** Inserts all detected security incidents directly into `storage/alerts.db`.
 
-### 3. Visualizing Replayed Alerts
+### 3. Automated Isolated Evaluation Runner
 
-After replaying `log.pcap`, launch the dashboard to inspect the detected incidents:
+To run a complete, repeatable evaluation with isolated databases and fresh ARP state:
 
 ```bash
-python -c "from dashboard.app import app; app.run(host='0.0.0.0', port=5000)"
+# Runs full evaluation on synthetic attack + benign PCAPs with ground truth:
+python evaluation/run_eval.py
 ```
-Open **`http://localhost:5000`** in your browser to inspect the incident feed, plain-language summaries, threat gauge, and GeoIP map generated from `log.pcap`.
 
-### 4. Benchmarking Against Suricata
+This command runs with zero contamination:
+* Replays `data/test_attacks.pcap` into an isolated temporary database.
+* Evaluates detections against `evaluation/scenarios/test_labels.csv`.
+* Replays `data/test_benign.pcap` into a separate isolated database with fresh ARP state.
+* Verifies zero false alarms on benign traffic and prints a full breakdown of TP, FN, FP, Precision, Recall, and F1.
+
+### 4. Visualizing Alerts in the SOC Dashboard
+
+Launch the dashboard locally to inspect live or replayed incidents:
+
+```bash
+python -m dashboard.app
+```
+Open **`http://127.0.0.1:5000`** in your browser to inspect the incident feed, plain-language summaries, threat gauge, structured JSON evidence in the investigation modal, and GeoIP map.
+
+### 5. Benchmarking Against Suricata
 
 To compare NetGuard against Suricata on the exact same capture:
 

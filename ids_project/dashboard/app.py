@@ -529,6 +529,13 @@ def api_alert_detail(alert_id: int):
         return jsonify({"error": "Alert not found"}), 404
     alert = dict(row)
     alert["time_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(alert.get("timestamp", 0)))
+    if alert.get("evidence_json"):
+        try:
+            alert["evidence"] = json.loads(alert["evidence_json"])
+        except Exception:
+            alert["evidence"] = None
+    else:
+        alert["evidence"] = None
 
     # Attach existing feedback if any
     fb_sql = ("SELECT * FROM feedback WHERE alert_id = ? ORDER BY timestamp DESC LIMIT 1"
@@ -544,13 +551,13 @@ def api_alert_detail(alert_id: int):
     # Add rule-specific explanation for the investigation panel
     explanations = {
         "PORT_SCAN": (
-            "This alert fired because a single source IP sent SYN packets to more than "
-            f"{config.PORT_SCAN_THRESHOLD} distinct destination ports within {config.TIME_WINDOW} seconds. "
-            "Legitimate scanners (e.g. network inventory tools) can trigger this. "
-            "Check if the source IP is a known device running a network scan."
+            "This alert fired because a single source IP sent initial TCP SYN packets to more than "
+            f"{config.PORT_SCAN_THRESHOLD} distinct ports on a target host (vertical scan) or across "
+            f"distinct hosts (horizontal sweep) within {config.TIME_WINDOW} seconds. "
+            "Check if the source IP is an authorized scanner or an unexpected reconnaissance tool."
         ),
         "SYN_FLOOD": (
-            f"This alert fired because more than {config.SYN_FLOOD_THRESHOLD} TCP SYN packets "
+            f"This alert fired because more than {config.SYN_FLOOD_THRESHOLD} initial TCP SYN packets "
             f"were sent to a service port within {config.TIME_WINDOW} seconds without completing handshakes. "
             "Could be a misconfigured service or a genuine DoS attempt."
         ),
@@ -565,15 +572,15 @@ def api_alert_detail(alert_id: int):
             "recently delisted. Check the blocklist source and verify if the IP is still malicious."
         ),
         "PAYLOAD_HIT": (
-            "A suspicious payload pattern (SQL injection, XSS, shell command, or plaintext credential) "
-            "was detected in unencrypted traffic on a plain-text protocol (HTTP/FTP/Telnet). "
+            "A suspicious payload pattern (SQL injection, command injection, SSRF, Log4Shell, or plaintext credential) "
+            "was detected in unencrypted traffic on a plain-text protocol. "
             "HTTPS traffic is not inspected. Verify whether this is a legitimate request or an attack."
         ),
         "DNS_ANOMALY": (
-            f"A DNS query had unusually high Shannon entropy (≥{config.DNS_ENTROPY_THRESHOLD:.1f} bits/char) "
-            f"or was longer than {config.DNS_QUERY_MAX_LEN} characters. "
-            "This is a hallmark of Domain Generation Algorithm (DGA) malware or DNS data exfiltration tunnels. "
-            "Check whether this device is running legitimate software that uses randomised subdomains (e.g. CDN clients)."
+            f"A DNS query had unusually high Shannon entropy (≥{config.DNS_ENTROPY_THRESHOLD:.1f} bits/char), "
+            f"exceeded maximum expected length ({config.DNS_QUERY_MAX_LEN} chars), or exceeded repeated query frequency "
+            f"(≥{config.DNS_FREQ_THRESHOLD} queries in {config.DNS_FREQ_WINDOW}s). "
+            "This indicates possible DGA malware, DNS data exfiltration tunnels, or suspicious query bursts."
         ),
     }
     alert["explanation"] = explanations.get(alert.get("rule_name", ""), "No explanation available.")

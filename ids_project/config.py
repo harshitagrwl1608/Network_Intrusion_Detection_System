@@ -71,7 +71,8 @@ DNS_FREQ_WINDOW       = int(os.getenv("DNS_FREQ_WINDOW", 60))            # secon
 ANALYSIS_INTERVAL = int(os.getenv("ANALYSIS_INTERVAL", 30))       # seconds between runs
 
 # --- Dashboard ---
-DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "0.0.0.0")
+# Default to 127.0.0.1 so unauthenticated interface is not exposed to the local network
+DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", 5000))
 DASHBOARD_DEBUG = os.getenv("DASHBOARD_DEBUG", "false").lower() == "true"
 
