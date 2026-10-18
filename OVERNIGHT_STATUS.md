@@ -4,8 +4,9 @@
 **Tracking Remote:** `origin/antigravity/overnight-work`  
 **Base Commit:** `5d22fba`  
 **Cycle 1 Commit:** `73c281f`  
+**Cycle 2 Commit:** `d788522`  
 **Session Started:** 2026-10-19 01:42:10 +05:30  
-**Status:** In Progress (Cycle 2 Complete)
+**Status:** In Progress (Cycle 3 Complete)
 
 ---
 
@@ -55,12 +56,7 @@ Under the initial architecture (`5d22fba`):
 - In `ids_project/capture/sniffer.py`:
   - Extracted `initial_syn = bool(flags & 0x02) and not bool(flags & 0x10)` in `_parse_packet()` for Scapy TCP packets.
   - Initialized `initial_syn = False` on ARP and UDP packets.
-- Added regression test suite: `ids_project/tests/test_port_scan_detection.py` covering:
-  - UDP packets negative (no scan alert)
-  - TCP ACK-only negative (no scan alert)
-  - TCP SYN-ACK server responses negative (no scan alert)
-  - Pure initial SYN probes positive (triggers scan alert)
-  - SynFloodRule rejects UDP and SYN-ACK traffic
+- Added regression test suite: `ids_project/tests/test_port_scan_detection.py`.
 
 ### 3. Files Changed
 - `ids_project/engine/rules.py`
@@ -71,11 +67,37 @@ Under the initial architecture (`5d22fba`):
 - `python3 -m unittest ids_project/tests/test_port_scan_detection.py`
   - Before fix: `FAILED (failures=3)` — False positives on UDP, SYN-ACK, and SYN flood.
   - After fix: `OK (Ran 5 tests in 0.001s)`.
+- Commit: `d788522` (pushed to `origin/antigravity/overnight-work`).
+
+---
+
+## Cycle 3: Priority 1 — DNS Anomaly & ARP Spoofing Detection Correctness
+
+### 1. Root Cause Hypothesis
+- **DNS Frequency with Threshold Zero:** In `DnsRule.check()`, `high_freq = query_count >= self._freq_threshold`. When `DNS_FREQ_THRESHOLD=0` (documented in `.env.example` as the switch to disable frequency detection), `query_count >= 0` evaluated to `True` on the very first query for any domain, triggering false alerts on standard single DNS requests.
+- **DGA Allowlist Over-broad Suppression:** `if any(dl.endswith(w) for w in _DGA_WHITELIST_SUFFIXES): return None` returned immediately before length and frequency checks. This completely blindfolded DNS tunneling detection (`too_long`) if the attacker encapsulated payloads under a known suffix (e.g., `*.amazonaws.com`).
+- **ARP Spoofing Alert Storms:** `ArpSpoofRule.check()` fired an alert for every single conflicting ARP frame without cooldown, saturating alert storage during duplicate gratuitous ARP packets or network flapping.
+
+### 2. Implementation
+- In `ids_project/engine/rules.py`:
+  - `DnsRule`: Guarded frequency detection with `self._freq_threshold > 0 and query_count >= self._freq_threshold`, properly disabling the check when set to 0.
+  - `DnsRule`: Restructured allowlist to set `entropy_exempt = True` exclusively for the Shannon entropy calculation, while keeping excessive length (`too_long`) and query frequency (`high_freq`) fully operational under allowed suffixes.
+  - `ArpSpoofRule`: Added `ALERT_COOLDOWN_S = 120.0` and `_cooldown` tracking per IP, suppressing duplicate alerts within the cooldown window while ensuring initial conflicts always alert.
+- Added regression test suite: `ids_project/tests/test_dns_and_arp_detection.py`.
+
+### 3. Files Changed
+- `ids_project/engine/rules.py`
+- `ids_project/tests/test_dns_and_arp_detection.py` (New regression test suite)
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_dns_and_arp_detection.py`
+  - Before fix: `FAILED (failures=3)` — `DNS_FREQ_THRESHOLD=0` alerted on first query; DNS tunneling suppressed under allowed suffix; ARP alert storm.
+  - After fix: `OK (Ran 3 tests in 0.002s)`.
 - `python3 -m unittest discover ids_project/tests`
-  - Result: `Ran 7 tests in 1.455s — OK`.
+  - Result: `Ran 10 tests in 1.525s — OK`.
 - `git diff --check`: Exit code 0.
 
 ---
 
 ## Remaining Backlog & Next Cycle
-- **Cycle 3:** Priority 1 — DNS Anomaly Rule Fixes (`DNS_FREQ_THRESHOLD=0` handling, narrow allowlist scope to entropy only, protect against repeated alerts).
+- **Cycle 4:** Priority 2 — Deterministic PCAP Replay and Historical Log Parsing (prevent GC thread wall-clock corruption during offline replay, support full-date tcpdump text logs).

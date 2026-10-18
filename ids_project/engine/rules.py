@@ -442,12 +442,17 @@ class SynFloodRule:
 
 class ArpSpoofRule:
     name = "ARP_SPOOF"
-    rule_version = "1.1"
+    rule_version = "1.2"
+
+    # Per-IP cooldown: once an alert fires for a given IP, suppress repeats
+    # for this many seconds to avoid alert storms. Set to 0 to disable.
+    ALERT_COOLDOWN_S: float = 120.0
 
     def __init__(self, table_path: str):
         self.table_path = table_path
         self._lock = threading.RLock()
-        self._table: dict[str, str] = {}  # ip → mac
+        self._table: dict[str, str] = {}    # ip → mac
+        self._cooldown: dict[str, float] = {}  # ip → last_alert_time
         self._dirty = False
         self._load()
 
@@ -507,6 +512,12 @@ class ArpSpoofRule:
                 return None
 
             if known_mac != mac:
+                now_t = record.get("timestamp", time.time())
+                if ip in self._cooldown:
+                    if now_t - self._cooldown[ip] < self.ALERT_COOLDOWN_S:
+                        return None  # suppress — already alerted recently
+                self._cooldown[ip] = now_t
+
                 logger.debug(f"ARP_SPOOF fired: {ip} was {known_mac}, now {mac}")
                 return {
                     "rule_name": self.name,
@@ -526,6 +537,7 @@ class ArpSpoofRule:
                         "ip": ip,
                         "previous_mac": known_mac,
                         "new_mac": mac,
+                        "cooldown_s": self.ALERT_COOLDOWN_S,
                     },
                     "window_start": None,
                     "window_end": None,
@@ -824,10 +836,12 @@ class DnsRule:
         src = record.get("src_ip", "unknown")
         now = record.get("timestamp", time.time())
 
-        # Whitelist known-legit high-entropy CDN / cloud domains
+        # --- Allowlist: applied only to entropy check, NOT to length/frequency ---
+        # Broad suffix allowlisting should not suppress other anomaly signals.
+        # A high-entropy domain under a CDN suffix is excused from entropy only;
+        # an unusually LONG or REPEATED query under that suffix still fires.
         dl = domain.lower()
-        if any(dl.endswith(w) for w in _DGA_WHITELIST_SUFFIXES):
-            return None
+        entropy_exempt = any(dl.endswith(w) for w in _DGA_WHITELIST_SUFFIXES)
 
         labels = domain.split(".")
         subdomain = labels[0] if labels else domain
@@ -835,10 +849,16 @@ class DnsRule:
 
         entropy  = _shannon_entropy(subdomain)
         too_long = len(domain) > self.max_query_len
-        # Require label length >= 8 to avoid FPs on short words
-        high_ent = len(subdomain) >= 8 and entropy >= self.entropy_threshold
+        # Require label length >= 8 to avoid FPs on short words.
+        # Also skip entropy check when domain is on the CDN allowlist.
+        high_ent = (
+            not entropy_exempt
+            and len(subdomain) >= 8
+            and entropy >= self.entropy_threshold
+        )
 
         # ── Query frequency: count repeated queries to same parent domain ──
+        # freq_threshold=0 disables frequency detection entirely
         with self._lock:
             fkey = (src, parent)
             self._freq[fkey] = [
@@ -847,7 +867,10 @@ class DnsRule:
             self._freq[fkey].append(now)
             query_count = len(self._freq[fkey])
 
-        high_freq = query_count >= self._freq_threshold
+        high_freq = (
+            self._freq_threshold > 0
+            and query_count >= self._freq_threshold
+        )
 
         if not (high_ent or too_long or high_freq):
             return None
