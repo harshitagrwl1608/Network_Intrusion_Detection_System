@@ -1,12 +1,12 @@
-scenario_id,expected_rule,description
-S01,BLOCKLIST,Host contacts known-malicious IP
-S02,PORT_SCAN,"Vertical port scan: one src, many ports, one target"
-S03,PORT_SCAN,"Horizontal port scan: one src, one port, many hosts"
-S04,SYN_FLOOD,SYN burst: 120 SYNs to port 80 in <10s
-S05,ARP_SPOOF,ARP identity change: gateway MAC changes
-S06,PAYLOAD_HIT,SQLi pattern in HTTP request body
-S07,PAYLOAD_HIT,CMD_INJECTION / reverse shell in HTTP payload
-S08,PAYLOAD_HIT,Log4Shell JNDI injection in User-Agent
-S09,PAYLOAD_HIT,Plaintext password= in HTTP POST body
-S10,DNS_ANOMALY,High-entropy DGA-like DNS query
-S11,DNS_ANOMALY,Unusually long DNS query (>60 chars)
+scenario_id,expected_rule,src_ip,dst_ip,dst_port,protocol,description
+S01,BLOCKLIST,192.168.1.55,198.51.100.42,443,TCP,Host contacts known-malicious IP
+S02,PORT_SCAN,192.168.1.105,192.168.1.1,,TCP,"Vertical port scan: one src, many ports, one target"
+S03,PORT_SCAN,10.0.0.50,,22,TCP,"Horizontal port scan: one src, one port, many hosts"
+S04,SYN_FLOOD,192.168.1.200,192.168.1.1,80,TCP,SYN burst: 120 SYNs to port 80 in <10s
+S05,ARP_SPOOF,192.168.1.1,,,ARP,ARP identity change: gateway MAC changes
+S06,PAYLOAD_HIT,192.168.1.77,192.168.1.1,80,TCP,SQLi pattern in HTTP request body
+S07,PAYLOAD_HIT,192.168.1.78,192.168.1.1,80,TCP,CMD_INJECTION / reverse shell in HTTP payload
+S08,PAYLOAD_HIT,192.168.1.79,192.168.1.1,8080,TCP,Log4Shell JNDI injection in User-Agent
+S09,PAYLOAD_HIT,192.168.1.80,192.168.1.1,80,TCP,Plaintext password= in HTTP POST body
+S10,DNS_ANOMALY,192.168.1.88,8.8.8.8,53,UDP,High-entropy DGA-like DNS query
+S11,DNS_ANOMALY,192.168.1.89,8.8.8.8,53,UDP,Unusually long DNS query (>60 chars)

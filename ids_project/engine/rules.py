@@ -126,8 +126,15 @@ class BlocklistRule:
             self._networks = []
 
     def _in_blocklist(self, ip: str) -> bool:
-        """Check exact set then CIDR networks."""
-        if ip in self._exact:
+        """Check exact set then CIDR networks.
+        Normalises the observed IP before exact matching so that
+        equivalent IPv6 spellings (e.g. ::1 vs ::0:1) resolve correctly.
+        """
+        try:
+            canon = str(ipaddress.ip_address(ip))
+        except ValueError:
+            canon = ip  # not a valid IP — try raw string
+        if canon in self._exact:
             return True
         try:
             addr = ipaddress.ip_address(ip)
@@ -236,14 +243,28 @@ class PortScanRule:
         now = record.get("timestamp", time.time())
 
         with self._lock:
-            # --- Vertical scan check ---
+            # Always update BOTH vertical and horizontal histories first,
+            # then check thresholds. This ensures a packet contributes to
+            # both scan dimensions even when one threshold fires. (P2 §4)
+
+            # --- Vertical history update ---
             vkey = (src, dst_ip)
             self._vert[vkey] = [(t, p) for t, p in self._vert[vkey]
                                 if now - t <= self.window]
             self._vert[vkey].append((now, dst_port))
             distinct_ports = len({p for _, p in self._vert[vkey]})
 
-            if distinct_ports >= self.threshold:
+            # --- Horizontal history update ---
+            hkey = (src, dst_port)
+            self._horiz[hkey] = [(t, ip) for t, ip in self._horiz[hkey]
+                                  if now - t <= self.window]
+            self._horiz[hkey].append((now, dst_ip))
+            distinct_hosts = len({ip for _, ip in self._horiz[hkey]})
+
+            vert_fired  = distinct_ports >= self.threshold
+            horiz_fired = distinct_hosts >= self.threshold
+
+            if vert_fired:
                 window_start = now - self.window
                 self._vert[vkey] = []  # reset to prevent alert storm
                 logger.debug(
@@ -275,14 +296,7 @@ class PortScanRule:
                     "window_end": now,
                 }
 
-            # --- Horizontal scan check ---
-            hkey = (src, dst_port)
-            self._horiz[hkey] = [(t, ip) for t, ip in self._horiz[hkey]
-                                  if now - t <= self.window]
-            self._horiz[hkey].append((now, dst_ip))
-            distinct_hosts = len({ip for _, ip in self._horiz[hkey]})
-
-            if distinct_hosts >= self.threshold:
+            if horiz_fired:
                 window_start = now - self.window
                 self._horiz[hkey] = []
                 logger.debug(
@@ -450,9 +464,14 @@ class ArpSpoofRule:
             self._table = {}
 
     def _save(self):
-        os.makedirs(os.path.dirname(self.table_path), exist_ok=True)
-        with open(self.table_path, "w") as f:
+        # os.path.dirname returns '' for bare filenames (e.g. 'arp_table.json');
+        # makedirs('') would raise an error on some platforms.
+        d = os.path.dirname(self.table_path) or "."
+        os.makedirs(d, exist_ok=True)
+        tmp = self.table_path + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(self._table, f, indent=2)
+        os.replace(tmp, self.table_path)
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "ARP":
@@ -536,7 +555,11 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
         "CMD_INJECTION",
         re.compile(
             rb"(?i)(/bin/sh|/bin/bash|/etc/passwd|cmd\.exe|powershell\.exe"
-            rb"|\$\(|`[^`]+`|bash\s+-i\s+>&\s*/dev/tcp/|nc\s+-e\s+/bin)"
+            rb"|\$\(|`[^`]+`"
+            # Reverse-shell patterns: raw 'bash -i >& /dev/tcp/' AND
+            # standalone '/dev/tcp/' (covers URL-encoded forms: bash+-i+>%26+/dev/tcp/)
+            rb"|bash\s+-i\s+>&\s*/dev/tcp/|/dev/tcp/"
+            rb"|nc\s+-e\s+/bin)"
         ),
         "heuristic",
     ),
@@ -607,11 +630,17 @@ class PayloadRule:
         dst_port = record.get("dst_port") or 0
         src_port = record.get("src_port") or 0
 
-        # Only inspect on plaintext ports; skip if this appears to be
-        # a server-direction response (src_port in DPI_PORTS) — the
-        # matching response to a benign client request should not be flagged
-        # as an attack originating from the server.
+        # Direction decision (P1 §3.4 direction fix):
+        # - Both dst and src NOT in DPI_PORTS → not a plaintext app port, skip.
+        # - src_port IS a known service port AND dst_port is NOT → this looks
+        #   like a server responding to a client (e.g. HTTP server replying);
+        #   we do not want to flag the server's response as an attack.
+        # - Otherwise (dst_port IS a service port) → treat as client→server;
+        #   inspect it.
         if dst_port not in _DPI_PORTS and src_port not in _DPI_PORTS:
+            return None
+        if src_port in _DPI_PORTS and dst_port not in _DPI_PORTS:
+            # Server responding to a client — skip inspection
             return None
 
         sample = payload[: self.max_bytes]
@@ -672,13 +701,18 @@ class PayloadRule:
 # =============================================================================
 
 # Domains whose labels are legitimately high-entropy (CDN, tracking, etc.)
+# IMPORTANT: This list should be kept narrow. Broad shared-hosting suffixes
+# (e.g. *.github.io, *.cloudfront.net) can also host malicious content, so
+# they are NOT included. Add only infrastructure you explicitly trust and own.
 _DGA_WHITELIST_SUFFIXES: tuple[str, ...] = (
     ".cloudflare.com", ".akamai.net", ".akamaiedge.net",
     ".cdn.ampproject.org", ".amazonaws.com", ".fastly.net",
     ".google.com", ".googleapis.com", ".gstatic.com",
     ".doubleclick.net", ".googlevideo.com", ".fbcdn.net",
-    ".azure.com", ".azurefd.net", ".cloudfront.net",
-    ".github.io", ".s3.amazonaws.com",
+    ".azure.com", ".azurefd.net",
+    # NOTE: github.io, cloudfront.net, s3.amazonaws.com are intentionally
+    # NOT included — shared-hosting providers can host both legit and abusive
+    # content under the same suffix. Add specific domains via config instead.
 )
 
 
@@ -693,19 +727,23 @@ def _shannon_entropy(s: str) -> float:
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.2"
+    rule_version = "1.3"
 
-    # Alert dedup: don't re-alert on the same (src, domain) within this window
+    # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
 
-    # Query-frequency detection: alert if a src queries the same
-    # parent domain more than FREQ_THRESHOLD times in FREQ_WINDOW seconds
-    FREQ_THRESHOLD = 20
-    FREQ_WINDOW = 60
-
-    def __init__(self, entropy_threshold: float = 3.8, max_query_len: int = 60):
+    def __init__(
+        self,
+        entropy_threshold: float = 3.8,
+        max_query_len: int = 60,
+        freq_threshold: int = 20,
+        freq_window: int = 60,
+    ):
         self.entropy_threshold = entropy_threshold
         self.max_query_len     = max_query_len
+        # Frequency detection parameters — wired from config via RuleEngine (P1)
+        self._freq_threshold   = freq_threshold
+        self._freq_window      = freq_window
         self._lock = threading.RLock()
 
         # (src_ip, domain) → last_alert_time  (alert dedup)
@@ -715,8 +753,27 @@ class DnsRule:
         self._freq: dict[tuple, list] = defaultdict(list)
 
     def _parent_domain(self, domain: str) -> str:
-        """Return the registrable parent domain (last two labels)."""
+        """
+        Return a stable grouping key for the domain.
+
+        Using only the last two labels (e.g. 'example.com') works for most
+        gTLDs but breaks for multi-label public suffixes like 'co.uk':
+        'one.example.co.uk' and 'two.other.co.uk' would both collapse to
+        'co.uk', aggregating unrelated activity.
+
+        For now we use a deliberately limited heuristic: if the TLD-1 label
+        looks like a country-code + second-level pair (len <= 3, all alpha),
+        take the last THREE labels.  This handles co.uk, com.au, org.in etc.
+        A full Public Suffix List library (tldextract) would be more correct
+        and should be introduced when the project adds a dependency manager.
+        """
         labels = domain.rstrip(".").split(".")
+        if len(labels) >= 3:
+            tld   = labels[-1]   # e.g. 'uk'
+            tld_1 = labels[-2]   # e.g. 'co'
+            if len(tld) <= 3 and len(tld_1) <= 3 and tld_1.isalpha():
+                # Likely a multi-label TLD (co.uk, com.au, org.in ...)
+                return ".".join(labels[-3:])
         return ".".join(labels[-2:]) if len(labels) >= 2 else domain
 
     def _prune_seen(self, now: float):
@@ -724,7 +781,7 @@ class DnsRule:
         self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
 
     def prune_stale(self, now: float):
-        cutoff = now - self.FREQ_WINDOW
+        cutoff = now - self._freq_window
         with self._lock:
             stale = [k for k, v in self._freq.items()
                      if not [t for t in v if t > cutoff]]
@@ -768,12 +825,12 @@ class DnsRule:
         with self._lock:
             fkey = (src, parent)
             self._freq[fkey] = [
-                t for t in self._freq[fkey] if now - t <= self.FREQ_WINDOW
+                t for t in self._freq[fkey] if now - t <= self._freq_window
             ]
             self._freq[fkey].append(now)
             query_count = len(self._freq[fkey])
 
-        high_freq = query_count >= self.FREQ_THRESHOLD
+        high_freq = query_count >= self._freq_threshold
 
         if not (high_ent or too_long or high_freq):
             return None
@@ -794,7 +851,7 @@ class DnsRule:
         if high_freq:
             reason.append(
                 f"query_count={query_count} to '{parent}' "
-                f"in {self.FREQ_WINDOW}s (≥{self.FREQ_THRESHOLD})"
+                f"in {self._freq_window}s (≥{self._freq_threshold})"
             )
 
         sub_type = "DNS_FREQ" if high_freq and not (high_ent or too_long) \
@@ -822,10 +879,10 @@ class DnsRule:
                 "entropy": round(entropy, 3),
                 "sub_type": sub_type,
                 "query_count_in_window": query_count,
-                "freq_window_s": self.FREQ_WINDOW,
-                "freq_threshold": self.FREQ_THRESHOLD,
+                "freq_window_s": self._freq_window,
+                "freq_threshold": self._freq_threshold,
             },
-            "window_start": now - self.FREQ_WINDOW if high_freq else None,
+            "window_start": now - self._freq_window if high_freq else None,
             "window_end": now if high_freq else None,
         }
 
@@ -872,6 +929,9 @@ class RuleEngine:
             DnsRule(
                 entropy_threshold=getattr(cfg, "DNS_ENTROPY_THRESHOLD", 3.8),
                 max_query_len=getattr(cfg, "DNS_QUERY_MAX_LEN", 60),
+                # Wire frequency config from environment (P1 — was hard-coded)
+                freq_threshold=getattr(cfg, "DNS_FREQ_THRESHOLD", 20),
+                freq_window=getattr(cfg, "DNS_FREQ_WINDOW", 60),
             ),
         ]
 

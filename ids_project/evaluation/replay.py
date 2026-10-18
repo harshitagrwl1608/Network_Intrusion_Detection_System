@@ -86,9 +86,30 @@ def main():
     bl_path = args.blocklist or config.BLOCKLIST_PATH
     bl_url  = config.BLOCKLIST_URL if not args.blocklist else None
 
-    if not os.path.exists(bl_path) and not bl_url:
-        logging.warning(f"Blocklist not found at '{bl_path}' and no download URL — "
-                        "BLOCKLIST rule will be disabled for this replay.")
+    # Fail clearly if the blocklist file is missing and there is no URL to
+    # download from. Without this, load_blocklist() would crash with a
+    # confusing FileNotFoundError on the open() call. (P0)
+    if not os.path.exists(bl_path):
+        if bl_url:
+            logging.info(f"Blocklist missing at '{bl_path}' — will download from URL")
+        else:
+            logging.warning(
+                f"Blocklist not found at '{bl_path}' and no download URL configured. "
+                "BLOCKLIST rule will be DISABLED for this replay. "
+                "Pass --blocklist <path> or set BLOCKLIST_URL in config to enable it."
+            )
+            # Return an empty, explicitly disabled blocklist
+            from engine.blocklist import BlocklistData
+            blocklist = BlocklistData(exact=set(), networks=[])
+            conn = get_connection()
+            init_db(conn)
+            engine = RuleEngine(conn, blocklist, config)
+            logging.info(f"Replaying: {args.pcap}")
+            replay_pcap(args.pcap, engine)
+            engine.flush()
+            logging.info("Replay complete. Alerts written to database.")
+            print(f"Done. Alerts are in: {config.SQLITE_PATH}")
+            return
 
     blocklist = load_blocklist(bl_path, url=bl_url)
     engine = RuleEngine(conn, blocklist, config)

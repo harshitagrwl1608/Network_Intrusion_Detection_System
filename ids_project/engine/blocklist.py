@@ -94,10 +94,10 @@ def load_blocklist(path: str, url: str = None) -> BlocklistData:
                 except ValueError:
                     skipped += 1
             else:
-                # Plain IP address
+                # Plain IP address — canonicalize so equivalent spellings
+                # (e.g. '::0:1' == '::1') map to the same key. (P2)
                 try:
-                    ipaddress.ip_address(token)  # validate
-                    exact.add(token)
+                    exact.add(str(ipaddress.ip_address(token)))
                 except ValueError:
                     skipped += 1
 
