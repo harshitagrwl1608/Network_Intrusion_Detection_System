@@ -942,13 +942,14 @@ class RuleEngine:
     valuable and should be persisted.
     """
 
-    def __init__(self, db_conn, blocklist, cfg):
+    def __init__(self, db_conn, blocklist, cfg, event_clock=None):
         from storage.db import write_alert, upsert_device
         import engine.rules as _rules_mod
         import queue
 
         self._write_alert  = write_alert
         self._upsert_device = upsert_device
+        self._event_clock = event_clock
 
         # Load trusted hosts from config into module-level set
         trusted = getattr(cfg, "TRUSTED_HOSTS", set())
@@ -1007,9 +1008,15 @@ class RuleEngine:
         atexit.register(self.flush)
 
     def _gc_loop(self):
+        """
+        Periodically prune stale stateful rule histories.
+        clock: uses self._event_clock if provided (e.g. during replay),
+        otherwise falls back to time.time.
+        """
+        clock = self._event_clock or time.time
         while not self._stop_event.is_set():
             time.sleep(10)
-            now = time.time()
+            now = clock()
             for rule in self.rules:
                 if hasattr(rule, "prune_stale"):
                     try:

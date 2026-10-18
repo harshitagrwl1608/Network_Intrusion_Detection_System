@@ -5,8 +5,9 @@
 **Base Commit:** `5d22fba`  
 **Cycle 1 Commit:** `73c281f`  
 **Cycle 2 Commit:** `d788522`  
+**Cycle 3 Commit:** `84f7534`  
 **Session Started:** 2026-10-19 01:42:10 +05:30  
-**Status:** In Progress (Cycle 3 Complete)
+**Status:** In Progress (Cycle 4 Complete)
 
 ---
 
@@ -93,11 +94,39 @@ Under the initial architecture (`5d22fba`):
 - `python3 -m unittest ids_project/tests/test_dns_and_arp_detection.py`
   - Before fix: `FAILED (failures=3)` — `DNS_FREQ_THRESHOLD=0` alerted on first query; DNS tunneling suppressed under allowed suffix; ARP alert storm.
   - After fix: `OK (Ran 3 tests in 0.002s)`.
+- Commit: `84f7534` (pushed to `origin/antigravity/overnight-work`).
+
+---
+
+## Cycle 4: Priority 2 — Deterministic PCAP Replay and Historical Log Parsing
+
+### 1. Root Cause Hypothesis
+- **Full-date tcpdump Text Logs:** README documented `tcpdump -tttt -nn -r file.pcap > file.log`, which generates timestamps formatted as `YYYY-MM-DD HH:MM:SS.frac`. The parser regex strictly required starting with `HH:MM:SS`, skipping 100% of full-date lines and silently producing 0 processed records.
+- **Historical State Pruning by GC Loop:** `RuleEngine._gc_loop` ran every 10 seconds and passed wall-clock `time.time()` to `rule.prune_stale(now)`. During offline replay of historical captures (timestamps in past years or synthetic epoch fixtures), the wall clock caused active sliding-window state to be pruned mid-replay.
+
+### 2. Implementation
+- In `ids_project/capture/sniffer.py`:
+  - Extended `_replay_text_log` regex to match optional `YYYY-MM-DD` date prefix alongside `HH:MM:SS[.frac]`.
+  - Added timestamp parser handling `%Y-%m-%d %H:%M:%S.%f`, `%Y-%m-%d %H:%M:%S`, `%H:%M:%S.%f`, and `%H:%M:%S`.
+  - Extracted initial SYN (`[S]`) vs SYN-ACK (`[S.]`) for text-based replays.
+- In `ids_project/engine/rules.py`:
+  - Added `event_clock` parameter to `RuleEngine.__init__` and `_gc_loop`, allowing replay tools to pass a packet-progress clock instead of wall-clock time.
+- Added regression test suite: `ids_project/tests/test_pcap_replay_and_parsing.py`.
+
+### 3. Files Changed
+- `ids_project/capture/sniffer.py`
+- `ids_project/engine/rules.py`
+- `ids_project/tests/test_pcap_replay_and_parsing.py` (New regression test suite)
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_pcap_replay_and_parsing.py`
+  - Before fix: `FAILED (failures=1)` — 0 records parsed from full-date tcpdump log.
+  - After fix: `OK (Ran 2 tests in 0.004s)`.
 - `python3 -m unittest discover ids_project/tests`
-  - Result: `Ran 10 tests in 1.525s — OK`.
+  - Result: `Ran 12 tests in 1.450s — OK`.
 - `git diff --check`: Exit code 0.
 
 ---
 
 ## Remaining Backlog & Next Cycle
-- **Cycle 4:** Priority 2 — Deterministic PCAP Replay and Historical Log Parsing (prevent GC thread wall-clock corruption during offline replay, support full-date tcpdump text logs).
+- **Cycle 5:** Priority 2 — Repeatable Automated Evaluation Runner (isolated temporary databases, separate attack and benign evaluations, per-rule metrics reporting).
