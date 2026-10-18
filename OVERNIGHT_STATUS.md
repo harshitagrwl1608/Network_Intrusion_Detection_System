@@ -6,8 +6,9 @@
 **Cycle 1 Commit:** `73c281f`  
 **Cycle 2 Commit:** `d788522`  
 **Cycle 3 Commit:** `84f7534`  
+**Cycle 4 Commit:** `bfdf511`  
 **Session Started:** 2026-10-19 01:42:10 +05:30  
-**Status:** In Progress (Cycle 4 Complete)
+**Status:** In Progress (Cycle 5 Complete)
 
 ---
 
@@ -122,11 +123,42 @@ Under the initial architecture (`5d22fba`):
 - `python3 -m unittest ids_project/tests/test_pcap_replay_and_parsing.py`
   - Before fix: `FAILED (failures=1)` — 0 records parsed from full-date tcpdump log.
   - After fix: `OK (Ran 2 tests in 0.004s)`.
+- Commit: `bfdf511` (pushed to `origin/antigravity/overnight-work`).
+
+---
+
+## Cycle 5: Priority 2 — Repeatable Isolated Evaluation Runner
+
+### 1. Root Cause Hypothesis
+- In earlier versions, evaluation against attack and benign captures reused a fixed `/tmp` SQLite DB and shared ARP table state across runs without clean resets.
+- If an attack PCAP contaminated the ARP table, subsequent benign replays would falsely flag ARP spoofing alerts.
+- There was no single automated command that created fresh isolated DBs/ARP state for both attack and benign evaluation, computed TP/FN/FP metrics against labelled ground truth, and cleaned up temporary artifacts safely.
+
+### 2. Implementation
+- Created `ids_project/evaluation/run_eval.py`:
+  - Dynamically provisions fresh temporary SQLite databases and isolated ARP JSON state per phase (`_fresh_tmp_db()`, `_fresh_tmp_arp()`).
+  - Replays attack PCAP into isolated attack DB; matches alerts bijectively against scenario manifest `test_labels.csv`.
+  - Replays benign PCAP into isolated benign DB; ensures zero false-positive alerts on benign traffic.
+  - Computes Precision, Recall, F1, and per-rule breakdown (TP/FN/FP).
+  - Automatically unlinks temporary DB and ARP files upon completion.
+  - Exits 0 on clean pass (100% scenario recall, 0 benign false positives).
+- Added regression test suite: `ids_project/tests/test_run_eval.py`.
+
+### 3. Files Changed
+- `ids_project/evaluation/run_eval.py`
+- `ids_project/tests/test_run_eval.py` (New regression test suite)
+
+### 4. Commands Executed & Test Results
+- `python3 evaluation/run_eval.py`:
+  - Scenarios: 11/11 True Positives (100.0% Recall, 100.0% Precision, 100.0% F1).
+  - Per-rule breakdown: ARP_SPOOF (1/1), BLOCKLIST (1/1), DNS_ANOMALY (2/2), PAYLOAD_HIT (4/4), PORT_SCAN (2/2), SYN_FLOOD (1/1).
+  - Benign traffic false positives: 0.
+  - Exit code: 0.
 - `python3 -m unittest discover ids_project/tests`
-  - Result: `Ran 12 tests in 1.450s — OK`.
+  - Result: `Ran 13 tests in 3.220s — OK`.
 - `git diff --check`: Exit code 0.
 
 ---
 
 ## Remaining Backlog & Next Cycle
-- **Cycle 5:** Priority 2 — Repeatable Automated Evaluation Runner (isolated temporary databases, separate attack and benign evaluations, per-rule metrics reporting).
+- **Cycle 6:** Priority 3 — Investigation and Security (render saved structured alert evidence in dashboard, correct outdated README claims and rule descriptions).
