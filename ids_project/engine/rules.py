@@ -935,13 +935,27 @@ class RuleEngine:
             ),
         ]
 
-        # Bounded async writer queue with explicit stop sentinel
-        self._write_queue: queue.Queue = queue.Queue(maxsize=2000)
+        # Dedicated write queues: alerts NEVER drop; devices have bounded queue + dedup
+        self._alert_queue: queue.Queue = queue.Queue()
+        self._device_queue: queue.Queue = queue.Queue(maxsize=1000)
+        self._seen_devices: set = set()
+        self._stats = {
+            "alert_writes": 0,
+            "device_writes": 0,
+            "alerts_dropped": 0,
+            "devices_dropped": 0,
+            "shutdown_timeout": False,
+        }
         self._stop_event = threading.Event()
-        self._writer_thread = threading.Thread(
-            target=self._db_writer_loop, daemon=True, name="db-writer"
+
+        self._alert_writer = threading.Thread(
+            target=self._alert_writer_loop, daemon=True, name="alert-writer"
         )
-        self._writer_thread.start()
+        self._device_writer = threading.Thread(
+            target=self._device_writer_loop, daemon=True, name="device-writer"
+        )
+        self._alert_writer.start()
+        self._device_writer.start()
 
         # GC thread for stateful rules
         self._gc_thread = threading.Thread(
@@ -963,47 +977,76 @@ class RuleEngine:
                     except Exception as e:
                         logger.error(f"Rule GC error for {rule.name}: {e}")
 
-    def _db_writer_loop(self):
+    def _alert_writer_loop(self):
+        """Drain the alert queue. Every alert MUST be persisted; never drops."""
         import queue as _queue
         from storage.db import get_connection
         conn = get_connection()
         while True:
             try:
-                task, data = self._write_queue.get(timeout=1)
-                if task == "stop":
-                    self._write_queue.task_done()
+                sentinel, data = self._alert_queue.get(timeout=1)
+                if sentinel == "stop":
+                    self._alert_queue.task_done()
                     break
-                if task == "alert":
+                try:
                     self._write_alert(conn, data)
-                elif task == "device":
-                    self._upsert_device(conn, data["mac"], data["ip"])
-                self._write_queue.task_done()
+                    self._stats["alert_writes"] += 1
+                except Exception as e:
+                    logger.error(f"Alert write FAILED (data not persisted): {e} | {data}")
+                self._alert_queue.task_done()
             except _queue.Empty:
                 if self._stop_event.is_set():
                     break
-            except Exception as e:
-                logger.error(f"DB writer error: {e}")
-                try:
-                    self._write_queue.task_done()
-                except Exception:
-                    pass
 
-    def _enqueue(self, task: str, data):
-        """Put work onto the bounded queue; drop and log if full."""
+    def _device_writer_loop(self):
+        """Drain the device queue. Drops are counted but non-fatal."""
         import queue as _queue
-        try:
-            self._write_queue.put_nowait((task, data))
-        except _queue.Full:
-            logger.warning(f"Write queue full — dropping {task} entry")
+        from storage.db import get_connection
+        conn = get_connection()
+        while True:
+            try:
+                sentinel, data = self._device_queue.get(timeout=1)
+                if sentinel == "stop":
+                    self._device_queue.task_done()
+                    break
+                try:
+                    self._upsert_device(conn, data["mac"], data["ip"])
+                    self._stats["device_writes"] += 1
+                except Exception as e:
+                    logger.error(f"Device write error: {e}")
+                self._device_queue.task_done()
+            except _queue.Empty:
+                if self._stop_event.is_set():
+                    break
 
     def flush(self):
-        """Signal stop, wait for pending writes to drain."""
+        """
+        Signal stop and drain pending writes reliably.
+        Waits for ALL alert writes to complete or until the writer thread exits.
+        Hard timeout of 10 s prevents infinite hang.
+        """
         self._stop_event.set()
+
+        # Send stop sentinels
+        self._alert_queue.put(("stop", None))
         try:
-            self._write_queue.put_nowait(("stop", None))
+            self._device_queue.put_nowait(("stop", None))
         except Exception:
             pass
-        self._writer_thread.join(timeout=5)
+
+        # Wait for the alert writer thread to exit
+        self._alert_writer.join(timeout=10)
+        if self._alert_writer.is_alive():
+            logger.warning(
+                f"Alert writer thread still alive after flush timeout. "
+                f"Alerts written: {self._stats['alert_writes']}, "
+                f"queue depth: {self._alert_queue.qsize()}"
+            )
+            self._stats["shutdown_timeout"] = True
+
+        self._device_writer.join(timeout=3)
+
+        # Flush per-rule state (e.g. ARP table to disk)
         for rule in self.rules:
             if hasattr(rule, "flush"):
                 try:
@@ -1011,12 +1054,28 @@ class RuleEngine:
                 except Exception as e:
                     logger.error(f"Rule flush error: {e}")
 
+        logger.info(
+            f"RuleEngine shutdown: alerts={self._stats['alert_writes']}, "
+            f"devices={self._stats['device_writes']}, "
+            f"alerts_dropped={self._stats['alerts_dropped']}, "
+            f"devices_dropped={self._stats['devices_dropped']}"
+        )
+
     def check(self, record: dict):
-        # Track seen device
+        # Device dedup: only enqueue first-seen (mac, ip) per engine lifetime
+        # to prevent device churn from filling/crowding the write queues.
         mac = record.get("src_mac")
         ip  = record.get("src_ip")
         if mac and ip:
-            self._enqueue("device", {"mac": mac, "ip": ip})
+            dev_key = (mac, ip)
+            if dev_key not in self._seen_devices:
+                self._seen_devices.add(dev_key)
+                import queue as _queue
+                try:
+                    self._device_queue.put_nowait(("device", {"mac": mac, "ip": ip}))
+                except _queue.Full:
+                    self._stats["devices_dropped"] += 1
+                    logger.warning(f"Device queue full — dropped ({mac}, {ip})")
 
         # Run ALL rules — no early exit
         for rule in self.rules:
@@ -1028,10 +1087,11 @@ class RuleEngine:
                         "event_timestamp",
                         record.get("timestamp", time.time()),
                     )
-                    # Serialise evidence dict to JSON string for DB persistence (§3.7)
+                    # Serialise evidence dict to JSON string for DB persistence
                     if "evidence" in alert:
                         alert["evidence_json"] = json.dumps(alert["evidence"])
-                    self._enqueue("alert", alert)
+                    # Alerts go to the dedicated, never-dropping alert queue
+                    self._alert_queue.put(("alert", alert))
                     logger.info(
                         f"[ALERT] {alert['rule_name']} v{alert.get('rule_version','?')} "
                         f"— {alert['detail']}"

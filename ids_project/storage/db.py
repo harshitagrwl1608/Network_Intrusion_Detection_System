@@ -142,7 +142,8 @@ def get_connection():
         except ImportError:
             raise RuntimeError("psycopg2 not installed. Run: pip install psycopg2-binary")
     else:
-        os.makedirs(os.path.dirname(config.SQLITE_PATH), exist_ok=True)
+        d = os.path.dirname(config.SQLITE_PATH) or "."
+        os.makedirs(d, exist_ok=True)
         conn = sqlite3.connect(config.SQLITE_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
