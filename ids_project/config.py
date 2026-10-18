@@ -29,7 +29,9 @@ BLOCKLIST_URL = "https://feodotracker.abuse.ch/downloads/ipblocklist.txt"
 ARP_TABLE_PATH = "data/arp_table.json"
 
 # --- Detection Thresholds ---
-PORT_SCAN_THRESHOLD = int(os.getenv("PORT_SCAN_THRESHOLD", 15))   # distinct ports in window
+# After each change, replay a known-benign PCAP and verify FP rate stays low.
+# Then replay a known-attack PCAP and verify TPs still fire.
+PORT_SCAN_THRESHOLD = int(os.getenv("PORT_SCAN_THRESHOLD", 15))   # distinct ports OR hosts in window
 SYN_FLOOD_THRESHOLD = int(os.getenv("SYN_FLOOD_THRESHOLD", 100))  # SYN packets in window
 TIME_WINDOW = int(os.getenv("TIME_WINDOW", 10))                    # seconds
 
@@ -56,9 +58,14 @@ FEEDBACK_PATH = os.getenv("FEEDBACK_PATH", "data/feedback.jsonl")
 PAYLOAD_INSPECTION  = os.getenv("PAYLOAD_INSPECTION", "true").lower() == "true"
 PAYLOAD_MAX_BYTES   = int(os.getenv("PAYLOAD_MAX_BYTES", 512))   # cap per-packet bytes scanned
 
-# --- DNS / DGA Detection (DnsRule 1.2) ---
-DNS_ENTROPY_THRESHOLD = float(os.getenv("DNS_ENTROPY_THRESHOLD", 3.8))  # bits/char; DGA typically >4
-DNS_QUERY_MAX_LEN     = int(os.getenv("DNS_QUERY_MAX_LEN", 50))         # chars; legit domains <50
+# --- DNS / DGA Detection (DnsRule) ---
+# entropy_threshold: raise if too many FPs on random-looking but legit names.
+# Typical DGA entropy >= 3.8; short human-readable labels are ~2.5–3.2.
+DNS_ENTROPY_THRESHOLD = float(os.getenv("DNS_ENTROPY_THRESHOLD", 3.8))  # bits/char
+DNS_QUERY_MAX_LEN     = int(os.getenv("DNS_QUERY_MAX_LEN", 60))         # chars; legit domains <60
+# Query-frequency detection: alert if src queries same parent domain >= N times in T seconds.
+DNS_FREQ_THRESHOLD    = int(os.getenv("DNS_FREQ_THRESHOLD", 20))         # queries in window
+DNS_FREQ_WINDOW       = int(os.getenv("DNS_FREQ_WINDOW", 60))            # seconds
 
 # --- Analysis ---
 ANALYSIS_INTERVAL = int(os.getenv("ANALYSIS_INTERVAL", 30))       # seconds between runs

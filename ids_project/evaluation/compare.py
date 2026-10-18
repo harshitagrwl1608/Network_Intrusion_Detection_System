@@ -1,17 +1,44 @@
 """
 evaluation/compare.py
 ---------------------
-Compare custom IDS alerts vs Suricata alerts for the same traffic.
-Reads custom alerts from SQLite/PostgreSQL and Suricata eve.json,
-then computes TP / FP / FN and prints a summary table.
+Compare NetGuard IDS alerts vs Suricata alerts for the same traffic.
+
+This script runs in two explicitly distinct modes (§3.10 of roadmap):
+
+  --mode agreement  (default)
+      Compares NetGuard and Suricata output using a documented match key.
+      Reports agreement and disagreement — NOT ground-truth TP/FP/FN.
+      Suricata is treated as a comparative baseline, NOT as ground truth.
+
+  --mode ground-truth
+      Compares NetGuard output against a labelled scenario CSV
+      (see evaluation/scenarios/ for format).  This is the only mode
+      that supports valid precision/recall/F1 interpretation.
 
 Usage:
+  # Engine-agreement comparison (no ground truth):
   python evaluation/compare.py --eve /tmp/suricata/eve.json
 
-Prerequisite:
-  Run replay.py first to populate the custom engine's alert database.
+  # Ground-truth evaluation (requires a scenario labels CSV):
+  python evaluation/compare.py \\
+      --mode ground-truth \\
+      --labels evaluation/scenarios/test_labels.csv
+
+Prerequisite for agreement mode:
+  Run replay.py first to populate the custom engine alert database.
   Then run Suricata on the same .pcap:
     suricata -r capture.pcap -l /tmp/suricata/
+
+Match key (agreement mode):
+  src_ip, dst_ip, dst_port, protocol (if available) and timestamp within
+  TIMESTAMP_TOLERANCE seconds.  One Suricata event cannot match more than
+  one NetGuard alert (bijective matching).
+
+Interpretation note:
+  An alert produced ONLY by NetGuard is a "NetGuard-only" event —
+  NOT automatically a false positive.  An alert produced ONLY by Suricata
+  is a "Suricata-only" event — NOT automatically a false negative.
+  Different engines have different rules, thresholds and coverage.
 """
 
 import sys
@@ -31,6 +58,10 @@ from storage.db import get_connection, read_all_alerts
 TIMESTAMP_TOLERANCE = 5.0
 
 
+# ---------------------------------------------------------------------------
+# Suricata eve.json loader
+# ---------------------------------------------------------------------------
+
 def load_suricata_alerts(eve_path: str) -> list[dict]:
     """Parse eve.json and return list of alert dicts."""
     alerts = []
@@ -40,19 +71,21 @@ def load_suricata_alerts(eve_path: str) -> list[dict]:
                 event = json.loads(line.strip())
                 if event.get("event_type") == "alert":
                     ts_str = event.get("timestamp", "")
-                    # Parse ISO timestamp → unix float
                     try:
                         dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                         ts = dt.timestamp()
                     except Exception:
                         ts = 0.0
                     alerts.append({
-                        "timestamp":   ts,
-                        "src_ip":      event.get("src_ip"),
-                        "dst_ip":      event.get("dest_ip"),
-                        "dst_port":    event.get("dest_port"),
-                        "signature":   event.get("alert", {}).get("signature", ""),
-                        "category":    event.get("alert", {}).get("category", ""),
+                        "timestamp":  ts,
+                        "src_ip":     event.get("src_ip"),
+                        "dst_ip":     event.get("dest_ip"),
+                        "src_port":   event.get("src_port"),
+                        "dst_port":   event.get("dest_port"),
+                        "protocol":   event.get("proto", "").upper(),
+                        "signature":  event.get("alert", {}).get("signature", ""),
+                        "category":   event.get("alert", {}).get("category", ""),
+                        "severity":   event.get("alert", {}).get("severity"),
                     })
             except json.JSONDecodeError:
                 continue
@@ -60,90 +93,254 @@ def load_suricata_alerts(eve_path: str) -> list[dict]:
     return alerts
 
 
-def match_alerts(custom: list[dict], suricata: list[dict]) -> dict:
-    """
-    Simple matching: two alerts match if src_ip and dst_ip agree
-    and timestamps are within TIMESTAMP_TOLERANCE seconds.
-    Returns counts of TP, FP, FN.
-    """
-    matched_suricata = set()
-    true_positives = []
-    false_positives = []
+# ---------------------------------------------------------------------------
+# Matching helper
+# ---------------------------------------------------------------------------
 
-    for ca in custom:
+def _events_match(a: dict, b: dict, tolerance: float = TIMESTAMP_TOLERANCE) -> bool:
+    """
+    Two events match if src_ip, dst_ip and dst_port agree AND timestamps
+    are within tolerance.  Protocol is included when both sides provide it.
+    """
+    if a.get("src_ip") != b.get("src_ip"):
+        return False
+    if a.get("dst_ip") != b.get("dst_ip"):
+        return False
+    if a.get("dst_port") != b.get("dst_port"):
+        return False
+    # Protocol check only when both sides have a non-empty value
+    proto_a = (a.get("protocol") or "").upper()
+    proto_b = (b.get("protocol") or "").upper()
+    if proto_a and proto_b and proto_a != proto_b:
+        return False
+    time_diff = abs((a.get("timestamp") or 0) - (b.get("timestamp") or 0))
+    return time_diff <= tolerance
+
+
+# ---------------------------------------------------------------------------
+# Agreement mode (§3.10)
+# ---------------------------------------------------------------------------
+
+def match_alerts_agreement(netguard: list[dict], suricata: list[dict]) -> dict:
+    """
+    Bijective matching: each Suricata event can match at most one NetGuard alert.
+    Returns structured agreement/disagreement lists — NOT TP/FP/FN in the
+    ground-truth sense.
+    """
+    matched_suricata: set = set()
+    both: list = []          # matched in both engines
+    netguard_only: list = [] # NetGuard fired, Suricata did not (on same event)
+    suricata_only: list = [] # Suricata fired, NetGuard did not (on same event)
+
+    for ng in netguard:
         found = False
-        for i, sa in enumerate(suricata):
+        for i, sur in enumerate(suricata):
             if i in matched_suricata:
                 continue
-            ip_match = (ca.get("src_ip") == sa.get("src_ip") and
-                        ca.get("dst_ip") == sa.get("dst_ip"))
-            time_diff = abs((ca.get("timestamp") or 0) - (sa.get("timestamp") or 0))
-            if ip_match and time_diff <= TIMESTAMP_TOLERANCE:
+            if _events_match(ng, sur):
                 matched_suricata.add(i)
-                true_positives.append((ca, sa))
+                both.append((ng, sur))
                 found = True
                 break
         if not found:
-            false_positives.append(ca)
+            netguard_only.append(ng)
 
-    false_negatives = [sa for i, sa in enumerate(suricata) if i not in matched_suricata]
+    for i, sur in enumerate(suricata):
+        if i not in matched_suricata:
+            suricata_only.append(sur)
 
     return {
-        "tp": true_positives,
-        "fp": false_positives,
-        "fn": false_negatives,
+        "both": both,
+        "netguard_only": netguard_only,
+        "suricata_only": suricata_only,
     }
 
 
-def print_report(results: dict):
-    tp = len(results["tp"])
-    fp = len(results["fp"])
-    fn = len(results["fn"])
+def print_agreement_report(results: dict):
+    both          = len(results["both"])
+    ng_only       = len(results["netguard_only"])
+    sur_only      = len(results["suricata_only"])
+    total_ng      = both + ng_only
+    total_sur     = both + sur_only
 
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1        = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+    agreement_pct = both / max(total_ng, total_sur, 1) * 100
 
-    print("\n" + "=" * 60)
-    print("  IDS EVALUATION REPORT")
-    print("=" * 60)
-    print(f"  True Positives  (both detect):      {tp:4d}")
-    print(f"  False Positives (custom only):       {fp:4d}")
-    print(f"  False Negatives (Suricata only):     {fn:4d}")
-    print("-" * 60)
-    print(f"  Precision:   {precision * 100:.1f}%")
-    print(f"  Recall:      {recall    * 100:.1f}%")
-    print(f"  F1 Score:    {f1        * 100:.1f}%")
-    print("=" * 60)
+    print("\n" + "=" * 65)
+    print("  ENGINE AGREEMENT REPORT  (NetGuard vs Suricata)")
+    print("  NOTE: Suricata is a COMPARISON BASELINE, not ground truth.")
+    print("  'NetGuard-only' events are NOT automatically false positives.")
+    print("  'Suricata-only' events are NOT automatically missed attacks.")
+    print("=" * 65)
+    print(f"  NetGuard total alerts:       {total_ng:4d}")
+    print(f"  Suricata total alerts:       {total_sur:4d}")
+    print(f"  Matched by both engines:     {both:4d}")
+    print(f"  NetGuard-only:               {ng_only:4d}")
+    print(f"  Suricata-only:               {sur_only:4d}")
+    print(f"  Agreement rate:              {agreement_pct:.1f}%")
+    print("-" * 65)
+    print(f"  Match key: src_ip, dst_ip, dst_port, protocol, Δt≤{TIMESTAMP_TOLERANCE}s")
+    print("=" * 65)
 
-    if results["fp"]:
-        print("\n  Top False Positives (tune thresholds for these):")
-        for a in results["fp"][:5]:
-            print(f"    [{a['rule_name']}] {a['src_ip']} → {a['dst_ip']}:{a.get('dst_port','?')}  {a.get('detail','')[:60]}")
+    if results["netguard_only"]:
+        print("\n  NetGuard-only events (investigate for FP potential):")
+        for a in results["netguard_only"][:5]:
+            print(
+                f"    [{a.get('rule_name','?')}] "
+                f"{a.get('src_ip')} → {a.get('dst_ip')}:{a.get('dst_port','?')} "
+                f"  {str(a.get('detail',''))[:55]}"
+            )
 
-    if results["fn"]:
-        print("\n  Sample False Negatives (missed by custom engine):")
-        for a in results["fn"][:5]:
-            print(f"    {a['src_ip']} → {a['dst_ip']}  {a.get('signature','')[:60]}")
+    if results["suricata_only"]:
+        print("\n  Suricata-only events (investigate for coverage gaps):")
+        for a in results["suricata_only"][:5]:
+            print(
+                f"    {a.get('src_ip')} → {a.get('dst_ip')}:{a.get('dst_port','?')} "
+                f"  {str(a.get('signature',''))[:55]}"
+            )
     print()
 
 
+# ---------------------------------------------------------------------------
+# Ground-truth mode (§3.10)
+# ---------------------------------------------------------------------------
+
+def run_ground_truth(labels_path: str):
+    """
+    Compare NetGuard alerts against a labelled scenario CSV.
+
+    CSV format (see evaluation/scenarios/README.md for schema):
+      scenario_id, expected_rule, src_ip, dst_ip, dst_port, notes
+    """
+    import csv
+
+    conn = get_connection()
+    alerts = read_all_alerts(conn)
+
+    try:
+        with open(labels_path, newline="") as f:
+            reader = csv.DictReader(f)
+            scenarios = list(reader)
+    except FileNotFoundError:
+        print(f"ERROR: labels file not found: {labels_path}")
+        sys.exit(1)
+
+    print("\n" + "=" * 65)
+    print("  GROUND-TRUTH EVALUATION REPORT")
+    print("=" * 65)
+
+    matched_alerts: set = set()
+    tp_scenarios: list = []
+    fn_scenarios: list = []
+
+    for sc in scenarios:
+        expected_rule = sc.get("expected_rule", "").strip()
+        exp_src = sc.get("src_ip", "").strip()
+        exp_dst = sc.get("dst_ip", "").strip()
+        exp_port_str = sc.get("dst_port", "").strip()
+        exp_port = int(exp_port_str) if exp_port_str.isdigit() else None
+
+        found = False
+        for i, alert in enumerate(alerts):
+            if i in matched_alerts:
+                continue
+            rule_match = (not expected_rule or
+                          alert.get("rule_name") == expected_rule)
+            src_match  = (not exp_src  or alert.get("src_ip") == exp_src)
+            dst_match  = (not exp_dst  or alert.get("dst_ip") == exp_dst)
+            port_match = (exp_port is None or alert.get("dst_port") == exp_port)
+            if rule_match and src_match and dst_match and port_match:
+                matched_alerts.add(i)
+                tp_scenarios.append((sc, alert))
+                found = True
+                break
+        if not found:
+            fn_scenarios.append(sc)
+
+    fp_alerts = [a for i, a in enumerate(alerts) if i not in matched_alerts]
+
+    tp = len(tp_scenarios)
+    fp = len(fp_alerts)
+    fn = len(fn_scenarios)
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1        = (2 * precision * recall / (precision + recall)) \
+                if (precision + recall) > 0 else 0.0
+
+    print(f"  Scenarios (labelled expected):       {len(scenarios):4d}")
+    print(f"  Detected  (TP — scenario matched):   {tp:4d}")
+    print(f"  Missed    (FN — no matching alert):  {fn:4d}")
+    print(f"  Extra     (FP — no matching scenario):{fp:4d}")
+    print("-" * 65)
+    print(f"  Precision:   {precision * 100:.1f}%")
+    print(f"  Recall:      {recall    * 100:.1f}%")
+    print(f"  F1 Score:    {f1        * 100:.1f}%")
+    print("=" * 65)
+
+    if fn_scenarios:
+        print("\n  Missed scenarios (FN):")
+        for sc in fn_scenarios[:5]:
+            print(f"    [{sc.get('expected_rule')}] "
+                  f"{sc.get('src_ip')} → {sc.get('dst_ip')}:{sc.get('dst_port')} "
+                  f"  {sc.get('notes','')[:40]}")
+
+    if fp_alerts:
+        print("\n  Unmatched NetGuard alerts (potential FP — investigate):")
+        for a in fp_alerts[:5]:
+            print(f"    [{a.get('rule_name')}] "
+                  f"{a.get('src_ip')} → {a.get('dst_ip')}:{a.get('dst_port','?')} "
+                  f"  {str(a.get('detail',''))[:40]}")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main():
-    parser = argparse.ArgumentParser(description="Compare custom IDS vs Suricata")
-    parser.add_argument("--eve", required=True, help="Path to Suricata eve.json")
+    parser = argparse.ArgumentParser(
+        description="NetGuard — compare with Suricata (agreement) or labelled scenarios (ground-truth)"
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["agreement", "ground-truth"],
+        default="agreement",
+        help=(
+            "agreement: compare NetGuard vs Suricata output (default). "
+            "ground-truth: compare against a labelled scenario CSV."
+        ),
+    )
+    parser.add_argument(
+        "--eve",
+        help="Path to Suricata eve.json (required for agreement mode)",
+    )
+    parser.add_argument(
+        "--labels",
+        help="Path to labelled scenario CSV (required for ground-truth mode)",
+    )
     args = parser.parse_args()
 
+    if args.mode == "ground-truth":
+        if not args.labels:
+            print("ERROR: --labels is required for ground-truth mode")
+            sys.exit(1)
+        run_ground_truth(args.labels)
+        return
+
+    # Agreement mode (default)
+    if not args.eve:
+        print("ERROR: --eve is required for agreement mode")
+        sys.exit(1)
     if not os.path.exists(args.eve):
         print(f"ERROR: {args.eve} not found")
         sys.exit(1)
 
     conn = get_connection()
-    custom_alerts = read_all_alerts(conn)
-    logging.info(f"Custom engine alerts: {len(custom_alerts)}")
+    netguard_alerts = read_all_alerts(conn)
+    logging.info(f"NetGuard alerts: {len(netguard_alerts)}")
 
     suricata_alerts = load_suricata_alerts(args.eve)
-    results = match_alerts(custom_alerts, suricata_alerts)
-    print_report(results)
+    results = match_alerts_agreement(netguard_alerts, suricata_alerts)
+    print_agreement_report(results)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,12 @@
+scenario_id,expected_rule,description
+S01,BLOCKLIST,Host contacts known-malicious IP
+S02,PORT_SCAN,"Vertical port scan: one src, many ports, one target"
+S03,PORT_SCAN,"Horizontal port scan: one src, one port, many hosts"
+S04,SYN_FLOOD,SYN burst: 120 SYNs to port 80 in <10s
+S05,ARP_SPOOF,ARP identity change: gateway MAC changes
+S06,PAYLOAD_HIT,SQLi pattern in HTTP request body
+S07,PAYLOAD_HIT,CMD_INJECTION / reverse shell in HTTP payload
+S08,PAYLOAD_HIT,Log4Shell JNDI injection in User-Agent
+S09,PAYLOAD_HIT,Plaintext password= in HTTP POST body
+S10,DNS_ANOMALY,High-entropy DGA-like DNS query
+S11,DNS_ANOMALY,Unusually long DNS query (>60 chars)

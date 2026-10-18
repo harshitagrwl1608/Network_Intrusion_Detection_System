@@ -4,13 +4,27 @@ capture/sniffer.py
 Packet capture and field extraction.
 Uses Scapy to sniff on the chosen interface.
 
-Extracted fields per packet (minimal — no full raw data stored):
-  type, timestamp, src_ip, dst_ip, src_mac, dst_port, protocol, syn_flag
-  payload (bytes, capped at config.PAYLOAD_MAX_BYTES — for DPI rule)
-  dns_query (str, FQDN — for DNS anomaly rule)
-  (for ARP packets: type=ARP, src_ip, src_mac, dst_ip)
+Extracted fields per packet (normalized event schema):
+  type               -- "IP" | "ARP"
+  event_timestamp    -- capture/packet timestamp (pkt.time for PCAP replay;
+                        time.time() for live sniff). Use this for sliding-window
+                        rules so that PCAP replay is deterministic.
+  processing_timestamp -- wall-clock time when _extract() ran (always time.time()).
+  src_ip, dst_ip, src_mac
+  dst_port, src_port
+  protocol           -- "TCP" | "UDP" | "ICMP" | "ARP" | str(proto_num)
+  syn_flag           -- bool, True only for TCP SYN packets
+  icmp_type, icmp_code -- int, present only for ICMP packets
+  ip_len             -- total IP packet length in bytes (for volume tracking)
+  payload            -- bytes, capped at PAYLOAD_MAX_BYTES (for DPI rule)
+  dns_query          -- str FQDN (for DNS anomaly rule, UDP port 53 queries only)
 
-Requires: sudo / CAP_NET_RAW capability.
+For ARP packets: type=ARP, src_ip, src_mac, dst_ip are set; port/flag fields are None/False.
+
+Fields are None when the protocol does not provide them.
+Rules must fail safely when expected optional fields are absent.
+
+Requires: sudo / CAP_NET_RAW capability for live sniff.
 """
 
 import time
@@ -37,9 +51,34 @@ except Exception:
     _PAYLOAD_MAX_BYTES = 512
 
 
-def _extract(pkt) -> dict | None:
-    """Extract a normalised record dict from a raw Scapy packet."""
-    record = {"timestamp": time.time()}
+def _extract(pkt, capture_ts: float | None = None) -> dict | None:
+    """
+    Extract a normalised record dict from a raw Scapy packet.
+
+    Args:
+        pkt:        Raw Scapy packet.
+        capture_ts: Override for event_timestamp (use pkt.time during PCAP
+                    replay so that sliding-window rules are deterministic).
+                    If None, pkt.time is used when available, otherwise
+                    falls back to current wall-clock time.
+    """
+    now = time.time()  # processing wall-clock time — always real time
+
+    # Resolve event timestamp: explicit override → pkt.time → wall clock
+    if capture_ts is not None:
+        event_ts = float(capture_ts)
+    else:
+        try:
+            event_ts = float(pkt.time)
+        except Exception:
+            event_ts = now
+
+    record = {
+        "event_timestamp": event_ts,
+        "processing_timestamp": now,
+        # Legacy alias so existing rules that read record["timestamp"] still work
+        "timestamp": event_ts,
+    }
 
     # --- ARP packet ---
     if ARP in pkt:
@@ -49,8 +88,14 @@ def _extract(pkt) -> dict | None:
             "src_mac": pkt[ARP].hwsrc,
             "dst_ip": pkt[ARP].pdst,
             "dst_port": None,
+            "src_port": None,
             "protocol": "ARP",
             "syn_flag": False,
+            "icmp_type": None,
+            "icmp_code": None,
+            "ip_len": None,
+            "payload": b"",
+            "dns_query": None,
         })
         return record
 
@@ -60,11 +105,14 @@ def _extract(pkt) -> dict | None:
         proto_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
         proto = proto_map.get(proto_num, str(proto_num))
 
-        dst_port = None
-        src_port = None
-        syn_flag = False
-        payload  = b""
+        dst_port  = None
+        src_port  = None
+        syn_flag  = False
+        payload   = b""
         dns_query = None
+        icmp_type = None
+        icmp_code = None
+        ip_len    = pkt[IP].len  # total IP packet length in bytes
 
         if TCP in pkt:
             dst_port = pkt[TCP].dport
@@ -82,6 +130,11 @@ def _extract(pkt) -> dict | None:
                         dns_query = pkt[DNS].qd.qname.decode("utf-8", errors="replace")
                 except Exception:
                     dns_query = None
+        elif ICMP in pkt:
+            icmp_type = pkt[ICMP].type
+            icmp_code = pkt[ICMP].code
+            if Raw in pkt:
+                payload = bytes(pkt[Raw].load)[: _PAYLOAD_MAX_BYTES]
 
         record.update({
             "type": "IP",
@@ -92,6 +145,9 @@ def _extract(pkt) -> dict | None:
             "src_port": src_port,
             "protocol": proto,
             "syn_flag": syn_flag,
+            "icmp_type": icmp_type,
+            "icmp_code": icmp_code,
+            "ip_len": ip_len,
             "payload": payload,
             "dns_query": dns_query,
         })
@@ -104,6 +160,9 @@ def start_sniff(interface: str, rule_engine, packet_filter: str = "ip or arp"):
     """
     Start live packet capture on `interface`.
     Hands each packet to rule_engine.check() after extraction.
+
+    For live sniff, pkt.time is used as event_timestamp (Scapy sets this
+    from the kernel timestamp at capture time, which is accurate).
 
     Args:
         interface:     Network interface name (e.g. "eth0", "wlan0")
@@ -118,7 +177,8 @@ def start_sniff(interface: str, rule_engine, packet_filter: str = "ip or arp"):
 
     def _handle(pkt):
         try:
-            record = _extract(pkt)
+            # capture_ts=None → _extract() uses pkt.time (kernel timestamp)
+            record = _extract(pkt, capture_ts=None)
             if record:
                 rule_engine.check(record)
         except Exception as e:
@@ -251,7 +311,13 @@ def replay_pcap(pcap_path: str, rule_engine):
     packets = rdpcap(pcap_path)
     processed = 0
     for pkt in packets:
-        record = _extract(pkt)
+        # Pass pkt.time explicitly so that sliding-window rules use the
+        # original capture timestamps, making replay deterministic.
+        try:
+            capture_ts = float(pkt.time)
+        except Exception:
+            capture_ts = None
+        record = _extract(pkt, capture_ts=capture_ts)
         if record:
             rule_engine.check(record)
             processed += 1

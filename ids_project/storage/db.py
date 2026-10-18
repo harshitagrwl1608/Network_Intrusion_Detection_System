@@ -34,11 +34,18 @@ CREATE TABLE IF NOT EXISTS alerts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp   REAL    NOT NULL,
     rule_name   TEXT    NOT NULL,
+    rule_version TEXT,
     src_ip      TEXT,
     dst_ip      TEXT,
+    src_port    INTEGER,
     dst_port    INTEGER,
+    protocol    TEXT,
     detail      TEXT,
     severity    TEXT    DEFAULT 'medium',
+    confidence  TEXT    DEFAULT 'heuristic',
+    evidence_json TEXT,
+    window_start  REAL,
+    window_end    REAL,
     country     TEXT,
     country_code TEXT,
     city        TEXT
@@ -77,11 +84,18 @@ CREATE TABLE IF NOT EXISTS alerts (
     id          SERIAL  PRIMARY KEY,
     timestamp   DOUBLE PRECISION NOT NULL,
     rule_name   TEXT    NOT NULL,
+    rule_version TEXT,
     src_ip      TEXT,
     dst_ip      TEXT,
+    src_port    INTEGER,
     dst_port    INTEGER,
+    protocol    TEXT,
     detail      TEXT,
     severity    TEXT    DEFAULT 'medium',
+    confidence  TEXT    DEFAULT 'heuristic',
+    evidence_json TEXT,
+    window_start  DOUBLE PRECISION,
+    window_end    DOUBLE PRECISION,
     country     TEXT,
     country_code TEXT,
     city        TEXT
@@ -152,17 +166,24 @@ def init_db(conn):
 def _migrate_columns(conn, cur):
     """Add new columns to existing databases without dropping data."""
     migrations = [
-        ("alerts",       "country",      "TEXT"),
-        ("alerts",       "country_code", "TEXT"),
-        ("alerts",       "city",         "TEXT"),
-        ("seen_devices", "vendor",       "TEXT"),
+        # GeoIP
+        ("alerts",       "country",       "TEXT"),
+        ("alerts",       "country_code",  "TEXT"),
+        ("alerts",       "city",          "TEXT"),
+        ("seen_devices", "vendor",        "TEXT"),
+        # §3.7 — structured evidence and extended alert schema
+        ("alerts",       "rule_version",  "TEXT"),
+        ("alerts",       "src_port",      "INTEGER"),
+        ("alerts",       "protocol",      "TEXT"),
+        ("alerts",       "confidence",    "TEXT"),
+        ("alerts",       "evidence_json", "TEXT"),
+        ("alerts",       "window_start",  "REAL"),
+        ("alerts",       "window_end",    "REAL"),
     ]
     for table, col, col_type in migrations:
         try:
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
         except Exception as exc:
-            # Ignore "duplicate column" errors — that just means this migration
-            # was already applied. Re-raise or log anything unexpected.
             err_msg = str(exc).lower()
             if "duplicate column" not in err_msg and "already exists" not in err_msg:
                 import logging as _log
@@ -178,22 +199,39 @@ def _migrate_columns(conn, cur):
 def write_alert(conn, alert: dict):
     """Insert one alert into the alerts table. Thread-safe."""
     sql = """
-        INSERT INTO alerts (timestamp, rule_name, src_ip, dst_ip, dst_port, detail, severity,
-                            country, country_code, city)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO alerts (
+            timestamp, rule_name, rule_version,
+            src_ip, dst_ip, src_port, dst_port, protocol,
+            detail, severity, confidence,
+            evidence_json, window_start, window_end,
+            country, country_code, city
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """ if config.DB_BACKEND == "sqlite" else """
-        INSERT INTO alerts (timestamp, rule_name, src_ip, dst_ip, dst_port, detail, severity,
-                            country, country_code, city)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO alerts (
+            timestamp, rule_name, rule_version,
+            src_ip, dst_ip, src_port, dst_port, protocol,
+            detail, severity, confidence,
+            evidence_json, window_start, window_end,
+            country, country_code, city
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     values = (
         alert.get("timestamp", time.time()),
         alert["rule_name"],
+        alert.get("rule_version"),
         alert.get("src_ip"),
         alert.get("dst_ip"),
+        alert.get("src_port"),
         alert.get("dst_port"),
+        alert.get("protocol"),
         alert.get("detail"),
         alert.get("severity", "medium"),
+        alert.get("confidence", "heuristic"),
+        alert.get("evidence_json"),
+        alert.get("window_start"),
+        alert.get("window_end"),
         alert.get("country"),
         alert.get("country_code"),
         alert.get("city"),

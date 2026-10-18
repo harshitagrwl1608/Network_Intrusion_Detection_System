@@ -1,38 +1,56 @@
 """
 engine/rules.py
 ---------------
-All 6 detection rules + the RuleEngine orchestrator.
+All detection rules + the RuleEngine orchestrator.
 
 Rules are stateful and maintain short-term sliding-window memory.
 Each rule's check() method receives a normalised packet record dict and
-returns an alert dict (or None).
+returns an alert dict (or None).  Multiple rules may fire on the same
+packet — the engine never exits early.
 
-Rule order (simplest → most complex):
-  1. BlocklistRule    — stateless, O(1) set lookup
-  2. PortScanRule     — stateful, tracks distinct DESTINATION ports per src_ip
-  3. SynFloodRule     — stateful, tracks SYN count per src_ip
-  4. ArpSpoofRule     — stateful, persistent IP→MAC table
-  5. PayloadRule      — stateless regex DPI (SQL injection, XSS, credentials)
-  6. DnsRule          — stateful Shannon-entropy DGA / DNS-tunneling detection
+Alert schema (§5.2 of roadmap):
+  rule_name        str   — rule identifier
+  rule_version     str   — "major.minor" for tracking changes
+  event_timestamp  float — from packet capture (preserved through sniffer)
+  src_ip, dst_ip   str
+  src_port, dst_port int
+  protocol         str
+  severity         str   — "high" | "medium" | "low"
+  confidence       str   — "high" | "heuristic" | "low"
+  detail           str   — human-readable summary
+  evidence         dict  — structured, JSON-serialisable facts
+  window_start     float — start of the detection window (stateful rules)
+  window_end       float — end of the detection window (stateful rules)
 
-False Positive Mitigations (2025-10):
+Rule order (cheapest → most expensive):
+  1. BlocklistRule     — stateless, O(1)+O(networks) lookup
+  2. PortScanRule      — stateful, vertical + horizontal scan tracking
+  3. SynFloodRule      — stateful, SYN burst rate per (src,dst,port)
+  4. ArpSpoofRule      — stateful, persistent IP→MAC table
+  5. PayloadRule       — stateless regex DPI (returns ALL matches)
+  6. DnsRule           — stateful Shannon-entropy + query-frequency
+
+False Positive Mitigations:
   - PortScanRule: ignores hosts whose SOURCE port is a well-known service
-    (53/DNS, 80/HTTP, 443/HTTPS, etc.) — prevents DNS servers replying to
-    many clients from being flagged as scanners.
-  - PortScanRule: only counts SYN packets (new connection attempts), not
-    every packet — response traffic is filtered out.
-  - PortScanRule: only counts ephemeral destination ports (dst_port >= 1024
-    in response direction skipped; only scans TO low ports 1-1023 OR
-    SYN to any port count).
-  - Configurable TRUSTED_HOSTS whitelist to exempt known-good IPs/names.
-  - Configurable WELL_KNOWN_SERVICE_PORTS set for source-port exemption.
-  - DnsRule: whitelists common high-entropy-but-legit TLDs / CDN patterns.
+    (servers replying to clients, not scanners).
+  - PortScanRule: only counts SYN packets (new connection attempts).
+  - SynFloodRule: only fires on service destination ports (≤ 49151).
+  - Configurable TRUSTED_HOSTS whitelist.
+  - Configurable WELL_KNOWN_SERVICE_PORTS set.
+  - DnsRule: whitelists common high-entropy-but-legit CDN patterns.
+  - All stateful rules: per-rule threading.Lock (§3.8).
+
+Thread safety:
+  Every stateful rule guards its mutable _history/_table/_seen with a
+  threading.RLock so the capture thread (check) and GC thread
+  (prune_stale) cannot race.
 """
 
 import json
 import math
 import os
 import re
+import threading
 import time
 import ipaddress
 import logging
@@ -67,7 +85,6 @@ def _is_trusted(ip: str) -> bool:
     """Return True if ip matches any trusted host or CIDR range."""
     if ip in TRUSTED_HOSTS:
         return True
-    # Check CIDR membership for any entries that look like networks
     for entry in TRUSTED_HOSTS:
         try:
             if ipaddress.ip_address(ip) in ipaddress.ip_network(entry, strict=False):
@@ -77,30 +94,61 @@ def _is_trusted(ip: str) -> bool:
     return False
 
 
+def _is_internal(ip: str) -> bool:
+    """Return True if ip is an RFC-1918 / link-local private address."""
+    try:
+        addr = ipaddress.ip_address(ip)
+        return addr.is_private or addr.is_link_local
+    except ValueError:
+        return False
+
+
 # =============================================================================
 # Rule 1: Blocklist Match
 # =============================================================================
 
 class BlocklistRule:
     name = "BLOCKLIST"
+    rule_version = "1.1"
 
-    def __init__(self, blocklist: set):
-        self.blocklist = blocklist
+    def __init__(self, blocklist):
+        """
+        Accept either a BlocklistData namedtuple (preferred) or a plain set
+        (backwards-compatible with older callers that pass a raw set).
+        """
+        from engine.blocklist import BlocklistData
+        if isinstance(blocklist, BlocklistData):
+            self._exact = blocklist.exact
+            self._networks = blocklist.networks
+        else:
+            # Legacy: plain set of IP strings — no CIDR support
+            self._exact = set(blocklist)
+            self._networks = []
+
+    def _in_blocklist(self, ip: str) -> bool:
+        """Check exact set then CIDR networks."""
+        if ip in self._exact:
+            return True
+        try:
+            addr = ipaddress.ip_address(ip)
+            return any(addr in net for net in self._networks)
+        except ValueError:
+            return False
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP":
             return None
         src = record.get("src_ip")
         dst = record.get("dst_ip")
-        
+
         bad_ip = None
         direction = ""
-        if dst and dst in self.blocklist:
+        if dst and self._in_blocklist(dst):
             bad_ip = dst
             direction = "contact"
-        elif src and src in self.blocklist:
+        elif src and self._in_blocklist(src):
             bad_ip = src
-            direction = "receive traffic from"
+            direction = "receive"
 
         if bad_ip:
             detail_msg = (
@@ -110,121 +158,191 @@ class BlocklistRule:
             )
             return {
                 "rule_name": self.name,
+                "rule_version": self.rule_version,
                 "src_ip": src,
                 "dst_ip": dst,
+                "src_port": record.get("src_port"),
                 "dst_port": record.get("dst_port"),
-                "detail": detail_msg,
+                "protocol": record.get("protocol"),
                 "severity": "high",
+                "confidence": "high",
+                "detail": detail_msg,
+                "evidence": {
+                    "bad_ip": bad_ip,
+                    "direction": direction,
+                },
+                "window_start": None,
+                "window_end": None,
             }
         return None
 
 
 # =============================================================================
-# Rule 2: Port Scan Detection
+# Rule 2: Port Scan Detection  (§3.2 — vertical + horizontal)
 # =============================================================================
 
 class PortScanRule:
     name = "PORT_SCAN"
+    rule_version = "1.2"
 
     def __init__(self, threshold: int = 15, window: int = 10):
         self.threshold = threshold
         self.window = window
-        # src_ip -> list of (timestamp, dst_port)
-        self._history: dict[str, list] = defaultdict(list)
+        self._lock = threading.RLock()
+
+        # Vertical scan: (src_ip, dst_ip) → [(ts, dst_port)]
+        # A single src probing many ports on one host.
+        self._vert: dict[tuple, list] = defaultdict(list)
+
+        # Horizontal scan: (src_ip, dst_port) → [(ts, dst_ip)]
+        # A single src probing the same port across many hosts.
+        self._horiz: dict[tuple, list] = defaultdict(list)
 
     def prune_stale(self, now: float):
         cutoff = now - self.window
-        stale_srcs = []
-        for src, history in self._history.items():
-            self._history[src] = [(t, p) for t, p in history if t > cutoff]
-            if not self._history[src]:
-                stale_srcs.append(src)
-        for src in stale_srcs:
-            del self._history[src]
+        with self._lock:
+            for d in (self._vert, self._horiz):
+                stale = [k for k, v in d.items()
+                         if not [e for e in v if e[0] > cutoff]]
+                for k in stale:
+                    del d[k]
+                for k in list(d):
+                    if k in d:
+                        d[k] = [e for e in d[k] if e[0] > cutoff]
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP":
             return None
 
-        # ── False Positive Filter 1: skip trusted hosts ──
         src = record.get("src_ip", "")
         if _is_trusted(src):
             return None
 
-        # ── False Positive Filter 2: skip server-side response traffic ──
-        # If the SOURCE port is a well-known service port, this host is a
-        # *server replying to clients*, not a scanner probing many ports.
-        # Example: reliance.reliance:53 (DNS) → client:46295, client:48643 ...
-        # Without this filter, the DNS server looks like it's "scanning" clients.
-        protocol = record.get("protocol", "")
-        src_port = record.get("src_port")  # set by text-log parser when available
+        # Skip server-side responses (DNS/HTTP/etc. replying to many clients)
+        src_port = record.get("src_port")
         if src_port and src_port in WELL_KNOWN_SERVICE_PORTS:
             return None
 
-        # ── False Positive Filter 3: only count SYN (new connection) packets ──
-        # A port scan sends SYN packets to probe ports. Normal response traffic
-        # (ACK, PSH, etc.) from legitimate services should not be counted.
-        # Exception: UDP and ICMP are stateless — count all of them.
+        # Only count SYN packets (new connection attempts); skip ACK/PSH traffic
+        protocol = record.get("protocol", "")
         if protocol == "TCP" and not record.get("syn_flag"):
             return None
 
+        dst_ip = record.get("dst_ip", "")
         dst_port = record.get("dst_port")
         if dst_port is None:
             return None
 
-        now = record["timestamp"]
+        now = record.get("timestamp", time.time())
 
-        # Purge entries outside the time window
-        self._history[src] = [
-            (t, p) for t, p in self._history[src] if now - t <= self.window
-        ]
-        self._history[src].append((now, dst_port))
+        with self._lock:
+            # --- Vertical scan check ---
+            vkey = (src, dst_ip)
+            self._vert[vkey] = [(t, p) for t, p in self._vert[vkey]
+                                if now - t <= self.window]
+            self._vert[vkey].append((now, dst_port))
+            distinct_ports = len({p for _, p in self._vert[vkey]})
 
-        distinct_ports = len({p for _, p in self._history[src]})
-        if distinct_ports >= self.threshold:
-            self._history[src] = []  # reset to prevent alert storm
-            logger.debug(f"PORT_SCAN fired: {src} → {distinct_ports} ports")
-            return {
-                "rule_name": self.name,
-                "src_ip": src,
-                "dst_ip": record.get("dst_ip"),
-                "dst_port": dst_port,
-                "detail": (
-                    f"{src} sent SYN to {distinct_ports} distinct ports "
-                    f"in {self.window}s — possible port scan"
-                ),
-                "severity": "high",
-                "evidence": {
-                    "distinct_ports": distinct_ports,
-                    "window_s": self.window,
-                    "threshold": self.threshold,
-                },
-            }
+            if distinct_ports >= self.threshold:
+                window_start = now - self.window
+                self._vert[vkey] = []  # reset to prevent alert storm
+                logger.debug(
+                    f"PORT_SCAN (vertical) fired: {src}→{dst_ip} "
+                    f"{distinct_ports} ports"
+                )
+                return {
+                    "rule_name": self.name,
+                    "rule_version": self.rule_version,
+                    "src_ip": src,
+                    "dst_ip": dst_ip,
+                    "src_port": src_port,
+                    "dst_port": dst_port,
+                    "protocol": protocol,
+                    "severity": "high",
+                    "confidence": "heuristic",
+                    "detail": (
+                        f"{src} sent SYN to {distinct_ports} distinct ports "
+                        f"on {dst_ip} in {self.window}s — possible vertical port scan"
+                    ),
+                    "evidence": {
+                        "scan_type": "vertical",
+                        "distinct_ports": distinct_ports,
+                        "target_host": dst_ip,
+                        "window_s": self.window,
+                        "threshold": self.threshold,
+                    },
+                    "window_start": window_start,
+                    "window_end": now,
+                }
+
+            # --- Horizontal scan check ---
+            hkey = (src, dst_port)
+            self._horiz[hkey] = [(t, ip) for t, ip in self._horiz[hkey]
+                                  if now - t <= self.window]
+            self._horiz[hkey].append((now, dst_ip))
+            distinct_hosts = len({ip for _, ip in self._horiz[hkey]})
+
+            if distinct_hosts >= self.threshold:
+                window_start = now - self.window
+                self._horiz[hkey] = []
+                logger.debug(
+                    f"PORT_SCAN (horizontal) fired: {src} port {dst_port} "
+                    f"→ {distinct_hosts} hosts"
+                )
+                return {
+                    "rule_name": self.name,
+                    "rule_version": self.rule_version,
+                    "src_ip": src,
+                    "dst_ip": dst_ip,
+                    "src_port": src_port,
+                    "dst_port": dst_port,
+                    "protocol": protocol,
+                    "severity": "high",
+                    "confidence": "heuristic",
+                    "detail": (
+                        f"{src} sent SYN to port {dst_port} on "
+                        f"{distinct_hosts} distinct hosts in {self.window}s "
+                        f"— possible horizontal port scan"
+                    ),
+                    "evidence": {
+                        "scan_type": "horizontal",
+                        "distinct_hosts": distinct_hosts,
+                        "scanned_port": dst_port,
+                        "window_s": self.window,
+                        "threshold": self.threshold,
+                    },
+                    "window_start": window_start,
+                    "window_end": now,
+                }
+
         return None
 
 
 # =============================================================================
-# Rule 3: SYN Flood / Connection-Rate Abuse
+# Rule 3: SYN Burst / Connection-Rate Abuse  (§3.3 — label clarified)
 # =============================================================================
 
 class SynFloodRule:
     name = "SYN_FLOOD"
+    rule_version = "1.1"
 
     def __init__(self, threshold: int = 100, window: int = 10):
         self.threshold = threshold
         self.window = window
-        # (src_ip, dst_ip, dst_port) -> list of SYN timestamps
+        self._lock = threading.RLock()
+        # (src_ip, dst_ip, dst_port) → list of SYN timestamps
         self._history: dict[tuple, list] = defaultdict(list)
 
     def prune_stale(self, now: float):
         cutoff = now - self.window
-        stale_keys = []
-        for key, history in self._history.items():
-            self._history[key] = [t for t in history if t > cutoff]
-            if not self._history[key]:
-                stale_keys.append(key)
-        for key in stale_keys:
-            del self._history[key]
+        with self._lock:
+            stale_keys = []
+            for key, history in self._history.items():
+                self._history[key] = [t for t in history if t > cutoff]
+                if not self._history[key]:
+                    stale_keys.append(key)
+            for key in stale_keys:
+                del self._history[key]
 
     def check(self, record: dict) -> dict | None:
         if not record.get("syn_flag"):
@@ -234,43 +352,55 @@ class SynFloodRule:
         dst = record.get("dst_ip", "")
         dst_port = record.get("dst_port")
 
-        # ── False Positive Filter: skip trusted hosts ──
         if _is_trusted(src):
             return None
 
-        # ── False Positive Filter: only count floods TO service ports ──
-        # A SYN flood targets a service (dst_port 80, 443, etc.).
-        # Random ephemeral destination ports suggest legitimate client traffic.
-        if dst_port and dst_port > 49151:  # skip ephemeral dest ports (IANA: 49152-65535)
+        # SYN floods target services; skip ephemeral dst ports (IANA: 49152-65535)
+        if dst_port and dst_port > 49151:
             return None
 
-        now = record["timestamp"]
+        now = record.get("timestamp", time.time())
         key = (src, dst, dst_port)
 
-        self._history[key] = [
-            t for t in self._history[key] if now - t <= self.window
-        ]
-        self._history[key].append(now)
+        with self._lock:
+            self._history[key] = [
+                t for t in self._history[key] if now - t <= self.window
+            ]
+            self._history[key].append(now)
+            count = len(self._history[key])
 
-        count = len(self._history[key])
         if count >= self.threshold:
-            self._history[key] = []
-            logger.debug(f"SYN_FLOOD fired: {src} -> {dst}:{dst_port} ({count} SYNs)")
+            with self._lock:
+                self._history[key] = []
+            window_start = now - self.window
+            logger.debug(f"SYN_FLOOD fired: {src} → {dst}:{dst_port} ({count} SYNs)")
             return {
                 "rule_name": self.name,
+                "rule_version": self.rule_version,
                 "src_ip": src,
                 "dst_ip": dst,
+                "src_port": record.get("src_port"),
                 "dst_port": dst_port,
+                "protocol": record.get("protocol", "TCP"),
+                # Confidence is heuristic: we count SYNs but do not verify
+                # handshake outcomes or confirmed service impact (§3.3).
+                "severity": "high",
+                "confidence": "heuristic",
                 "detail": (
                     f"{src} sent {count} SYN packets to {dst}:{dst_port} "
-                    f"in {self.window}s — possible SYN flood"
+                    f"in {self.window}s — possible SYN burst / flood"
                 ),
-                "severity": "high",
                 "evidence": {
                     "syn_count": count,
                     "window_s": self.window,
                     "threshold": self.threshold,
+                    "note": (
+                        "SYN count only; handshake completion "
+                        "not tracked in current schema"
+                    ),
                 },
+                "window_start": window_start,
+                "window_end": now,
             }
         return None
 
@@ -281,27 +411,30 @@ class SynFloodRule:
 
 class ArpSpoofRule:
     name = "ARP_SPOOF"
+    rule_version = "1.1"
 
     def __init__(self, table_path: str):
         self.table_path = table_path
-        self._table: dict[str, str] = {}  # ip -> mac
+        self._lock = threading.RLock()
+        self._table: dict[str, str] = {}  # ip → mac
         self._dirty = False
         self._load()
-        
-        import threading
+
         import atexit
-        self._saver_thread = threading.Thread(target=self._periodic_save, daemon=True)
+        self._saver_thread = threading.Thread(
+            target=self._periodic_save, daemon=True
+        )
         self._saver_thread.start()
         atexit.register(self.flush)
 
     def flush(self):
         """Force write to disk if dirty."""
-        if self._dirty:
-            self._save()
-            self._dirty = False
+        with self._lock:
+            if self._dirty:
+                self._save()
+                self._dirty = False
 
     def _periodic_save(self):
-        import time
         while True:
             time.sleep(60)
             self.flush()
@@ -309,7 +442,8 @@ class ArpSpoofRule:
     def _load(self):
         try:
             with open(self.table_path) as f:
-                self._table = json.load(f)
+                with self._lock:
+                    self._table = json.load(f)
             logger.info(f"ARP table loaded: {len(self._table)} entries")
         except FileNotFoundError:
             logger.info("No ARP table found — starting fresh")
@@ -329,57 +463,138 @@ class ArpSpoofRule:
         if not ip or not mac:
             return None
 
-        known_mac = self._table.get(ip)
-        if known_mac is None:
-            # First time we see this IP — record it
-            self._table[ip] = mac
-            self._dirty = True
-            return None
+        with self._lock:
+            known_mac = self._table.get(ip)
+            if known_mac is None:
+                self._table[ip] = mac
+                self._dirty = True
+                return None
 
-        if known_mac != mac:
-            logger.debug(f"ARP_SPOOF fired: {ip} was {known_mac}, now claims {mac}")
-            return {
-                "rule_name": self.name,
-                "src_ip": ip,
-                "dst_ip": record.get("dst_ip"),
-                "dst_port": None,
-                "detail": (
-                    f"IP {ip} previously answered as {known_mac}, "
-                    f"now claims to be {mac} — possible ARP spoofing"
-                ),
-                "severity": "high",
-            }
+            if known_mac != mac:
+                logger.debug(f"ARP_SPOOF fired: {ip} was {known_mac}, now {mac}")
+                return {
+                    "rule_name": self.name,
+                    "rule_version": self.rule_version,
+                    "src_ip": ip,
+                    "dst_ip": record.get("dst_ip"),
+                    "src_port": None,
+                    "dst_port": None,
+                    "protocol": "ARP",
+                    "severity": "high",
+                    "confidence": "high",
+                    "detail": (
+                        f"IP {ip} previously answered as {known_mac}, "
+                        f"now claims to be {mac} — possible ARP spoofing"
+                    ),
+                    "evidence": {
+                        "ip": ip,
+                        "previous_mac": known_mac,
+                        "new_mac": mac,
+                    },
+                    "window_start": None,
+                    "window_end": None,
+                }
         return None
 
 
 # =============================================================================
-# Rule 5: Deep Packet Inspection (DPI) — Payload Signature Matching
+# Rule 5: Deep Packet Inspection (DPI) — Payload Signature Matching  (§3.4)
 # =============================================================================
 
-# Signatures: (label, compiled_regex)
-_PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern]] = [
+# Signatures: (label, compiled_regex, confidence_note)
+_PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
     # SQL Injection
-    ("SQL_INJECTION",  re.compile(rb"(?i)(union\s+select|select\s+\*|drop\s+table|insert\s+into|or\s+1=1|--\s*$)", re.MULTILINE)),
+    (
+        "SQL_INJECTION",
+        re.compile(
+            rb"(?i)(union\s+select|select\s+\*|drop\s+table|insert\s+into"
+            rb"|or\s+1=1|--\s*$|sleep\s*\(|waitfor\s+delay|exec\s+xp_cmdshell)",
+            re.MULTILINE,
+        ),
+        "heuristic",
+    ),
     # XSS
-    ("XSS",            re.compile(rb"(?i)(<script[\s>]|javascript:|onerror\s*=|onload\s*=|alert\s*\()") ),
+    (
+        "XSS",
+        re.compile(
+            rb"(?i)(<script[\s>]|javascript:|onerror\s*=|onload\s*=|alert\s*\()"
+        ),
+        "heuristic",
+    ),
     # Plaintext credential leak
-    ("CREDENTIAL_LEAK",re.compile(rb"(?i)(password=|passwd=|pass=|pwd=|Authorization:\s*Basic\s+[A-Za-z0-9+/=]{8})") ),
+    (
+        "CREDENTIAL_LEAK",
+        re.compile(
+            rb"(?i)(password=|passwd=|pass=|pwd=|token=|api_key=|secret="
+            rb"|Authorization:\s*Basic\s+[A-Za-z0-9+/=]{8}"
+            rb"|Bearer\s+[A-Za-z0-9\-._~+/]+=*)"
+        ),
+        "heuristic",
+    ),
     # Shell / command injection payloads
-    ("CMD_INJECTION",  re.compile(rb"(?i)(/bin/sh|/bin/bash|/etc/passwd|cmd\.exe|powershell\.exe|\$\(|`[^`]+`)") ),
+    (
+        "CMD_INJECTION",
+        re.compile(
+            rb"(?i)(/bin/sh|/bin/bash|/etc/passwd|cmd\.exe|powershell\.exe"
+            rb"|\$\(|`[^`]+`|bash\s+-i\s+>&\s*/dev/tcp/|nc\s+-e\s+/bin)"
+        ),
+        "heuristic",
+    ),
+    # Path traversal
+    (
+        "PATH_TRAVERSAL",
+        re.compile(
+            rb"(?i)(\.\.[\\/]\.\.[\\/]|\.\.%2[fF]|%2[eE]%2[eE]%2[fF]"
+            rb"|/etc/passwd|/etc/shadow|/proc/self)"
+        ),
+        "heuristic",
+    ),
+    # Server-Side Request Forgery
+    (
+        "SSRF",
+        re.compile(
+            rb"(?i)(file://|dict://|gopher://|ldap://|ftp://127\.|http://127\."
+            rb"|http://169\.254\.169\.254|http://\[::1\])"
+        ),
+        "heuristic",
+    ),
+    # Log4Shell / Log4j JNDI injection
+    (
+        "LOG4SHELL",
+        re.compile(
+            rb"(?i)(\$\{jndi:|j\$\{:|j\$\{lower:|j\$\{::-j\}ndi:)"
+        ),
+        "high",
+    ),
 ]
 
 # Only inspect unencrypted application protocols (TLS payload is ciphertext)
-_DPI_PORTS: set[int] = {80, 8080, 21, 23, 25, 110, 143, 3000, 5000, 8000, 8888}
+_DPI_PORTS: set[int] = {
+    80, 8080,       # HTTP
+    21, 23,         # FTP, Telnet
+    25, 587,        # SMTP
+    110, 143,       # POP3, IMAP
+    3000, 5000, 8000, 8888,   # Common dev/app servers
+    3306, 5432,     # MySQL, PostgreSQL
+    6379,           # Redis
+    27017,          # MongoDB
+    9200,           # Elasticsearch
+}
 
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
+    rule_version = "1.2"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True):
         self.max_bytes = max_bytes
         self.enabled   = enabled
 
     def check(self, record: dict) -> dict | None:
+        """
+        Returns an alert if ANY signature matches.
+        Evidence lists ALL matches found in the inspected sample (§3.4).
+        """
         if not self.enabled:
             return None
         if record.get("type") != "IP":
@@ -389,41 +604,71 @@ class PayloadRule:
         if not payload:
             return None
 
-        # Only inspect plaintext ports
         dst_port = record.get("dst_port") or 0
         src_port = record.get("src_port") or 0
+
+        # Only inspect on plaintext ports; skip if this appears to be
+        # a server-direction response (src_port in DPI_PORTS) — the
+        # matching response to a benign client request should not be flagged
+        # as an attack originating from the server.
         if dst_port not in _DPI_PORTS and src_port not in _DPI_PORTS:
             return None
 
-        # Truncate to cap CPU usage
         sample = payload[: self.max_bytes]
 
-        for label, pattern in _PAYLOAD_SIGNATURES:
+        # Collect ALL matching signatures (§3.4 — do not return on first match)
+        hits: list[dict] = []
+        for label, pattern, confidence in _PAYLOAD_SIGNATURES:
             m = pattern.search(sample)
             if m:
-                matched_bytes = m.group(0)[:80]  # keep evidence short
+                matched_bytes = m.group(0)[:80]
                 try:
                     matched_str = matched_bytes.decode("utf-8", errors="replace")
                 except Exception:
                     matched_str = repr(matched_bytes)
-                logger.debug(f"PAYLOAD_HIT [{label}]: {record.get('src_ip')} → {record.get('dst_ip')}:{dst_port}")
-                return {
-                    "rule_name": self.name,
-                    "src_ip": record.get("src_ip"),
-                    "dst_ip": record.get("dst_ip"),
-                    "dst_port": dst_port,
-                    "detail": (
-                        f"{record.get('src_ip')} → {record.get('dst_ip')}:{dst_port} "
-                        f"contains {label} pattern: '{matched_str}'"
-                    ),
-                    "severity": "high",
-                    "evidence": {"signature": label, "matched": matched_str},
-                }
-        return None
+                hits.append({"signature": label, "matched": matched_str,
+                             "confidence": confidence})
+
+        if not hits:
+            return None
+
+        labels_str = ", ".join(h["signature"] for h in hits)
+        logger.debug(
+            f"PAYLOAD_HIT [{labels_str}]: "
+            f"{record.get('src_ip')} → {record.get('dst_ip')}:{dst_port}"
+        )
+
+        # Severity: high if any hit is high-confidence (e.g. LOG4SHELL)
+        severity = "high" if any(h["confidence"] == "high" for h in hits) else "medium"
+        overall_confidence = "high" if severity == "high" else "heuristic"
+
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": record.get("src_ip"),
+            "dst_ip": record.get("dst_ip"),
+            "src_port": src_port,
+            "dst_port": dst_port,
+            "protocol": record.get("protocol"),
+            "severity": severity,
+            "confidence": overall_confidence,
+            "detail": (
+                f"{record.get('src_ip')} → {record.get('dst_ip')}:{dst_port} "
+                f"matched DPI signature(s): {labels_str}"
+            ),
+            "evidence": {
+                "hits": hits,
+                "inspected_bytes": len(sample),
+                "cap_bytes": self.max_bytes,
+                "note": "Packet-level inspection only; no stream reassembly",
+            },
+            "window_start": None,
+            "window_end": None,
+        }
 
 
 # =============================================================================
-# Rule 6: DNS Tunneling & DGA Detection — Shannon Entropy
+# Rule 6: DNS Tunneling & DGA Detection  (§3.5 — query frequency added)
 # =============================================================================
 
 # Domains whose labels are legitimately high-entropy (CDN, tracking, etc.)
@@ -432,6 +677,8 @@ _DGA_WHITELIST_SUFFIXES: tuple[str, ...] = (
     ".cdn.ampproject.org", ".amazonaws.com", ".fastly.net",
     ".google.com", ".googleapis.com", ".gstatic.com",
     ".doubleclick.net", ".googlevideo.com", ".fbcdn.net",
+    ".azure.com", ".azurefd.net", ".cloudfront.net",
+    ".github.io", ".s3.amazonaws.com",
 )
 
 
@@ -446,13 +693,48 @@ def _shannon_entropy(s: str) -> float:
 
 class DnsRule:
     name = "DNS_ANOMALY"
+    rule_version = "1.2"
 
-    def __init__(self, entropy_threshold: float = 3.5, max_query_len: int = 50):
+    # Alert dedup: don't re-alert on the same (src, domain) within this window
+    ALERT_COOLDOWN_S = 60
+
+    # Query-frequency detection: alert if a src queries the same
+    # parent domain more than FREQ_THRESHOLD times in FREQ_WINDOW seconds
+    FREQ_THRESHOLD = 20
+    FREQ_WINDOW = 60
+
+    def __init__(self, entropy_threshold: float = 3.8, max_query_len: int = 60):
         self.entropy_threshold = entropy_threshold
         self.max_query_len     = max_query_len
-        # per-src_ip dedup: (src_ip, domain) → last_alert_time
-        # prevents re-alerting on same domain within 60s
+        self._lock = threading.RLock()
+
+        # (src_ip, domain) → last_alert_time  (alert dedup)
         self._seen: dict[tuple, float] = {}
+
+        # (src_ip, parent_domain) → [timestamps]  (query frequency)
+        self._freq: dict[tuple, list] = defaultdict(list)
+
+    def _parent_domain(self, domain: str) -> str:
+        """Return the registrable parent domain (last two labels)."""
+        labels = domain.rstrip(".").split(".")
+        return ".".join(labels[-2:]) if len(labels) >= 2 else domain
+
+    def _prune_seen(self, now: float):
+        cutoff = now - 120
+        self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.FREQ_WINDOW
+        with self._lock:
+            stale = [k for k, v in self._freq.items()
+                     if not [t for t in v if t > cutoff]]
+            for k in stale:
+                del self._freq[k]
+            for k in list(self._freq):
+                if k in self._freq:
+                    self._freq[k] = [t for t in self._freq[k] if t > cutoff]
+            if len(self._seen) > 5000:
+                self._prune_seen(now)
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP":
@@ -464,62 +746,87 @@ class DnsRule:
         if not domain:
             return None
 
-        # Strip trailing dot (FQDN)
         domain = domain.rstrip(".")
         src = record.get("src_ip", "unknown")
+        now = record.get("timestamp", time.time())
 
-        # Whitelist legitimate high-entropy CDN / cloud domains
+        # Whitelist known-legit high-entropy CDN / cloud domains
         dl = domain.lower()
         if any(dl.endswith(w) for w in _DGA_WHITELIST_SUFFIXES):
             return None
 
-        # Extract the leftmost label (the randomly generated part in DGA)
         labels = domain.split(".")
         subdomain = labels[0] if labels else domain
+        parent = self._parent_domain(domain)
 
         entropy  = _shannon_entropy(subdomain)
         too_long = len(domain) > self.max_query_len
-        # Require label length >= 8 for entropy checks to avoid false positives on short words
+        # Require label length >= 8 to avoid FPs on short words
         high_ent = len(subdomain) >= 8 and entropy >= self.entropy_threshold
 
-        if not (high_ent or too_long):
+        # ── Query frequency: count repeated queries to same parent domain ──
+        with self._lock:
+            fkey = (src, parent)
+            self._freq[fkey] = [
+                t for t in self._freq[fkey] if now - t <= self.FREQ_WINDOW
+            ]
+            self._freq[fkey].append(now)
+            query_count = len(self._freq[fkey])
+
+        high_freq = query_count >= self.FREQ_THRESHOLD
+
+        if not (high_ent or too_long or high_freq):
             return None
 
-        # Deduplicate — don't fire on the same (src, domain) within 60s
-        key = (src, domain)
-        now = record.get("timestamp", time.time())
-        if now - self._seen.get(key, 0) < 60:
-            return None
-        self._seen[key] = now
-        # Prune old entries to prevent unbounded growth
-        if len(self._seen) > 5000:
-            cutoff = now - 120
-            self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
+        # Alert dedup — suppress re-alerting on same (src, domain) within cooldown
+        alert_key = (src, domain)
+        with self._lock:
+            last_alert = self._seen.get(alert_key, 0)
+            if now - last_alert < self.ALERT_COOLDOWN_S:
+                return None
+            self._seen[alert_key] = now
 
         reason = []
         if high_ent:
             reason.append(f"entropy={entropy:.2f} (≥{self.entropy_threshold})")
         if too_long:
             reason.append(f"length={len(domain)} chars (>{self.max_query_len})")
+        if high_freq:
+            reason.append(
+                f"query_count={query_count} to '{parent}' "
+                f"in {self.FREQ_WINDOW}s (≥{self.FREQ_THRESHOLD})"
+            )
 
-        sub_type = "DNS_DGA" if high_ent else "DNS_TUNNEL"
+        sub_type = "DNS_FREQ" if high_freq and not (high_ent or too_long) \
+                   else ("DNS_DGA" if high_ent else "DNS_TUNNEL")
+
         logger.debug(f"{sub_type} fired: {src} queried '{domain}' [{', '.join(reason)}]")
         return {
             "rule_name": self.name,
+            "rule_version": self.rule_version,
             "src_ip": src,
             "dst_ip": record.get("dst_ip"),
+            "src_port": record.get("src_port"),
             "dst_port": 53,
+            "protocol": "UDP",
+            "severity": "medium" if high_freq and not (high_ent or too_long) else "high",
+            "confidence": "heuristic",
             "detail": (
                 f"{src} queried suspicious domain '{domain}' "
-                f"[{', '.join(reason)}] — possible DGA/DNS-tunneling"
+                f"[{', '.join(reason)}] — possible {sub_type}"
             ),
-            "severity": "high",
             "evidence": {
                 "domain": domain,
                 "subdomain": subdomain,
+                "parent_domain": parent,
                 "entropy": round(entropy, 3),
                 "sub_type": sub_type,
+                "query_count_in_window": query_count,
+                "freq_window_s": self.FREQ_WINDOW,
+                "freq_threshold": self.FREQ_THRESHOLD,
             },
+            "window_start": now - self.FREQ_WINDOW if high_freq else None,
+            "window_end": now if high_freq else None,
         }
 
 
@@ -532,18 +839,21 @@ class RuleEngine:
     Runs all rules against every packet record.
     Writes any resulting alerts to the database asynchronously.
     Also tracks seen devices for the dashboard device list.
+
+    All rules are run for every packet — no early exit.  A packet may
+    legitimately trigger multiple independent rules; both alerts are
+    valuable and should be persisted.
     """
 
-    def __init__(self, db_conn, blocklist_set: set, cfg):
+    def __init__(self, db_conn, blocklist, cfg):
         from storage.db import write_alert, upsert_device
         import engine.rules as _rules_mod
         import queue
-        import threading
-        
-        self._write_alert = write_alert
+
+        self._write_alert  = write_alert
         self._upsert_device = upsert_device
 
-        # Load trusted hosts from config into module-level set (used by FP filters)
+        # Load trusted hosts from config into module-level set
         trusted = getattr(cfg, "TRUSTED_HOSTS", set())
         _rules_mod.TRUSTED_HOSTS.clear()
         _rules_mod.TRUSTED_HOSTS.update(trusted)
@@ -551,7 +861,7 @@ class RuleEngine:
             logger.info(f"Trusted hosts loaded: {trusted}")
 
         self.rules = [
-            BlocklistRule(blocklist_set),
+            BlocklistRule(blocklist),
             PortScanRule(cfg.PORT_SCAN_THRESHOLD, cfg.TIME_WINDOW),
             SynFloodRule(cfg.SYN_FLOOD_THRESHOLD, cfg.TIME_WINDOW),
             ArpSpoofRule(cfg.ARP_TABLE_PATH),
@@ -560,75 +870,111 @@ class RuleEngine:
                 enabled=getattr(cfg, "PAYLOAD_INSPECTION", True),
             ),
             DnsRule(
-                entropy_threshold=getattr(cfg, "DNS_ENTROPY_THRESHOLD", 3.5),
-                max_query_len=getattr(cfg, "DNS_QUERY_MAX_LEN", 50),
+                entropy_threshold=getattr(cfg, "DNS_ENTROPY_THRESHOLD", 3.8),
+                max_query_len=getattr(cfg, "DNS_QUERY_MAX_LEN", 60),
             ),
         ]
-        
-        # Async writer setup
-        self._write_queue = queue.Queue()
-        self._writer_thread = threading.Thread(target=self._db_writer_loop, daemon=True)
+
+        # Bounded async writer queue with explicit stop sentinel
+        self._write_queue: queue.Queue = queue.Queue(maxsize=2000)
+        self._stop_event = threading.Event()
+        self._writer_thread = threading.Thread(
+            target=self._db_writer_loop, daemon=True, name="db-writer"
+        )
         self._writer_thread.start()
 
-        # GC thread setup for stateful rules
-        self._gc_thread = threading.Thread(target=self._gc_loop, daemon=True)
+        # GC thread for stateful rules
+        self._gc_thread = threading.Thread(
+            target=self._gc_loop, daemon=True, name="rule-gc"
+        )
         self._gc_thread.start()
 
         import atexit
         atexit.register(self.flush)
 
     def _gc_loop(self):
-        import time
-        while True:
-            time.sleep(10) # Prune every 10 seconds
+        while not self._stop_event.is_set():
+            time.sleep(10)
             now = time.time()
             for rule in self.rules:
-                if hasattr(rule, 'prune_stale'):
+                if hasattr(rule, "prune_stale"):
                     try:
                         rule.prune_stale(now)
                     except Exception as e:
                         logger.error(f"Rule GC error for {rule.name}: {e}")
 
     def _db_writer_loop(self):
+        import queue as _queue
         from storage.db import get_connection
         conn = get_connection()
         while True:
             try:
-                task, data = self._write_queue.get()
-                if task == 'alert':
+                task, data = self._write_queue.get(timeout=1)
+                if task == "stop":
+                    self._write_queue.task_done()
+                    break
+                if task == "alert":
                     self._write_alert(conn, data)
-                elif task == 'device':
-                    self._upsert_device(conn, data['mac'], data['ip'])
+                elif task == "device":
+                    self._upsert_device(conn, data["mac"], data["ip"])
                 self._write_queue.task_done()
+            except _queue.Empty:
+                if self._stop_event.is_set():
+                    break
             except Exception as e:
                 logger.error(f"DB writer error: {e}")
-                self._write_queue.task_done()
+                try:
+                    self._write_queue.task_done()
+                except Exception:
+                    pass
+
+    def _enqueue(self, task: str, data):
+        """Put work onto the bounded queue; drop and log if full."""
+        import queue as _queue
+        try:
+            self._write_queue.put_nowait((task, data))
+        except _queue.Full:
+            logger.warning(f"Write queue full — dropping {task} entry")
 
     def flush(self):
-        """Wait for pending writes in the queue to finish processing and flush rules."""
-        self._write_queue.join()
+        """Signal stop, wait for pending writes to drain."""
+        self._stop_event.set()
+        try:
+            self._write_queue.put_nowait(("stop", None))
+        except Exception:
+            pass
+        self._writer_thread.join(timeout=5)
         for rule in self.rules:
-            if hasattr(rule, 'flush'):
+            if hasattr(rule, "flush"):
                 try:
                     rule.flush()
                 except Exception as e:
                     logger.error(f"Rule flush error: {e}")
 
     def check(self, record: dict):
-        # Track device
+        # Track seen device
         mac = record.get("src_mac")
-        ip = record.get("src_ip")
+        ip  = record.get("src_ip")
         if mac and ip:
-            self._write_queue.put(('device', {'mac': mac, 'ip': ip}))
+            self._enqueue("device", {"mac": mac, "ip": ip})
 
-        # Run all rules
+        # Run ALL rules — no early exit
         for rule in self.rules:
             try:
                 alert = rule.check(record)
                 if alert:
-                    alert["timestamp"] = record.get("timestamp", time.time())
-                    self._write_queue.put(('alert', alert))
-                    logger.info(f"[ALERT] {alert['rule_name']} — {alert['detail']}")
+                    # Stamp with event_timestamp from the packet record
+                    alert["timestamp"] = record.get(
+                        "event_timestamp",
+                        record.get("timestamp", time.time()),
+                    )
+                    # Serialise evidence dict to JSON string for DB persistence (§3.7)
+                    if "evidence" in alert:
+                        alert["evidence_json"] = json.dumps(alert["evidence"])
+                    self._enqueue("alert", alert)
+                    logger.info(
+                        f"[ALERT] {alert['rule_name']} v{alert.get('rule_version','?')} "
+                        f"— {alert['detail']}"
+                    )
             except Exception as e:
                 logger.error(f"Rule {rule.name} error: {e}")
-
