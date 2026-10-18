@@ -91,6 +91,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             "src_port": None,
             "protocol": "ARP",
             "syn_flag": False,
+            "initial_syn": False,
             "icmp_type": None,
             "icmp_code": None,
             "ip_len": None,
@@ -105,19 +106,22 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
         proto_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
         proto = proto_map.get(proto_num, str(proto_num))
 
-        dst_port  = None
-        src_port  = None
-        syn_flag  = False
-        payload   = b""
-        dns_query = None
-        icmp_type = None
-        icmp_code = None
-        ip_len    = pkt[IP].len  # total IP packet length in bytes
+        dst_port    = None
+        src_port    = None
+        syn_flag    = False
+        initial_syn = False
+        payload     = b""
+        dns_query   = None
+        icmp_type   = None
+        icmp_code   = None
+        ip_len      = pkt[IP].len  # total IP packet length in bytes
 
         if TCP in pkt:
             dst_port = pkt[TCP].dport
             src_port = pkt[TCP].sport
-            syn_flag = bool(pkt[TCP].flags & 0x02)  # SYN bit
+            flags = pkt[TCP].flags
+            syn_flag = bool(flags & 0x02)  # SYN bit
+            initial_syn = bool(flags & 0x02) and not bool(flags & 0x10)  # SYN set, ACK clear
             if Raw in pkt:
                 payload = bytes(pkt[Raw].load)[: _PAYLOAD_MAX_BYTES]
         elif UDP in pkt:
@@ -145,6 +149,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             "src_port": src_port,
             "protocol": proto,
             "syn_flag": syn_flag,
+            "initial_syn": initial_syn,
             "icmp_type": icmp_type,
             "icmp_code": icmp_code,
             "ip_len": ip_len,

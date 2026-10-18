@@ -2,9 +2,10 @@
 
 **Branch:** `antigravity/overnight-work`  
 **Tracking Remote:** `origin/antigravity/overnight-work`  
-**Current Commit:** `5d22fba` (base)  
+**Base Commit:** `5d22fba`  
+**Cycle 1 Commit:** `73c281f`  
 **Session Started:** 2026-10-19 01:42:10 +05:30  
-**Status:** In Progress (Cycle 1 Complete)
+**Status:** In Progress (Cycle 2 Complete)
 
 ---
 
@@ -36,13 +37,45 @@ Under the initial architecture (`5d22fba`):
   - Before fix: `FAILED (failures=1, errors=1)` — 40 alerts dropped out of 50 under device traffic burst; `FileNotFoundError` on bare SQLite path.
   - After fix: `OK (Ran 2 tests in 1.492s)` — 50/50 alerts persisted, 0 alerts dropped, bare SQLite path safely opened.
 - `git diff --check`: Exit code 0 (clean formatting, no whitespace errors).
+- Commit: `73c281f` (pushed to `origin/antigravity/overnight-work`).
 
-### 5. Review & Verification
-- Dedicated regression test confirmed zero dropped alerts under queue saturation.
-- No secrets or credentials committed.
-- Main branch untouched (work performed in isolated worktree tracking `antigravity/overnight-work`).
+---
+
+## Cycle 2: Priority 1 — Detection Correctness (PortScanRule & TCP SYN Semantics)
+
+### 1. Root Cause Hypothesis
+- In `PortScanRule.check()`: `if protocol == "TCP" and not record.get("syn_flag"): return None`. For UDP packets, `protocol == "TCP"` evaluated to `False`, bypassing the check completely. Consequently, any UDP packet with `dst_port` was counted toward both vertical and horizontal TCP scan histories, firing false-positive scan alerts on legitimate UDP traffic (e.g. multi-port DNS queries).
+- SYN-ACK packets (TCP flags 0x12) were treated as scan attempts because `bool(flags & 0x02)` was true, mistaking server replies for probe attempts.
+- In `SynFloodRule.check()`: the guard did not check `protocol == "TCP"`, allowing non-TCP packets to affect SYN flood state.
+
+### 2. Implementation
+- In `ids_project/engine/rules.py`:
+  - `PortScanRule`: Enforced explicit `if protocol != "TCP": return None`. Added check for `initial_syn` (SYN=1, ACK=0), ensuring ACK-only and SYN-ACK server responses are ignored. Preserved both vertical and horizontal histories atomically.
+  - `SynFloodRule`: Enforced `if record.get("protocol") != "TCP": return None` and `initial_syn` validation.
+- In `ids_project/capture/sniffer.py`:
+  - Extracted `initial_syn = bool(flags & 0x02) and not bool(flags & 0x10)` in `_parse_packet()` for Scapy TCP packets.
+  - Initialized `initial_syn = False` on ARP and UDP packets.
+- Added regression test suite: `ids_project/tests/test_port_scan_detection.py` covering:
+  - UDP packets negative (no scan alert)
+  - TCP ACK-only negative (no scan alert)
+  - TCP SYN-ACK server responses negative (no scan alert)
+  - Pure initial SYN probes positive (triggers scan alert)
+  - SynFloodRule rejects UDP and SYN-ACK traffic
+
+### 3. Files Changed
+- `ids_project/engine/rules.py`
+- `ids_project/capture/sniffer.py`
+- `ids_project/tests/test_port_scan_detection.py` (New regression test suite)
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_port_scan_detection.py`
+  - Before fix: `FAILED (failures=3)` — False positives on UDP, SYN-ACK, and SYN flood.
+  - After fix: `OK (Ran 5 tests in 0.001s)`.
+- `python3 -m unittest discover ids_project/tests`
+  - Result: `Ran 7 tests in 1.455s — OK`.
+- `git diff --check`: Exit code 0.
 
 ---
 
 ## Remaining Backlog & Next Cycle
-- **Cycle 2:** Priority 1 — TCP Port Scan Detection Semantics (restrict to initial TCP SYN packets, verify UDP & ACK-only negatives, preserve scan histories).
+- **Cycle 3:** Priority 1 — DNS Anomaly Rule Fixes (`DNS_FREQ_THRESHOLD=0` handling, narrow allowlist scope to entropy only, protect against repeated alerts).

@@ -230,10 +230,20 @@ class PortScanRule:
         if src_port and src_port in WELL_KNOWN_SERVICE_PORTS:
             return None
 
-        # Only count SYN packets (new connection attempts); skip ACK/PSH traffic
+        # Explicitly restrict to TCP only. UDP probes are not counted as scan
+        # attempts by this rule (that would need a separate UDP-scan rule).
         protocol = record.get("protocol", "")
-        if protocol == "TCP" and not record.get("syn_flag"):
+        if protocol != "TCP":
             return None
+
+        # Only count initial SYN (SYN=1, ACK=0) — pure new connection attempts.
+        # SYN-ACK packets (SYN=1, ACK=1) are server responses and must not count.
+        if "initial_syn" in record:
+            if not record.get("initial_syn"):
+                return None
+        else:
+            if not record.get("syn_flag"):
+                return None
 
         dst_ip = record.get("dst_ip", "")
         dst_port = record.get("dst_port")
@@ -359,8 +369,15 @@ class SynFloodRule:
                 del self._history[key]
 
     def check(self, record: dict) -> dict | None:
-        if not record.get("syn_flag"):
+        if record.get("protocol") != "TCP":
             return None
+        # Only count initial SYN (SYN=1, ACK=0); skip SYN-ACK server responses
+        if "initial_syn" in record:
+            if not record.get("initial_syn"):
+                return None
+        else:
+            if not record.get("syn_flag"):
+                return None
 
         src = record.get("src_ip", "")
         dst = record.get("dst_ip", "")
