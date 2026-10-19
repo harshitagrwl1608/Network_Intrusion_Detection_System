@@ -976,10 +976,16 @@ class RuleEngine:
             ),
         ]
 
-        # Dedicated write queues: alerts NEVER drop; devices have bounded queue + dedup
+        # Alert queue is unbounded (never drops); device queue is bounded + dedup.
+        # DEVICE_REFRESH_INTERVAL: seconds between re-writing the same (mac, ip)
+        # to the DB to update last_seen. Set to 0 to disable refresh (lifetime dedup).
+        DEVICE_REFRESH_INTERVAL = 300  # 5 minutes
+        self._device_refresh_s: float = DEVICE_REFRESH_INTERVAL
         self._alert_queue: queue.Queue = queue.Queue()
         self._device_queue: queue.Queue = queue.Queue(maxsize=1000)
-        self._seen_devices: set = set()
+        # Dict instead of set: tracks (mac,ip) -> wall-clock time of last DB write
+        # so the same device can refresh its last_seen periodically.
+        self._seen_devices: dict = {}
         self._stats = {
             "alert_writes": 0,
             "device_writes": 0,
@@ -1025,21 +1031,65 @@ class RuleEngine:
                         logger.error(f"Rule GC error for {rule.name}: {e}")
 
     def _alert_writer_loop(self):
-        """Drain the alert queue. Every alert MUST be persisted; never drops."""
+        """
+        Drain the alert queue and persist each alert to the DB.
+
+        Connection handling:
+          - If the initial connection fails, retries up to 5 times with
+            exponential back-off (1 s, 2 s, 4 s, 8 s, 16 s).
+          - After the retry budget is exhausted, the thread continues to drain
+            the queue but counts every alert as a drop (alerts_dropped).
+          - Transient write errors on a live connection increment alerts_dropped
+            and log the failure; the alert is NOT silently discarded silently.
+          - On shutdown, the stop sentinel is consumed and the loop exits cleanly.
+        """
         import queue as _queue
-        from storage.db import get_connection
-        conn = get_connection()
+        from storage.db import get_connection, init_db
+
+        conn = None
+        _MAX_RETRIES = 5
+        for attempt in range(_MAX_RETRIES):
+            try:
+                conn = get_connection()
+                break
+            except Exception as exc:
+                delay = 2 ** attempt
+                logger.error(
+                    f"Alert writer: DB connection attempt {attempt+1}/{_MAX_RETRIES} "
+                    f"failed: {exc}. Retrying in {delay}s..."
+                )
+                time.sleep(delay)
+
+        if conn is None:
+            logger.error(
+                "Alert writer: exhausted DB connection retries. "
+                "All queued alerts will be counted as dropped."
+            )
+
         while True:
             try:
                 sentinel, data = self._alert_queue.get(timeout=1)
                 if sentinel == "stop":
                     self._alert_queue.task_done()
                     break
-                try:
-                    self._write_alert(conn, data)
-                    self._stats["alert_writes"] += 1
-                except Exception as e:
-                    logger.error(f"Alert write FAILED (data not persisted): {e} | {data}")
+                if conn is not None:
+                    try:
+                        self._write_alert(conn, data)
+                        self._stats["alert_writes"] += 1
+                    except Exception as e:
+                        self._stats["alerts_dropped"] += 1
+                        logger.error(
+                            f"Alert write FAILED (alert dropped, drop count: "
+                            f"{self._stats['alerts_dropped']}): {e} | "
+                            f"rule={data.get('rule_name','?')}"
+                        )
+                else:
+                    self._stats["alerts_dropped"] += 1
+                    logger.error(
+                        f"Alert dropped (no DB connection): "
+                        f"rule={data.get('rule_name','?')} — "
+                        f"drop count: {self._stats['alerts_dropped']}"
+                    )
                 self._alert_queue.task_done()
             except _queue.Empty:
                 if self._stop_event.is_set():
@@ -1109,14 +1159,16 @@ class RuleEngine:
         )
 
     def check(self, record: dict):
-        # Device dedup: only enqueue first-seen (mac, ip) per engine lifetime
-        # to prevent device churn from filling/crowding the write queues.
+        # Device refresh: enqueue device write on first-seen OR after the
+        # refresh interval has elapsed so last_seen stays current.
         mac = record.get("src_mac")
         ip  = record.get("src_ip")
         if mac and ip:
             dev_key = (mac, ip)
-            if dev_key not in self._seen_devices:
-                self._seen_devices.add(dev_key)
+            now_wall = time.time()
+            last_write = self._seen_devices.get(dev_key, 0.0)
+            if now_wall - last_write >= self._device_refresh_s:
+                self._seen_devices[dev_key] = now_wall
                 import queue as _queue
                 try:
                     self._device_queue.put_nowait(("device", {"mac": mac, "ip": ip}))

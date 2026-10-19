@@ -303,7 +303,7 @@ If you want to analyze pre-recorded network traffic or do not have root capture 
 .venv/bin/python evaluation/replay.py --pcap log.pcap
 
 # 2. Launch the web dashboard to inspect the alerts and plain-language report
-.venv/bin/python -c "from dashboard.app import app; app.run(host='0.0.0.0', port=5000)"
+.venv/bin/python -c "from dashboard.app import app; app.run(host='127.0.0.1', port=5000)"
 ```
 
 Open your browser and navigate to:
@@ -331,7 +331,7 @@ All parameters in `config.py` can be tuned via `.env`:
 | `DNS_ENTROPY_THRESHOLD` | `3.8` | Shannon entropy threshold for suspicious domain names |
 | `DNS_QUERY_MAX_LEN` | `50` | Maximum character length for legitimate domains |
 | `ANALYSIS_INTERVAL` | `30` | Seconds between background aggregation and retention checks |
-| `DASHBOARD_HOST` | `0.0.0.0` | Host address for Flask dashboard |
+| `DASHBOARD_HOST` | `127.0.0.1` | Host/IP for the Flask dashboard. Default is loopback-only. Set to `0.0.0.0` only with a firewall/reverse-proxy in place. |
 | `DASHBOARD_PORT` | `5000` | Port for Flask dashboard |
 | `ALERT_RETENTION_DAYS`| `14` | Days of alerts to keep in database (`0` = keep indefinitely) |
 | `HISTORY_DAYS` | `7` | Default days displayed in dashboard history tab |

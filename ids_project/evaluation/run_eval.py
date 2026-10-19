@@ -5,7 +5,7 @@ evaluation/run_eval.py
 Automated, reproducible evaluation harness for NetGuard IDS.
 
 Usage:
-    python evaluation/run_eval.py [--attack PCAP] [--benign PCAP] \
+    python evaluation/run_eval.py [--attack PCAP] [--benign PCAP] \\
         [--labels CSV] [--blocklist TXT] [--out-json FILE]
 
 What it does:
@@ -19,9 +19,22 @@ What it does:
   5. Counts ALL alerts from benign replay as False Positives.
      Reports per-rule FP counts.
   6. Emits combined human-readable report + optional JSON output.
-  7. Exit 0 = clean (all scenarios hit, zero benign FPs).
-     Exit 1 = missed scenarios or benign FPs.
-     Exit 2 = setup error.
+
+METRIC DEFINITIONS (from SYNTHETIC scenarios only — not real-world accuracy):
+  TP        — labelled attack scenarios that produced a matching alert.
+  FN        — labelled attack scenarios with NO matching alert (missed detections).
+  FP_attack — attack-replay alerts that did NOT match any labelled scenario.
+  FP_benign — alerts raised during purely benign replay.
+
+  Precision = TP / (TP + FP_attack + FP_benign)
+              (ALL alert sources reduce precision; no alert is free)
+  Recall    = TP / (TP + FN)
+  F1        = harmonic mean of Precision and Recall
+
+Exit codes:
+  0 — ALL scenarios detected AND zero FP_attack AND zero FP_benign.
+  1 — Any FN, FP_attack, or FP_benign present.
+  2 — Setup / input error (missing file, bad CSV, etc.).
 """
 
 import argparse
@@ -100,6 +113,7 @@ def _load_labels(path: str) -> list:
 
 
 def _replay_into(pcap: str, db_path: str, arp_path: str, bl_path: str):
+    """Replay *pcap* into an isolated DB with replay timestamps driving GC."""
     import config
     from storage.db import get_connection, init_db
     from engine.rules import RuleEngine
@@ -118,10 +132,30 @@ def _replay_into(pcap: str, db_path: str, arp_path: str, bl_path: str):
 
     conn = get_connection()
     init_db(conn)
-    engine = RuleEngine(conn, blocklist, config)
+
+    # Shared mutable cell: updated by the wrapper as each packet is processed
+    # so the GC thread reads replay time, not wall-clock time.
+    _clock_state = [0.0]  # [0] = latest event_timestamp seen so far
+
+    def _event_clock():
+        return _clock_state[0]
+
+    engine = RuleEngine(conn, blocklist, config, event_clock=_event_clock)
+
+    # Thin wrapper that advances _clock_state before delegating to the engine.
+    class _TrackingEngine:
+        def check(self_, record: dict):  # noqa: N805
+            ts = record.get("event_timestamp", record.get("timestamp", 0.0))
+            if ts and ts > _clock_state[0]:
+                _clock_state[0] = ts
+            return engine.check(record)
+        def flush(self_):  # noqa: N805
+            return engine.flush()
+
+    tracking_engine = _TrackingEngine()
     logger.info(f"Replaying: {pcap}")
-    replay_pcap(pcap, engine)
-    engine.flush()
+    replay_pcap(pcap, tracking_engine)
+    tracking_engine.flush()
     logger.info(f"Stats: {engine._stats}")
 
 
@@ -159,7 +193,7 @@ def _match(scenarios: list, alerts: list) -> tuple:
 
 
 def _report(attack_pcap, benign_pcap, labels_path, scenarios,
-            tp, fn, attack_fp, benign_alerts) -> dict:
+            tp, fn, fp_attack, benign_alerts) -> dict:
     W = 70
     rule_stats = {}
     for sc in scenarios:
@@ -174,47 +208,56 @@ def _report(attack_pcap, benign_pcap, labels_path, scenarios,
         r = a.get("rule_name", "?")
         benign_by_rule[r] = benign_by_rule.get(r, 0) + 1
 
-    n   = len(scenarios)
-    tp_n, fn_n = len(tp), len(fn)
-    extra_n     = len(attack_fp)
-    ben_fp_n    = len(benign_alerts)
-    prec = tp_n / (tp_n + extra_n) if (tp_n + extra_n) > 0 else 0.0
-    rec  = tp_n / (tp_n + fn_n)    if (tp_n + fn_n)    > 0 else 0.0
+    n           = len(scenarios)
+    tp_n        = len(tp)
+    fn_n        = len(fn)
+    fp_attack_n = len(fp_attack)
+    fp_benign_n = len(benign_alerts)
+    # Precision includes ALL sources of spurious alerts so that benign FPs
+    # properly degrade precision rather than being reported separately without
+    # affecting the headline metric.
+    total_alerts = tp_n + fp_attack_n + fp_benign_n
+    prec = tp_n / total_alerts if total_alerts > 0 else 0.0
+    rec  = tp_n / (tp_n + fn_n) if (tp_n + fn_n) > 0 else 0.0
     f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
 
     sep  = "=" * W
     dash = "-" * W
     print()
     print(sep)
-    print("  NETGUARD IDS — COMBINED EVALUATION REPORT")
+    print("  NETGUARD IDS — COMBINED EVALUATION REPORT  [SYNTHETIC SCENARIOS ONLY]")
     print(sep)
+    print("  NOTE: All metrics derive from SYNTHETIC test fixtures.")
+    print("        They do NOT represent real-world detection accuracy.")
+    print(dash)
     print(f"  Run time    : {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Attack PCAP : {attack_pcap}")
     print(f"  Benign PCAP : {benign_pcap}")
     print(f"  Labels CSV  : {labels_path}")
     print(dash)
-    print("  ATTACK DETECTION")
+    print("  ATTACK DETECTION (synthetic labelled scenarios)")
     print(dash)
-    print(f"  Scenarios (labelled) :              {n:4d}")
-    print(f"  True Positives (TP)  :              {tp_n:4d}")
-    print(f"  False Negatives (FN) :              {fn_n:4d}")
-    print(f"  Unmatched attack alerts (extra) :   {extra_n:4d}")
+    print(f"  Scenarios (labelled)               : {n:4d}")
+    print(f"  True Positives (TP)                : {tp_n:4d}")
+    print(f"  False Negatives (FN)               : {fn_n:4d}")
+    print(f"  FP_attack (unmatched attack alerts): {fp_attack_n:4d}")
+    print(f"  FP_benign (alerts on benign PCAP)  : {fp_benign_n:4d}")
     print(dash)
-    print(f"  Precision  (TP/(TP+extra)):  {prec*100:5.1f}%")
-    print(f"  Recall     (TP/(TP+FN))  :  {rec*100:5.1f}%")
-    print(f"  F1                       :  {f1*100:5.1f}%")
+    print(f"  Precision [TP/(TP+FP_atk+FP_ben)]: {prec*100:5.1f}%")
+    print(f"  Recall    [TP/(TP+FN)]            : {rec*100:5.1f}%")
+    print(f"  F1                                : {f1*100:5.1f}%")
     print()
-    print("  Per-rule breakdown:")
+    print("  Per-rule breakdown (attack scenarios):")
     for rule, c in sorted(rule_stats.items()):
         t = c["tp"] + c["fn"]
         print(f"    {rule:<22s}  TP={c['tp']}/{t}  FN={c['fn']}/{t}")
     print()
     print(dash)
-    print("  BENIGN TRAFFIC (False Positives)")
+    print("  BENIGN TRAFFIC (False Positive Detail)")
     print(dash)
-    print(f"  Total FP alerts on benign traffic: {ben_fp_n}")
-    if ben_fp_n == 0:
-        print("  [OK] Zero false positives.")
+    print(f"  Total FP_benign alerts: {fp_benign_n}")
+    if fp_benign_n == 0:
+        print("  [OK] Zero false positives on benign traffic.")
     else:
         print("  [WARN] Benign traffic triggered alerts — tune thresholds:")
         for rule, cnt in sorted(benign_by_rule.items()):
@@ -233,9 +276,9 @@ def _report(attack_pcap, benign_pcap, labels_path, scenarios,
                   f"{sc.get('src_ip','?')}→{sc.get('dst_ip','?')}:{sc.get('dst_port','?')} "
                   f"  {sc.get('description','')[:40]}")
 
-    if attack_fp:
-        print("\n  Unmatched attack alerts (investigate):")
-        for a in attack_fp[:5]:
+    if fp_attack:
+        print("\n  FP_attack — unmatched attack alerts (investigate):")
+        for a in fp_attack[:5]:
             print(f"    [{a.get('rule_name')}] "
                   f"{a.get('src_ip')}→{a.get('dst_ip')}:{a.get('dst_port','?')} "
                   f"  {str(a.get('detail',''))[:40]}")
@@ -243,13 +286,31 @@ def _report(attack_pcap, benign_pcap, labels_path, scenarios,
 
     return {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "note": "All metrics are from SYNTHETIC test scenarios only.",
         "attack_pcap": attack_pcap, "benign_pcap": benign_pcap,
         "labels_path": labels_path,
-        "scenarios": n, "tp": tp_n, "fn": fn_n, "attack_extra": extra_n,
+        "scenarios": n, "tp": tp_n, "fn": fn_n,
+        "fp_attack": fp_attack_n, "fp_benign": fp_benign_n,
         "precision": round(prec, 4), "recall": round(rec, 4), "f1": round(f1, 4),
-        "benign_fp_total": ben_fp_n, "benign_fp_by_rule": benign_by_rule,
+        "benign_fp_by_rule": benign_by_rule,
         "per_rule": {r: dict(c) for r, c in rule_stats.items()},
     }
+
+
+def _determine_exit_code(fn: list, fp_attack: list, benign_alerts: list) -> int:
+    """
+    Return the appropriate process exit code.
+
+    Exit 0 only when ALL of the following are true:
+      - No missed attack scenarios (fn is empty)
+      - No unmatched attack alerts (fp_attack is empty)
+      - No false-positive alerts on benign traffic (benign_alerts is empty)
+
+    Any violation → exit 1.  Setup errors → exit 2 (handled elsewhere).
+    """
+    if fn or fp_attack or benign_alerts:
+        return 1
+    return 0
 
 
 def main():
@@ -303,10 +364,10 @@ def main():
         benign_alerts = _read_alerts(benign_db)
         logger.info(f"Attack alerts={len(attack_alerts)}, Benign alerts={len(benign_alerts)}")
 
-        tp, fn, attack_fp = _match(scenarios, attack_alerts)
+        tp, fn, fp_attack = _match(scenarios, attack_alerts)
         result = _report(
             args.attack, args.benign, args.labels,
-            scenarios, tp, fn, attack_fp, benign_alerts,
+            scenarios, tp, fn, fp_attack, benign_alerts,
         )
 
         if args.out_json:
@@ -314,7 +375,11 @@ def main():
                 json.dump(result, f, indent=2)
             logger.info(f"JSON results → {args.out_json}")
 
-        sys.exit(0 if (not fn and not benign_alerts) else 1)
+        # Exit 0 only when ALL three conditions are satisfied:
+        #   no missed scenarios, no unmatched attack alerts, no benign FPs.
+        if fn or fp_attack or benign_alerts:
+            sys.exit(1)
+        sys.exit(0)
 
     finally:
         for p in (attack_db, attack_arp, benign_db, benign_arp):
