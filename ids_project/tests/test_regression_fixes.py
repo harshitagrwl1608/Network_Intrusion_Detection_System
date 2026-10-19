@@ -301,6 +301,81 @@ class TestReplayEventClockE2E(unittest.TestCase):
             "event_clock must be callable",
         )
 
+    def test_standalone_replay_missing_blocklist_uses_replay_clock(self):
+        """Path 1: Missing blocklist path in standalone replay must use a ReplayClock."""
+        from evaluation.replay import run_standalone_replay, ReplayClock
+        pcap_path = os.path.join(self.tmp_dir, "mini.log")
+        with open(pcap_path, "w") as f:
+            f.write("2026-01-01 12:00:00.000000 IP 10.0.0.1.1234 > 10.0.0.2.80: Flags [S], seq 1\n")
+
+        tracking_engine = run_standalone_replay(
+            pcap_path=pcap_path,
+            blocklist_path=os.path.join(self.tmp_dir, "nonexistent_bl.txt"),
+            db_path=config.SQLITE_PATH,
+        )
+        self.assertIsNotNone(tracking_engine.engine._event_clock)
+        self.assertIsInstance(tracking_engine.engine._event_clock, ReplayClock)
+
+    def test_standalone_replay_loaded_blocklist_uses_replay_clock(self):
+        """Path 2: Loaded blocklist path in standalone replay must use a ReplayClock."""
+        from evaluation.replay import run_standalone_replay, ReplayClock
+        pcap_path = os.path.join(self.tmp_dir, "mini.log")
+        with open(pcap_path, "w") as f:
+            f.write("2026-01-01 12:00:00.000000 IP 10.0.0.1.1234 > 10.0.0.2.80: Flags [S], seq 1\n")
+
+        bl_path = os.path.join(self.tmp_dir, "test_bl.txt")
+        with open(bl_path, "w") as f:
+            f.write("198.51.100.42\n")
+
+        tracking_engine = run_standalone_replay(
+            pcap_path=pcap_path,
+            blocklist_path=bl_path,
+            db_path=config.SQLITE_PATH,
+        )
+        self.assertIsNotNone(tracking_engine.engine._event_clock)
+        self.assertIsInstance(tracking_engine.engine._event_clock, ReplayClock)
+
+    def test_live_engine_uses_wall_clock_when_no_clock_supplied(self):
+        """When no event_clock is passed, RuleEngine falls back to wall-clock time."""
+        from storage.db import get_connection
+        from engine.rules import RuleEngine
+        conn = get_connection()
+        engine = RuleEngine(conn, set(), config, event_clock=None)
+        try:
+            self.assertIsNone(engine._event_clock)
+            # prune_stale without arguments must succeed using time.time
+            engine.prune_stale()
+        finally:
+            engine.flush()
+
+    def test_standalone_replay_real_integration_advances_clock_and_persists(self):
+        """Real E2E standalone replay: processes packets, advances clock, and writes alerts."""
+        from evaluation.replay import run_standalone_replay
+        from storage.db import get_connection
+
+        pcap_path = os.path.join(self.tmp_dir, "port_scan.log")
+        with open(pcap_path, "w") as f:
+            for port in range(80, 96):
+                f.write(
+                    f"2026-01-01 12:00:{port-80:02d}.000000 IP 192.168.1.105.12345 > "
+                    f"192.168.1.1.{port}: Flags [S], seq 1\n"
+                )
+
+        eval_db = os.path.join(self.tmp_dir, "e2e_replay.db")
+        tracking_engine = run_standalone_replay(
+            pcap_path=pcap_path,
+            blocklist_path=os.path.join(self.tmp_dir, "nonexistent.txt"),
+            db_path=eval_db,
+        )
+
+        self.assertGreater(tracking_engine.clock.current_time, 0.0)
+        c = get_connection()
+        cur = c.cursor()
+        cur.execute("SELECT COUNT(*) FROM alerts WHERE rule_name='PORT_SCAN'")
+        cnt = cur.fetchone()[0]
+        c.close()
+        self.assertGreaterEqual(cnt, 1, "Expected port scan alert to be persisted by standalone replay")
+
 
 # =============================================================================
 # 3. Alert persistence failure handling
@@ -310,8 +385,8 @@ class TestAlertPersistenceFailures(unittest.TestCase):
     """
     Defect: alert writer silently dropped alerts on DB write failure without
             incrementing alerts_dropped; no retry on connection failure.
-    Fix:    Write failures increment alerts_dropped and log clearly;
-            connection failures retry with back-off.
+    Fix:    Write failures retry with backoff and spool to durable local storage;
+            spool drains on recovery; drops increment when capacity exceeded.
     """
 
     def setUp(self):
@@ -354,8 +429,7 @@ class TestAlertPersistenceFailures(unittest.TestCase):
 
     def test_write_failure_increments_alerts_dropped(self):
         """
-        Defect: on write exception, alerts_dropped was NOT incremented.
-        Fix:    alerts_dropped += 1 before logging.
+        When write fails AND spooling is saturated/disabled, alerts_dropped is incremented.
         """
         engine = self._make_engine()
         try:
@@ -365,6 +439,7 @@ class TestAlertPersistenceFailures(unittest.TestCase):
                 raise sqlite3.OperationalError("disk full")
 
             engine._write_alert = _failing_write
+            engine._spool.max_size = 0  # Disable spool capacity
 
             # Enqueue one alert directly
             engine._alert_queue.put(("alert", self._make_alert()))
@@ -372,7 +447,7 @@ class TestAlertPersistenceFailures(unittest.TestCase):
 
             self.assertEqual(
                 engine._stats["alerts_dropped"], 1,
-                "alerts_dropped must be 1 after a write failure",
+                "alerts_dropped must be 1 after a write failure when spool is full",
             )
             self.assertEqual(
                 engine._stats["alert_writes"], 0,
@@ -383,12 +458,8 @@ class TestAlertPersistenceFailures(unittest.TestCase):
 
     def test_connection_failure_increments_alerts_dropped(self):
         """
-        DB connection failure at writer startup → all queued alerts counted as dropped.
-
-        We patch time.sleep inside the writer thread to eliminate the 31-second
-        exponential back-off so the test runs in < 1 second.
-        Alerts are enqueued BEFORE flush() to ensure they are seen after the
-        retry budget is exhausted and conn is None.
+        DB connection failure at writer startup with full/disabled spool
+        causes queued alerts to be counted as dropped.
         """
         from engine.rules import RuleEngine
         from storage.db import get_connection
@@ -400,25 +471,23 @@ class TestAlertPersistenceFailures(unittest.TestCase):
         def _broken_get_conn():
             raise OSError("simulated DB unavailable")
 
-        # Patch both get_connection (to fail) and time.sleep (to skip backoff).
         with patch.object(db_mod, "get_connection", _broken_get_conn), \
              patch.object(rules_mod.time, "sleep", return_value=None):
-            engine = RuleEngine(conn, set(), config)
-            # Enqueue 3 alerts BEFORE flushing so they go into the queue
-            # before the stop sentinel, giving the writer a chance to process them
-            # with conn=None and count each as dropped.
-            for _ in range(3):
-                engine._alert_queue.put(("alert", self._make_alert()))
-            # Small sleep to let the writer thread exhaust its retry loop
-            # (all sleeps are mocked so this just yields CPU)
-            time.sleep(0.2)
-            engine.flush()
+            setattr(config, "ALERT_SPOOL_MAX_SIZE", 0)
+            try:
+                engine = RuleEngine(conn, set(), config)
+                for _ in range(3):
+                    engine._alert_queue.put(("alert", self._make_alert()))
+                time.sleep(0.2)
+                engine.flush()
 
-        self.assertEqual(
-            engine._stats["alerts_dropped"], 3,
-            f"3 alerts must be counted as dropped when DB is unavailable. "
-            f"Got: {engine._stats['alerts_dropped']}",
-        )
+                self.assertEqual(
+                    engine._stats["alerts_dropped"], 3,
+                    f"3 alerts must be counted as dropped when DB is unavailable and spool is full. "
+                    f"Got: {engine._stats['alerts_dropped']}",
+                )
+            finally:
+                setattr(config, "ALERT_SPOOL_MAX_SIZE", 5000)
 
     def test_successful_write_not_counted_as_dropped(self):
         """Successful writes → alerts_dropped stays at 0."""
@@ -435,12 +504,11 @@ class TestAlertPersistenceFailures(unittest.TestCase):
 
     def test_shutdown_with_pending_alerts_does_not_hang_forever(self):
         """
-        Shutdown must complete within the documented 10-second timeout
+        Shutdown must complete within the documented timeout
         even when the DB is slow or unavailable.
         """
         engine = self._make_engine()
         try:
-            # Enqueue alerts and immediately flush
             for _ in range(10):
                 engine._alert_queue.put(("alert", self._make_alert()))
             t0 = time.time()
@@ -449,7 +517,7 @@ class TestAlertPersistenceFailures(unittest.TestCase):
             self.assertLess(elapsed, 15.0,
                             "flush() must not hang indefinitely")
         finally:
-            pass  # engine already flushed
+            pass
 
     def test_queue_saturation_drops_devices_not_alerts(self):
         """
@@ -458,8 +526,6 @@ class TestAlertPersistenceFailures(unittest.TestCase):
         """
         engine = self._make_engine()
         try:
-            # Saturate the device queue by sending new IPs that bypass dedup
-            # We do this by directly saturating the bounded queue
             import queue as _q
             for i in range(1500):
                 try:
@@ -470,7 +536,6 @@ class TestAlertPersistenceFailures(unittest.TestCase):
                 except _q.Full:
                     break
 
-            # Enqueue 5 real alerts on the alert queue
             for _ in range(5):
                 engine._alert_queue.put(("alert", self._make_alert()))
 
@@ -483,10 +548,10 @@ class TestAlertPersistenceFailures(unittest.TestCase):
             engine.flush()
 
     def test_alert_stats_accuracy(self):
-        """alert_writes + alerts_dropped must account for every enqueued alert."""
+        """alert_writes + alerts_dropped + alerts_spooled must account for every enqueued alert."""
         engine = self._make_engine()
         TOTAL = 20
-        fail_every = 5  # fail every 5th write
+        fail_every = 5
 
         call_count = [0]
         original_write = engine._write_alert
@@ -504,13 +569,16 @@ class TestAlertPersistenceFailures(unittest.TestCase):
             engine.flush()
 
             total_accounted = (
-                engine._stats["alert_writes"] + engine._stats["alerts_dropped"]
+                engine._stats["alert_writes"]
+                + engine._stats["alerts_dropped"]
+                + engine._stats["alerts_spooled"]
             )
             self.assertEqual(
                 total_accounted, TOTAL,
-                f"alert_writes + alerts_dropped must equal total enqueued. "
+                f"alert_writes + alerts_dropped + alerts_spooled must equal total enqueued. "
                 f"Got writes={engine._stats['alert_writes']} "
-                f"dropped={engine._stats['alerts_dropped']} total={total_accounted}",
+                f"dropped={engine._stats['alerts_dropped']} "
+                f"spooled={engine._stats['alerts_spooled']} total={total_accounted}",
             )
         finally:
             engine._write_alert = original_write

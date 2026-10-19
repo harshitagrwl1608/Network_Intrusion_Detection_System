@@ -133,30 +133,13 @@ def _replay_into(pcap: str, db_path: str, arp_path: str, bl_path: str):
     conn = get_connection()
     init_db(conn)
 
-    # Shared mutable cell: updated by the wrapper as each packet is processed
-    # so the GC thread reads replay time, not wall-clock time.
-    _clock_state = [0.0]  # [0] = latest event_timestamp seen so far
+    from evaluation.replay import create_replay_engine
+    tracking_engine = create_replay_engine(conn, blocklist, config)
 
-    def _event_clock():
-        return _clock_state[0]
-
-    engine = RuleEngine(conn, blocklist, config, event_clock=_event_clock)
-
-    # Thin wrapper that advances _clock_state before delegating to the engine.
-    class _TrackingEngine:
-        def check(self_, record: dict):  # noqa: N805
-            ts = record.get("event_timestamp", record.get("timestamp", 0.0))
-            if ts and ts > _clock_state[0]:
-                _clock_state[0] = ts
-            return engine.check(record)
-        def flush(self_):  # noqa: N805
-            return engine.flush()
-
-    tracking_engine = _TrackingEngine()
     logger.info(f"Replaying: {pcap}")
     replay_pcap(pcap, tracking_engine)
     tracking_engine.flush()
-    logger.info(f"Stats: {engine._stats}")
+    logger.info(f"Stats: {tracking_engine.engine._stats}")
 
 
 def _match(scenarios: list, alerts: list) -> tuple:
