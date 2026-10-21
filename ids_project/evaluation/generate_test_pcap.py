@@ -681,6 +681,45 @@ def gen_hex_chunk_dns_tunnel(base: float) -> list:
     return [pkt]
 
 
+def make_tls_client_hello(sni_hostname: str) -> bytes:
+    """Construct a TLS 1.2 Client Hello payload with SNI extension."""
+    sni = sni_hostname.encode("utf-8")
+    ext_data = b"\x00" + len(sni).to_bytes(2, "big") + sni
+    ext_list = len(ext_data).to_bytes(2, "big") + ext_data
+    sni_ext = (0).to_bytes(2, "big") + len(ext_list).to_bytes(2, "big") + ext_list
+    extensions = len(sni_ext).to_bytes(2, "big") + sni_ext
+
+    client_hello_body = (
+        b"\x03\x03" +   # TLS 1.2
+        b"\x00" * 32 +  # random bytes
+        b"\x00" +       # session ID length: 0
+        (2).to_bytes(2, "big") + b"\xc0\x2f" +  # 1 cipher suite
+        b"\x01\x00" +   # compression
+        extensions
+    )
+    handshake = b"\x01" + len(client_hello_body).to_bytes(3, "big") + client_hello_body
+    record = b"\x16\x03\x01" + len(handshake).to_bytes(2, "big") + handshake
+    return record
+
+
+def gen_tls_direct_ip_sni(base: float) -> list:
+    """S35: TLS Client Hello with literal IP SNI → TLS_ANOMALY."""
+    scenario(
+        "S35", "TLS_ANOMALY",
+        "TLS Client Hello containing literal IP address in SNI extension",
+        src_ip="192.168.1.101", dst_ip="198.51.100.99",
+        dst_port="443", protocol="TCP",
+    )
+    payload = make_tls_client_hello("198.51.100.99")
+    pkt = (_make_eth() /
+           IP(src="192.168.1.101", dst="198.51.100.99") /
+           TCP(sport=54340, dport=443, flags="PA") /
+           Raw(load=payload))
+    pkt.time = base + 290.0
+    return [pkt]
+
+
+
 
 
 
@@ -981,6 +1020,16 @@ def gen_benign_uuid_dns(base: float) -> list:
     return [pkt]
 
 
+def gen_benign_tls_legitimate_sni(base: float) -> list:
+    """Legitimate TLS Client Hello with valid hostname SNI should NOT fire TLS_ANOMALY."""
+    payload = make_tls_client_hello("www.example.com")
+    pkt = (_make_eth() /
+           IP(src="192.168.1.43", dst="93.184.216.34") /
+           TCP(sport=50400, dport=443, flags="PA") /
+           Raw(load=payload))
+    pkt.time = base + 20.0
+    return [pkt]
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -1028,6 +1077,7 @@ def generate_all():
     attack_pkts += gen_udp_flood(base)
     attack_pkts += gen_scanner_probe(base)
     attack_pkts += gen_hex_chunk_dns_tunnel(base)
+    attack_pkts += gen_tls_direct_ip_sni(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)
@@ -1057,6 +1107,7 @@ def generate_all():
     benign_pkts += gen_benign_udp_flood_below_threshold(base)
     benign_pkts += gen_benign_normal_http_assets(base)
     benign_pkts += gen_benign_uuid_dns(base)
+    benign_pkts += gen_benign_tls_legitimate_sni(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")

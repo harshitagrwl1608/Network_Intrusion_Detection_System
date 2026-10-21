@@ -556,7 +556,50 @@ Under the initial architecture (`5d22fba`):
 
 ---
 
+## Cycle 16: TLS Handshake SNI Anomaly & Direct IP Detection (`TlsAnomalyRule`)
+
+### 1. Root Cause Hypothesis & Goal
+- **Direct IP in TLS SNI:** RFC 6066 explicitly states: *"Literal IPv4 and IPv6 addresses are not permitted in "HostName"."* Malicious C2 frameworks (e.g. Cobalt Strike, Mythic, Sliver, custom reverse shells) communicating over HTTPS frequently populate the Server Name Indication (SNI) extension with a literal destination IP instead of a registered domain name, or use public dynamic DNS / reverse-proxy tunnels (e.g., `*.ngrok-free.app`, `*.duckdns.org`, `*.localtunnel.me`, `*.serveo.net`, `*.pagekite.me`, `*.trycloudflare.com`) to bypass ingress perimeter protections.
+- **Engine Invisibility:** Prior to this cycle, `RuleEngine` inspected unencrypted payloads for cleartext HTTP and DNS, but TLS handshakes (`ContentType 0x16`, `HandshakeType 0x01` Client Hello) passing on TCP port 443 were opaque, allowing direct-IP C2 beacons and suspicious tunneling domains to evade detection.
+- **Precision Requirements:** Must extract SNI safely from binary TLS 1.0–1.3 Client Hello frames using byte slicing without crashing on truncated or malformed records, alert on RFC 6066 literal IPv4/IPv6 violations and known reverse-proxy tunnels, maintain per-flow cooldowns, and generate zero false positives on legitimate TLS domains (e.g., `api.github.com`, `google.com`).
+
+### 2. Implementation
+- In `ids_project/config.py`:
+  - Added `TLS_INSPECTION = True` and `TLS_COOLDOWN_S = 60.0`.
+- In `ids_project/engine/rules.py`:
+  - Implemented `_extract_tls_sni(payload: bytes) -> Optional[str]`: Safe binary parser for TLS Client Hello SNI extension (`extension_type == 0x0000`, `server_name_type == 0x00`).
+  - Implemented `TlsAnomalyRule`: Stateful detection rule evaluating TLS handshakes. Flags `DIRECT_IP_SNI` when SNI is an IPv4 or IPv6 address. Flags `SUSPICIOUS_TUNNEL_SNI` when domain matches reverse-proxy suffixes (`_SUSPICIOUS_TLS_SUFFIXES`).
+  - Registered `TlsAnomalyRule` in `RuleEngine.rules`.
+- In `ids_project/tests/test_tls_anomaly.py`:
+  - Created 8 unit tests covering literal IPv4 SNI, literal IPv6 SNI, suspicious tunnel SNI, legitimate SNI exemption, disabled toggle, per-flow cooldown, malformed handshake safety, and non-TLS payload ignoring.
+  - All 8 unit tests pass in 0.012s.
+- In `ids_project/evaluation/generate_test_pcap.py` & `run_eval.py`:
+  - Added binary `make_tls_client_hello()` synthesizer for Scapy.
+  - Added Scenario S35: TLS Client Hello with literal IP SNI `198.51.100.99` targeting port 443 → `TLS_ANOMALY`.
+  - Added benign negative scenario `gen_benign_tls_legitimate_sni`: Legitimate HTTPS session with SNI `api.github.com` → 0 false positives.
+  - Registered `TlsAnomalyRule` in `ids_project/evaluation/run_eval.py`.
+  - Regenerated test PCAPs (1,133 attack packets, 778 benign packets) and labels (35 scenarios).
+
+### 3. Files Changed
+- `ids_project/config.py`
+- `ids_project/engine/rules.py`
+- `ids_project/evaluation/run_eval.py`
+- `ids_project/evaluation/generate_test_pcap.py`
+- `ids_project/evaluation/scenarios/test_labels.csv`
+- `ids_project/data/test_attacks.pcap`
+- `ids_project/data/test_benign.pcap`
+- `ids_project/tests/test_tls_anomaly.py`
+- `OVERNIGHT_STATUS.md`
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_tls_anomaly.py`: OK (8 tests passed in 0.012s).
+- `python3 -m unittest discover ids_project/tests`: OK (214 tests passed in 48.1s).
+- `python3 ids_project/evaluation/run_eval.py`: OK (35/35 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
+- `git diff --check`: Exit code 0.
+
+---
+
 ## Final Session Summary & Checklist
-- **Session Stop Condition:** Completed Cycles 8, 9, 10, 11, 12, 13, 14, and 15 enhancements, comprehensive tests, and clean evaluation.
-- **Total Cycles Completed:** 15
-- **All Applicable Regression Tests:** 206 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (34/34 scenarios).
+- **Session Stop Condition:** Completed Cycles 8, 9, 10, 11, 12, 13, 14, 15, and 16 enhancements, comprehensive tests, and clean evaluation.
+- **Total Cycles Completed:** 16
+- **All Applicable Regression Tests:** 214 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (35/35 scenarios).

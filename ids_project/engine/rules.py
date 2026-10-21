@@ -2715,6 +2715,171 @@ class DataExfiltrationRule:
 
 
 # =============================================================================
+# Rule 16: TLS Handshake & SNI Anomaly Detection
+# =============================================================================
+
+_SUSPICIOUS_TLS_SUFFIXES: tuple[str, ...] = (
+    ".ngrok-free.app", ".ngrok.io", ".localtunnel.me",
+    ".serveo.net", ".portmap.io", ".duckdns.org",
+    ".no-ip.biz", ".bounceme.net",
+)
+
+
+def _extract_tls_sni(payload: bytes) -> str | None:
+    """
+    Safely parse Server Name Indication (SNI) from a TLS Client Hello record.
+    Returns the decoded SNI string if present, or None.
+    """
+    if len(payload) < 44 or payload[0] != 0x16 or payload[5] != 0x01:
+        return None
+
+    pos = 43
+    if pos >= len(payload):
+        return None
+    session_id_len = payload[pos]
+    pos += 1 + session_id_len
+
+    if pos + 2 > len(payload):
+        return None
+    cipher_suites_len = int.from_bytes(payload[pos:pos+2], "big")
+    pos += 2 + cipher_suites_len
+
+    if pos + 1 > len(payload):
+        return None
+    compression_len = payload[pos]
+    pos += 1 + compression_len
+
+    if pos + 2 > len(payload):
+        return None
+    extensions_len = int.from_bytes(payload[pos:pos+2], "big")
+    pos += 2
+
+    end = min(len(payload), pos + extensions_len)
+    while pos + 4 <= end:
+        ext_type = int.from_bytes(payload[pos:pos+2], "big")
+        ext_len = int.from_bytes(payload[pos+2:pos+4], "big")
+        pos += 4
+        if ext_type == 0:  # Server Name Indication (SNI)
+            if pos + 5 <= end:
+                name_type = payload[pos+2]
+                name_len = int.from_bytes(payload[pos+3:pos+5], "big")
+                if name_type == 0 and pos + 5 + name_len <= end:
+                    try:
+                        return payload[pos+5:pos+5+name_len].decode("utf-8", errors="replace")
+                    except Exception:
+                        return None
+            return None
+        pos += ext_len
+    return None
+
+
+class TlsAnomalyRule:
+    """
+    Detects TLS handshake anomalies on port 443 and SSL/TLS services:
+    1. Literal IP in TLS SNI (RFC 6066 violation; common indicator of direct-IP botnet C2).
+    2. Dynamic DNS / Reverse-proxy tunneling services in SNI (*.ngrok-free.app, *.duckdns.org, etc.)
+       used to disguise C2 communication or data exfiltration.
+    """
+    name = "TLS_ANOMALY"
+    rule_version = "1.0"
+    ALERT_COOLDOWN_S = 60.0
+    MAX_TRACKED_FLOWS = 4096
+
+    def __init__(self, cooldown: float = 60.0, enabled: bool = True):
+        self.cooldown = float(cooldown)
+        self.enabled = bool(enabled)
+        self._lock = threading.Lock()
+        # Key: (src_ip, dst_ip, anomaly_type) -> float (last alert timestamp)
+        self._seen: dict[tuple, float] = {}
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.cooldown
+        with self._lock:
+            for k in list(self._seen):
+                if self._seen[k] < cutoff:
+                    del self._seen[k]
+
+    def check(self, record: dict) -> dict | None:
+        if not self.enabled:
+            return None
+        if record.get("type") != "IP" or record.get("protocol") != "TCP":
+            return None
+
+        src_ip = record.get("src_ip", "")
+        dst_ip = record.get("dst_ip", "")
+        dst_port = record.get("dst_port")
+        if not src_ip or not dst_ip or _is_trusted(src_ip):
+            return None
+
+        # Inspect TLS traffic (port 443, 8443, or typical TLS ports)
+        if dst_port not in (443, 8443):
+            return None
+
+        payload: bytes = record.get("payload", b"")
+        if not payload:
+            return None
+
+        sni = _extract_tls_sni(payload)
+        if not sni:
+            return None
+
+        sni_clean = sni.lower().strip()
+        anomaly_type = None
+        detail = ""
+
+        # Check 1: Literal IP in SNI (RFC 6066 prohibits literal IPs in HostName)
+        if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", sni_clean) or ":" in sni_clean:
+            anomaly_type = "DIRECT_IP_SNI"
+            detail = (
+                f"{src_ip} sent TLS Client Hello to {dst_ip}:{dst_port} with literal IP "
+                f"in SNI ('{sni}') — violates RFC 6066, possible C2 beacon"
+            )
+        # Check 2: Suspicious dynamic DNS / reverse-proxy tunnel in SNI
+        elif any(sni_clean.endswith(suffix) for suffix in _SUSPICIOUS_TLS_SUFFIXES):
+            anomaly_type = "SUSPICIOUS_TUNNEL_SNI"
+            detail = (
+                f"{src_ip} sent TLS Client Hello to {dst_ip}:{dst_port} with suspicious "
+                f"tunneling domain in SNI ('{sni}') — possible covert C2 channel"
+            )
+
+        if not anomaly_type:
+            return None
+
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        key = (src_ip, dst_ip, anomaly_type)
+
+        with self._lock:
+            last = self._seen.get(key)
+            if last is not None and now - last < self.cooldown:
+                return None
+            if key not in self._seen and len(self._seen) >= self.MAX_TRACKED_FLOWS:
+                self._seen.pop(next(iter(self._seen)))
+            self._seen[key] = now
+
+        logger.debug(f"{self.name} [{anomaly_type}] fired: {detail}")
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "src_port": record.get("src_port"),
+            "dst_port": dst_port,
+            "protocol": "TCP",
+            "severity": "high",
+            "confidence": "high" if anomaly_type == "DIRECT_IP_SNI" else "heuristic",
+            "detail": detail,
+            "evidence": {
+                "sni": sni,
+                "anomaly_type": anomaly_type,
+                "target_port": dst_port,
+            },
+            "window_start": now,
+            "window_end": now,
+        }
+
+
+
+# =============================================================================
 # Alert Spool & Rule Engine Orchestrator
 # =============================================================================
 
@@ -2946,6 +3111,10 @@ class RuleEngine:
             DataExfiltrationRule(
                 byte_threshold=getattr(cfg, "DATA_EXFIL_BYTE_THRESHOLD", 50000),
                 window=getattr(cfg, "DATA_EXFIL_WINDOW", 30),
+            ),
+            TlsAnomalyRule(
+                cooldown=getattr(cfg, "TLS_COOLDOWN_S", 60.0),
+                enabled=getattr(cfg, "TLS_INSPECTION", True),
             ),
         ]
 

@@ -81,6 +81,10 @@ DNS_FREQ_WINDOW       = int(os.getenv("DNS_FREQ_WINDOW", 60))            # secon
 DNS_SUBDOMAIN_THRESHOLD = int(os.getenv("DNS_SUBDOMAIN_THRESHOLD", 20))  # distinct subdomains
 DNS_SUBDOMAIN_WINDOW    = int(os.getenv("DNS_SUBDOMAIN_WINDOW", 60))     # seconds
 
+# --- TLS Inspection (TlsAnomalyRule) ---
+TLS_INSPECTION = os.getenv("TLS_INSPECTION", "true").lower() in ("true", "1")
+TLS_COOLDOWN_S = float(os.getenv("TLS_COOLDOWN_S", 60.0))
+
 # --- Analysis ---
 ANALYSIS_INTERVAL = int(os.getenv("ANALYSIS_INTERVAL", 30))       # seconds between runs
 

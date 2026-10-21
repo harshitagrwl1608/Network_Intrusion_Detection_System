@@ -119,6 +119,7 @@ def _load_labels(path: str) -> list:
         IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
         TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
         TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
+        TlsAnomalyRule,
     )
     known_rules = {
         rule.name for rule in (
@@ -126,6 +127,7 @@ def _load_labels(path: str) -> list:
             IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
             TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
             TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
+            TlsAnomalyRule,
         )
     }
     protocols = {"TCP", "UDP", "ICMP", "ICMPV6", "ARP"}
@@ -167,6 +169,7 @@ def _run_metadata() -> dict:
         IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
         TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
         TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
+        TlsAnomalyRule,
     )
 
     rules = (
@@ -174,6 +177,7 @@ def _run_metadata() -> dict:
         IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
         TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
         TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
+        TlsAnomalyRule,
     )
     setting_names = (
         "PORT_SCAN_THRESHOLD", "UDP_SCAN_THRESHOLD", "UDP_FLOOD_THRESHOLD", "UDP_FLOOD_WINDOW",
@@ -187,6 +191,7 @@ def _run_metadata() -> dict:
         "BRUTE_FORCE_THRESHOLD", "BRUTE_FORCE_WINDOW",
         "SLOW_SCAN_THRESHOLD", "SLOW_SCAN_WINDOW",
         "DATA_EXFIL_BYTE_THRESHOLD", "DATA_EXFIL_WINDOW",
+        "TLS_INSPECTION",
         "PAYLOAD_INSPECTION", "PAYLOAD_MAX_BYTES",
     )
     return {
