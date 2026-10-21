@@ -51,7 +51,6 @@ CREATE TABLE IF NOT EXISTS alerts (
     city        TEXT,
     idempotency_key TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_idempotency ON alerts(idempotency_key);
 
 CREATE TABLE IF NOT EXISTS observations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,7 +102,6 @@ CREATE TABLE IF NOT EXISTS alerts (
     city        TEXT,
     idempotency_key TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_idempotency_pg ON alerts(idempotency_key);
 
 CREATE TABLE IF NOT EXISTS observations (
     id          SERIAL  PRIMARY KEY,
@@ -196,10 +194,25 @@ def _migrate_columns(conn, cur):
                 _log.getLogger(__name__).warning(
                     f"Unexpected migration error ({table}.{col}): {exc}"
                 )
+    # Create the idempotency index only AFTER the column migration has run.
+    # Existing databases may not have idempotency_key yet, so putting the
+    # index in the initial schema would fail before _migrate_columns() adds it.
     try:
-        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_idempotency ON alerts(idempotency_key)")
-    except Exception:
-        pass
+        if config.DB_BACKEND == "postgres":
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_idempotency_pg "
+                "ON alerts(idempotency_key)"
+            )
+        else:
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_idempotency "
+                "ON alerts(idempotency_key)"
+            )
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            f"Could not create alerts idempotency index: {exc}"
+        )
 
 
 # ---------------------------------------------------------------------------
