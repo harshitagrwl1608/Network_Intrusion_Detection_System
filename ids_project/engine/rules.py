@@ -1552,6 +1552,33 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
         ),
         "heuristic",
     ),
+    # Automated web reconnaissance / vulnerability scanner probe
+    (
+        "SCANNER_PROBE",
+        re.compile(
+            rb"(?i)(User-Agent:\s*[^\r\n]*\b(sqlmap|nikto|gobuster|dirbuster|dirsearch|wfuzz|ffuf|nuclei|masscan|wpscan|acunetix|nessus|openvas|arachni)\b|Mozilla/5\.00\s*\(Nikto|nmap\s+scripting\s+engine)"
+        ),
+        "high",
+    ),
+    # Sensitive configuration, credential, or VCS repository file probe
+    (
+        "SENSITIVE_FILE_PROBE",
+        re.compile(
+            rb"(?i)(GET|POST|HEAD|OPTIONS)\s+[^\r\n]*?(?:/|\b)(\.env(\.[\w-]+)?|\.git/(config|HEAD)|\.svn/entries|id_rsa|id_ed25519|\.aws/(credentials|config)|wp-config\.php|web\.config)\b"
+        ),
+        "high",
+    ),
+    # Remote download cradle or interactive socket redirection
+    (
+        "REVERSE_SHELL_CRADLE",
+        re.compile(
+            rb"(?i)(curl\s+[^\r\n|]+?\|\s*(ba)?sh|wget\s+[^\r\n|]+?\|\s*(ba)?sh|"
+            rb"powershell(\.exe)?\s+-[^\r\n]*(enc|nop|downloadstring|iex)|"
+            rb"iex\s*\(\s*(new-object\s+net\.webclient|iwr)|"
+            rb"0<&196;exec\s*196<>/dev/tcp/|mkfifo\s+/tmp/[\w.-]+;\s*cat\s+/tmp/)"
+        ),
+        "high",
+    ),
 ]
 
 # Only inspect unencrypted application protocols (TLS payload is ciphertext)
@@ -1586,7 +1613,7 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.5"
+    rule_version = "1.6"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048):

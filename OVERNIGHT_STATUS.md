@@ -476,9 +476,49 @@ Under the initial architecture (`5d22fba`):
 - `python3 ids_project/evaluation/run_eval.py`: OK (32/32 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
 - `git diff --check`: Exit code 0.
 
+## Cycle 14: Automated Reconnaissance Scanner & Sensitive File Probing (`PayloadRule` Expansion)
+
+### 1. Root Cause Hypothesis & Goal
+- **Automated Web Reconnaissance Scanning:** Threat actors systematically scan web services using automated offensive security scanners (`sqlmap`, `nikto`, `gobuster`, `dirbuster`, `nuclei`, `masscan`, `wpscan`, `acunetix`, `nessus`, `openvas`, `arachni`). These tools generate distinct `User-Agent` headers and probe tokens that should immediately trigger high-confidence detection.
+- **Sensitive Configuration & Credential Exposure Probing:** Automated bots and human adversaries actively probe web roots for sensitive configuration files (`.env`, `.env.local`, `.env.production`), version control directories (`.git/config`, `.git/HEAD`, `.svn/entries`), SSH private keys (`id_rsa`, `id_ed25519`), cloud credentials (`.aws/credentials`, `.aws/config`), and CMS config backups (`wp-config.php`, `web.config`). Probing for these endpoints indicates targeted reconnaissance.
+- **Remote Download Cradles & Interactive Shells:** Adversaries attempting command injection or web shell execution frequently invoke download-and-execute cradles (`curl ... | sh`, `wget ... | bash`, PowerShell `IEX (New-Object Net.WebClient).DownloadString(...)`, or socket redirection like `0<&196;exec 196<>/dev/tcp/` and `mkfifo /tmp/`).
+- **Precision Requirements:** Must alert with `high` severity on attack payloads while strictly avoiding false positives on legitimate web traffic (standard browser `User-Agent` strings, regular URLs, query parameters like `?env=prod`, and safe HTTP assets).
+
+### 2. Implementation
+- In `ids_project/engine/rules.py`:
+  - Added `SCANNER_PROBE` signature to `_PAYLOAD_SIGNATURES`:
+    - Matches prominent automated scanner User-Agents and markers (`sqlmap`, `nikto`, `gobuster`, `dirbuster`, `dirsearch`, `wfuzz`, `ffuf`, `nuclei`, `masscan`, `wpscan`, `acunetix`, `nessus`, `openvas`, `arachni`, `Mozilla/5.00 (Nikto`, `nmap scripting engine`).
+  - Added `SENSITIVE_FILE_PROBE` signature to `_PAYLOAD_SIGNATURES`:
+    - Matches HTTP methods (`GET`, `POST`, `HEAD`, `OPTIONS`) targeting `.env`, `.git/(config|HEAD)`, `.svn/entries`, `id_rsa`, `id_ed25519`, `.aws/(credentials|config)`, `wp-config.php`, and `web.config`.
+  - Added `REVERSE_SHELL_CRADLE` signature to `_PAYLOAD_SIGNATURES`:
+    - Matches piped shell downloads (`curl ... | sh`, `wget ... | bash`), PowerShell downloadstring/encoded cradles, and FIFO socket redirection.
+  - Bumped `PayloadRule.rule_version` from `"1.5"` to `"1.6"`.
+- In `ids_project/tests/test_payload_detection.py`:
+  - Added 4 new test methods covering scanner User-Agents, sensitive file probes, reverse shell cradles, and benign negative requests.
+  - All 23 payload tests pass in 0.014s.
+- In `ids_project/evaluation/generate_test_pcap.py` & `run_eval.py`:
+  - Added Scenario S33: Automated scanner probe (`sqlmap` User-Agent) probing `/.env` on `192.168.1.1:80` (`PAYLOAD_HIT`).
+  - Added benign negative scenario `gen_benign_normal_http_assets`: Legitimate web browser requests with standard Firefox/Chrome User-Agents fetching `/index.html` and `/static/css/app.css`.
+  - Regenerated test PCAPs (1,131 attack packets, 776 benign packets) and labels (33 scenarios).
+
+### 3. Files Changed
+- `ids_project/engine/rules.py`
+- `ids_project/tests/test_payload_detection.py`
+- `ids_project/evaluation/generate_test_pcap.py`
+- `ids_project/evaluation/scenarios/test_labels.csv`
+- `ids_project/data/test_attacks.pcap`
+- `ids_project/data/test_benign.pcap`
+- `OVERNIGHT_STATUS.md`
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_payload_detection.py`: OK (23 tests passed in 0.014s).
+- `python3 -m unittest discover ids_project/tests`: OK (202 tests passed in 47.3s).
+- `python3 ids_project/evaluation/run_eval.py`: OK (33/33 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
+- `git diff --check`: Exit code 0.
+
 ---
 
 ## Final Session Summary & Checklist
-- **Session Stop Condition:** Completed Cycles 8, 9, 10, 11, 12, and 13 enhancements, comprehensive tests, and clean evaluation.
-- **Total Cycles Completed:** 13
-- **All Applicable Regression Tests:** 198 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (32/32 scenarios).
+- **Session Stop Condition:** Completed Cycles 8, 9, 10, 11, 12, 13, and 14 enhancements, comprehensive tests, and clean evaluation.
+- **Total Cycles Completed:** 14
+- **All Applicable Regression Tests:** 202 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (33/33 scenarios).

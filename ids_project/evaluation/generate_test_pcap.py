@@ -643,6 +643,29 @@ def gen_udp_flood(base: float) -> list:
     return pkts
 
 
+def gen_scanner_probe(base: float) -> list:
+    """S33: Automated recon scanner probe targeting sensitive .env file → PAYLOAD_HIT."""
+    scenario(
+        "S33", "PAYLOAD_HIT",
+        "Automated recon scanner probe targeting sensitive .env file",
+        src_ip="192.168.1.86", dst_ip="192.168.1.1",
+        dst_port="80", protocol="TCP",
+    )
+    payload = (
+        b"GET /.env HTTP/1.1\r\n"
+        b"Host: 192.168.1.1\r\n"
+        b"User-Agent: sqlmap/1.6#stable (https://sqlmap.org)\r\n"
+        b"Accept: */*\r\n\r\n"
+    )
+    pkt = (_make_eth() /
+           IP(src="192.168.1.86", dst="192.168.1.1") /
+           TCP(sport=54330, dport=80, flags="PA") /
+           Raw(load=payload))
+    pkt.time = base + 270.0
+    return [pkt]
+
+
+
 # ---------------------------------------------------------------------------
 # Benign negative packet generators  (should NOT fire any rule)
 # ---------------------------------------------------------------------------
@@ -913,6 +936,23 @@ def gen_benign_udp_flood_below_threshold(base: float) -> list:
     return pkts
 
 
+def gen_benign_normal_http_assets(base: float) -> list:
+    """Standard HTTP assets fetched with benign browser User-Agents should NOT fire PayloadRule."""
+    pkts = []
+    payloads = [
+        b"GET /index.html HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n\r\n",
+        b"GET /static/css/app.css HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:109.0)\r\n\r\n",
+    ]
+    for i, payload in enumerate(payloads):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.41", dst="93.184.216.34") /
+               TCP(sport=50300 + i, dport=80, flags="PA") /
+               Raw(load=payload))
+        pkt.time = base + 18.0 + i * 1.0
+        pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -957,6 +997,7 @@ def generate_all():
     attack_pkts += gen_double_encoded_traversal(base)
     attack_pkts += gen_data_exfil(base)
     attack_pkts += gen_udp_flood(base)
+    attack_pkts += gen_scanner_probe(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)
@@ -984,6 +1025,7 @@ def generate_all():
     benign_pkts += gen_benign_encoded_urls(base)
     benign_pkts += gen_benign_small_outbound_transfers(base)
     benign_pkts += gen_benign_udp_flood_below_threshold(base)
+    benign_pkts += gen_benign_normal_http_assets(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")
