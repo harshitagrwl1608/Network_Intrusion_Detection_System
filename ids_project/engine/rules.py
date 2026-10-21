@@ -1906,7 +1906,7 @@ def _shannon_entropy(s: str) -> float:
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.6"
+    rule_version = "1.7"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -2039,6 +2039,16 @@ class DnsRule:
             and entropy >= self.entropy_threshold
         )
 
+        # Check for encoded chunk tunneling (e.g. hex data chunks len >= 24)
+        hex_chunks = []
+        if not entropy_exempt:
+            for lbl in entropy_labels:
+                if len(lbl) >= 24 and re.fullmatch(r"[0-9a-f]{24,}", lbl):
+                    if any(c.isdigit() for c in lbl) and any(c in "abcdef" for c in lbl):
+                        hex_chunks.append(lbl)
+        has_hex_chunk = bool(hex_chunks)
+        hex_chunk_label = hex_chunks[0] if hex_chunks else ""
+
         # ── Query frequency: count repeated queries to same parent domain ──
         # Keep only the threshold-sized rolling tail: once the threshold is
         # reached, larger exact counts do not change the detection decision.
@@ -2097,11 +2107,13 @@ class DnsRule:
                         subdomain_window_start = sd_history[0][0]
                     high_subdomain = subdomain_count >= self._subdomain_threshold
 
-        if not (high_ent or too_long or high_freq or high_subdomain):
+        if not (high_ent or too_long or high_freq or high_subdomain or has_hex_chunk):
             return None
 
         if high_subdomain:
             sub_type = "DNS_EXFIL"
+        elif has_hex_chunk and not (high_ent or too_long):
+            sub_type = "DNS_TUNNEL"
         elif high_freq and not (high_ent or too_long):
             sub_type = "DNS_FREQ"
         elif high_ent:
@@ -2129,6 +2141,11 @@ class DnsRule:
             )
         if too_long:
             reason.append(f"length={len(domain)} chars (>{self.max_query_len})")
+        if has_hex_chunk:
+            reason.append(
+                f"hex_encoded_chunk='{hex_chunk_label}' "
+                f"(len={len(hex_chunk_label)} ≥ 24)"
+            )
         if high_freq:
             reason.append(
                 f"query_count={query_count} to '{parent}' "
@@ -2141,9 +2158,8 @@ class DnsRule:
             )
 
         logger.debug(f"{sub_type} fired: {src} queried '{domain}' [{', '.join(reason)}]")
-        # DNS_EXFIL is high severity — subdomain exfiltration is a deliberate
-        # covert channel, not an accidental anomaly.
-        severity = "high" if (high_ent or too_long or high_subdomain) else "medium"
+        # DNS_EXFIL and hex chunk tunnels are high severity — covert channels
+        severity = "high" if (high_ent or too_long or high_subdomain or has_hex_chunk) else "medium"
         return {
             "rule_name": self.name,
             "rule_version": self.rule_version,
@@ -2165,6 +2181,7 @@ class DnsRule:
                 "parent_domain": parent,
                 "entropy": round(entropy, 3),
                 "sub_type": sub_type,
+                "hex_encoded_chunk": hex_chunk_label if has_hex_chunk else None,
                 "query_count_in_window": query_count,
                 "query_count_saturated": query_count_saturated,
                 "freq_window_s": self._freq_window,

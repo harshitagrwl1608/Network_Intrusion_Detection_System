@@ -254,6 +254,55 @@ class TestDnsAndArpDetection(unittest.TestCase):
         self.assertIsNotNone(claim("192.0.2.2", "00:11:22:33:44:98", 102))
         self.assertLessEqual(len(rule._cooldown), 1)
 
+    def test_low_entropy_hex_chunk_dns_tunneling_detected(self):
+        # 28-char hex chunk: entropy is ~3.08 (well below 3.8), length is 39 (well below 50).
+        rule = DnsRule(entropy_threshold=3.8, max_query_len=50, freq_threshold=20)
+        query = {
+            "type": "IP", "protocol": "UDP", "src_ip": "192.168.1.50",
+            "dst_ip": "8.8.8.8", "src_port": 53000, "dst_port": 53,
+            "dns_query": "61646d696e3a70617373776f7264.covert.net",
+            "timestamp": 100.0,
+        }
+        alert = rule.check(query)
+        self.assertIsNotNone(alert, "Hex chunk DNS tunneling should trigger DNS_ANOMALY")
+        self.assertEqual(alert["rule_name"], "DNS_ANOMALY")
+        self.assertEqual(alert["severity"], "high")
+        self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
+        self.assertEqual(alert["evidence"]["hex_encoded_chunk"], "61646d696e3a70617373776f7264")
+
+    def test_cdn_whitelisted_hex_label_is_exempt(self):
+        rule = DnsRule(entropy_threshold=3.8, max_query_len=60, freq_threshold=20)
+        query = {
+            "type": "IP", "protocol": "UDP", "src_ip": "192.168.1.50",
+            "dst_ip": "8.8.8.8", "src_port": 53000, "dst_port": 53,
+            "dns_query": "61646d696e3a70617373776f7264313233.cloudflare.com",
+            "timestamp": 100.0,
+        }
+        alert = rule.check(query)
+        self.assertIsNone(alert, "Allowlisted CDN suffix should be exempt from hex chunk detection")
+
+    def test_uuid_with_hyphens_does_not_fire_hex_chunk(self):
+        rule = DnsRule(entropy_threshold=3.8, max_query_len=60, freq_threshold=20)
+        query = {
+            "type": "IP", "protocol": "UDP", "src_ip": "192.168.1.50",
+            "dst_ip": "8.8.8.8", "src_port": 53000, "dst_port": 53,
+            "dns_query": "123e4567-e89b-12d3-a456-426614174000.example.com",
+            "timestamp": 100.0,
+        }
+        alert = rule.check(query)
+        self.assertIsNone(alert, "UUID with hyphens should not trigger hex chunk detection")
+
+    def test_purely_alphabetic_long_label_does_not_fire_hex_chunk(self):
+        rule = DnsRule(entropy_threshold=3.8, max_query_len=60, freq_threshold=20)
+        query = {
+            "type": "IP", "protocol": "UDP", "src_ip": "192.168.1.50",
+            "dst_ip": "8.8.8.8", "src_port": 53000, "dst_port": 53,
+            "dns_query": "internationalizationorganization.example.com",
+            "timestamp": 100.0,
+        }
+        alert = rule.check(query)
+        self.assertIsNone(alert, "Purely alphabetic label should not trigger hex chunk detection")
+
 
 if __name__ == "__main__":
     unittest.main()

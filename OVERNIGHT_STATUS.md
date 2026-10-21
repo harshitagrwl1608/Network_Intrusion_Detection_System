@@ -516,9 +516,47 @@ Under the initial architecture (`5d22fba`):
 - `python3 ids_project/evaluation/run_eval.py`: OK (33/33 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
 - `git diff --check`: Exit code 0.
 
+## Cycle 15: Low-Entropy DNS Tunneling & Encoded Data Chunk Detection (`DnsRule` Expansion)
+
+### 1. Root Cause Hypothesis & Goal
+- **Low-Entropy DNS Exfiltration & Tunneling Evasion:** Covert DNS C2 frameworks (e.g., `iodine`, `dnscat2`, Cobalt Strike DNS beacons) and custom exfiltration scripts transmit structured data using hexadecimal chunks (`[0-9a-f]{24,}`). Because hex encoding only utilizes 16 distinct characters, the Shannon entropy of ASCII text encoded in hex is strictly bounded (typically 2.8–3.5 bits/char), successfully evading standard Shannon entropy thresholds (`DNS_ENTROPY_THRESHOLD = 3.8`).
+- **Length & Frequency Bypasses:** If an adversary restricts chunk size to 24–36 characters, the total query name stays well below query length limits (`DNS_QUERY_MAX_LEN = 50`), and low-frequency queries (e.g. single-query exfiltration of credentials or keys) bypass frequency and subdomain burst thresholds (`20` queries).
+- **Precision Requirements:** Must detect contiguous hex chunks (≥24 characters with both digits and hex letters) on non-allowlisted domains, while exempting legitimate CDN suffixes (`_DGA_WHITELIST_SUFFIXES`), hyphenated UUIDs (e.g. `123e4567-e89b-12d3-a456-426614174000`), purely alphabetic words, and numeric strings.
+
+### 2. Implementation
+- In `ids_project/engine/rules.py`:
+  - Added hex-encoded chunk inspection to `DnsRule.check()`:
+    - Scans `entropy_labels` through the registrable boundary.
+    - Matches candidate labels with `len(lbl) >= 24`, full regex match on `[0-9a-f]{24,}`, and at least one digit and one hex letter (`[a-f]`).
+    - Exempts domains under `_DGA_WHITELIST_SUFFIXES`.
+    - Triggers `high` severity alert under `sub_type = "DNS_TUNNEL"` with detail `hex_encoded_chunk='...' (len=... ≥ 24)`.
+    - Bumped `DnsRule.rule_version` from `"1.6"` to `"1.7"`.
+- In `ids_project/tests/test_dns_and_arp_detection.py`:
+  - Added 4 unit tests verifying low-entropy hex chunk detection, allowlisted CDN exemption, hyphenated UUID exemption, and long alphabetic label exemption.
+  - All 16 tests in suite pass in 0.018s.
+- In `ids_project/evaluation/generate_test_pcap.py` & `run_eval.py`:
+  - Added Scenario S34: Hex-encoded credential chunk `61646d696e3a70617373776f7264.covert.net` (entropy=3.08 < 3.8, len=39 < 50) → `DNS_ANOMALY`.
+  - Added benign negative scenario `gen_benign_uuid_dns`: Service discovery query with UUID `123e4567-e89b-12d3-a456-426614174000.consul` (len=43 < 50, contains hyphens) → 0 false positives.
+  - Regenerated test PCAPs (1,132 attack packets, 777 benign packets) and labels (34 scenarios).
+
+### 3. Files Changed
+- `ids_project/engine/rules.py`
+- `ids_project/tests/test_dns_and_arp_detection.py`
+- `ids_project/evaluation/generate_test_pcap.py`
+- `ids_project/evaluation/scenarios/test_labels.csv`
+- `ids_project/data/test_attacks.pcap`
+- `ids_project/data/test_benign.pcap`
+- `OVERNIGHT_STATUS.md`
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_dns_and_arp_detection.py`: OK (16 tests passed in 0.018s).
+- `python3 -m unittest discover ids_project/tests`: OK (206 tests passed in 46.5s).
+- `python3 ids_project/evaluation/run_eval.py`: OK (34/34 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
+- `git diff --check`: Exit code 0.
+
 ---
 
 ## Final Session Summary & Checklist
-- **Session Stop Condition:** Completed Cycles 8, 9, 10, 11, 12, 13, and 14 enhancements, comprehensive tests, and clean evaluation.
-- **Total Cycles Completed:** 14
-- **All Applicable Regression Tests:** 202 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (33/33 scenarios).
+- **Session Stop Condition:** Completed Cycles 8, 9, 10, 11, 12, 13, 14, and 15 enhancements, comprehensive tests, and clean evaluation.
+- **Total Cycles Completed:** 15
+- **All Applicable Regression Tests:** 206 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (34/34 scenarios).

