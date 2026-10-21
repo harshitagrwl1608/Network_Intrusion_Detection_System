@@ -390,9 +390,51 @@ Under the initial architecture (`5d22fba`):
 - `python3 ids_project/evaluation/run_eval.py`: OK (30/30 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
 - `git diff --check`: Exit code 0.
 
+## Cycle 12: Outbound Data Exfiltration & Sensitive Archive Detection (`DataExfiltrationRule`)
+
+### 1. Root Cause Hypothesis & Goal
+- **High-Volume Outbound Data Exfiltration:** Compromised hosts (via web shells, malware, or compromised credentials) exfiltrate large quantities of data to external command-and-control (C2) servers or drops. Existing volumetric flood rules (e.g. `SynFloodRule`, `PortScanRule`) track inbound connection packet rates, but do not track aggregate outbound payload volume from internal RFC1918 hosts to external internet IPs.
+- **Sensitive Database & Archive Signatures:** Attackers commonly dump and exfiltrate database backups (SQLite: `SQLite format 3\x00`) or compressed archives (ZIP: `PK\x03\x04`, 7-Zip: `7z\xbc\xaf\x27\x1c`, GZIP: `\x1f\x8b\x08`, TAR: `ustar`) over raw sockets or non-standard ports. Detecting these signatures on outbound flows provides immediate, high-confidence detection.
+- **RFC-1918 & Traffic Direction Scoping:** Must strictly monitor outbound traffic (internal `src_ip` -> external `dst_ip`), while exempting internal-to-internal LAN transfers (e.g. local NAS or gateway backups), DNS queries (monitored by `DnsRule`), multicast/broadcast, and `TRUSTED_HOSTS`.
+
+### 2. Implementation
+- In `ids_project/config.py`:
+  - Added `DATA_EXFIL_BYTE_THRESHOLD = int(os.getenv("DATA_EXFIL_BYTE_THRESHOLD", 50000))` (50 KB in window).
+  - Added `DATA_EXFIL_WINDOW = int(os.getenv("DATA_EXFIL_WINDOW", 30))` (30 seconds).
+- In `ids_project/engine/rules.py`:
+  - Enhanced `_is_internal(ip)` with explicit RFC-1918, loopback, and link-local CIDR ranges (`_INTERNAL_NETWORKS`), correctly treating external test/public IPs as external endpoints.
+  - Implemented `DataExfiltrationRule`:
+    - Tracks sliding-window outbound payload volume per `(src_ip, dst_ip)` flow using `max(len(payload), max(0, ip_len - 40))` to account for wire packet sizes across TCP segments.
+    - Inspects outbound payloads for sensitive database dumps (`SQLite format 3\x00`) and compressed archives (`PK\x03\x04`, `7z\xbc\xaf\x27\x1c`, `\x1f\x8b\x08`, `ustar`).
+    - Implements a 60-second alert cooldown per `(src_ip, dst_ip)` to avoid alert storms during continuous multi-megabyte transfers.
+    - Limits tracked flows to 5,000 with LRU eviction and integrates with `prune_stale()`.
+    - Wired into `RuleEngine.rules`.
+- In `ids_project/tests/test_data_exfiltration.py`:
+  - Created test suite (10 unit tests) covering volumetric thresholds, sub-threshold transfers, internal LAN exemption, inbound download exemption, SQLite dump detection, ZIP archive detection, port 53 exemption, trusted host exemption, alert cooldown, and stale flow pruning.
+- In `ids_project/evaluation/generate_test_pcap.py` & `run_eval.py`:
+  - Registered `DataExfiltrationRule` in evaluation known rules and metadata settings.
+  - Added attack scenario S31: 60KB outbound data transfer to external IP `203.0.113.85:9001` (`DATA_EXFIL`).
+  - Added benign negative scenario: 5 small HTTP requests (2.5KB total) to external host staying well below threshold.
+
+### 3. Files Changed
+- `ids_project/config.py`
+- `ids_project/engine/rules.py`
+- `ids_project/tests/test_data_exfiltration.py` (New test suite)
+- `ids_project/evaluation/generate_test_pcap.py`
+- `ids_project/evaluation/run_eval.py`
+- `ids_project/evaluation/scenarios/test_labels.csv`
+- `ids_project/data/test_attacks.pcap`
+- `ids_project/data/test_benign.pcap`
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_data_exfiltration.py`: OK (10 tests passed).
+- `python3 -m unittest discover ids_project/tests`: OK (191 tests passed in 47.0s).
+- `python3 ids_project/evaluation/run_eval.py`: OK (31/31 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
+- `git diff --check`: Exit code 0.
+
 ---
 
 ## Final Session Summary & Checklist
-- **Session Stop Condition:** Completed Cycles 8, 9, 10, and 11 enhancements, comprehensive tests, and clean evaluation.
-- **Total Cycles Completed:** 11
-- **All Applicable Regression Tests:** 181 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (30/30 scenarios).
+- **Session Stop Condition:** Completed Cycles 8, 9, 10, 11, and 12 enhancements, comprehensive tests, and clean evaluation.
+- **Total Cycles Completed:** 12
+- **All Applicable Regression Tests:** 191 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (31/31 scenarios).

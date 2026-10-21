@@ -604,6 +604,26 @@ def gen_double_encoded_traversal(base: float) -> list:
     return [pkt]
 
 
+def gen_data_exfil(base: float) -> list:
+    """S31: 60KB outbound data transfer to external host in 5s → DATA_EXFIL."""
+    scenario(
+        "S31", "DATA_EXFIL",
+        "Outbound data exfiltration: 60KB transmitted from internal host to external host",
+        src_ip="192.168.1.85", dst_ip="203.0.113.85",
+        dst_port="9001", protocol="TCP",
+    )
+    pkts = []
+    chunk = b"E" * 1200
+    for i in range(50):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.85", dst="203.0.113.85") /
+               TCP(sport=50000 + i, dport=9001, flags="PA") /
+               Raw(load=chunk))
+        pkt.time = base + 250.0 + i * 0.1
+        pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Benign negative packet generators  (should NOT fire any rule)
 # ---------------------------------------------------------------------------
@@ -847,6 +867,20 @@ def gen_benign_encoded_urls(base: float) -> list:
     return pkts
 
 
+def gen_benign_small_outbound_transfers(base: float) -> list:
+    """Five small HTTP requests (2.5KB total) to external host stay below 50KB exfil threshold."""
+    pkts = []
+    chunk = b"B" * 500
+    for i in range(5):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.39", dst="203.0.113.85") /
+               TCP(sport=50200 + i, dport=8080, flags="PA") /
+               Raw(load=chunk))
+        pkt.time = base + 16.0 + i * 0.5
+        pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -889,6 +923,7 @@ def generate_all():
     attack_pkts += gen_tcp_flag_anomaly(base)
     attack_pkts += gen_icmp_flood(base)
     attack_pkts += gen_double_encoded_traversal(base)
+    attack_pkts += gen_data_exfil(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)
@@ -914,6 +949,7 @@ def generate_all():
     benign_pkts += gen_benign_rst_handshakes(base)
     benign_pkts += gen_benign_icmp_flood_below_threshold(base)
     benign_pkts += gen_benign_encoded_urls(base)
+    benign_pkts += gen_benign_small_outbound_transfers(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")

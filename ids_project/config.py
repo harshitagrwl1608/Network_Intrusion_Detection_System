@@ -108,3 +108,8 @@ BRUTE_FORCE_WINDOW    = int(os.getenv("BRUTE_FORCE_WINDOW", 60))     # seconds
 # Higher threshold than PortScanRule because the long window accumulates more incidental traffic.
 SLOW_SCAN_THRESHOLD = int(os.getenv("SLOW_SCAN_THRESHOLD", 30))  # distinct ports/hosts in window
 SLOW_SCAN_WINDOW    = int(os.getenv("SLOW_SCAN_WINDOW", 120))    # seconds (default: 2 minutes)
+
+# --- Outbound Data Exfiltration Detection (DataExfiltrationRule) ---
+# Detects high-volume outbound data transfers or raw database/archive dumps to external IPs.
+DATA_EXFIL_BYTE_THRESHOLD = int(os.getenv("DATA_EXFIL_BYTE_THRESHOLD", 50000))  # bytes in window
+DATA_EXFIL_WINDOW         = int(os.getenv("DATA_EXFIL_WINDOW", 30))              # seconds in window

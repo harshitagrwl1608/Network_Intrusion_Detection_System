@@ -111,11 +111,23 @@ def _is_trusted(ip: str) -> bool:
     return False
 
 
+_INTERNAL_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("::1/128"),
+)
+
+
 def _is_internal(ip: str) -> bool:
-    """Return True if ip is an RFC-1918 / link-local private address."""
+    """Return True if ip is an RFC-1918, loopback, or link-local private address."""
     try:
         addr = ipaddress.ip_address(ip)
-        return addr.is_private or addr.is_link_local
+        return any(addr in net for net in _INTERNAL_NETWORKS)
     except ValueError:
         return False
 
@@ -2387,6 +2399,167 @@ class SlowPortScanRule:
 
 
 # =============================================================================
+# Rule 14: Outbound Data Exfiltration Detection
+# =============================================================================
+
+class DataExfiltrationRule:
+    """
+    Detects outbound data exfiltration from internal networks to external destinations:
+    1. Volumetric: an internal host transmits >= byte_threshold (default 50 KB)
+       of payload bytes to an external internet endpoint within a sliding window.
+    2. Signature-based: an internal host transmits archive or database dump headers
+       (SQLite database, ZIP, 7-Zip, GZIP, TAR) directly to an external endpoint.
+
+    Exemptions:
+    - DNS queries (dst_port == 53) are handled by DnsRule.
+    - Multicast/broadcast destinations.
+    - Internal-to-internal LAN traffic.
+    - Configured TRUSTED_HOSTS.
+    """
+    name = "DATA_EXFIL"
+    rule_version = "1.0"
+    ALERT_COOLDOWN_S = 60.0
+    MAX_TRACKED_FLOWS = 5000
+
+    # Archive / DB file signatures: (magic_bytes, format_name)
+    _EXFIL_SIGNATURES: list[tuple[bytes, str]] = [
+        (b"SQLite format 3\x00", "SQLite database file dump"),
+        (b"PK\x03\x04", "ZIP archive"),
+        (b"7z\xbc\xaf\x27\x1c", "7-Zip archive"),
+        (b"\x1f\x8b\x08", "GZIP compressed archive"),
+        (b"ustar", "TAR archive"),
+    ]
+
+    def __init__(self, byte_threshold: int = 50000, window: int = 30):
+        self.byte_threshold = max(1000, int(byte_threshold))
+        self.window = max(1, int(window))
+        self._lock = threading.Lock()
+        # Key: (src_ip, dst_ip) -> deque of (timestamp, byte_count)
+        self._flows: dict[tuple[str, str], deque] = {}
+        # Key: (src_ip, dst_ip) -> float (last alert timestamp)
+        self._cooldown: dict[tuple[str, str], float] = {}
+
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
+        cutoff = now - self.window
+        with self._lock:
+            for key in list(self._flows):
+                dq = self._flows[key]
+                while dq and dq[0][0] < cutoff:
+                    dq.popleft()
+                if not dq:
+                    del self._flows[key]
+            cooldown_cutoff = now - self.ALERT_COOLDOWN_S
+            for key in list(self._cooldown):
+                if self._cooldown[key] < cooldown_cutoff:
+                    del self._cooldown[key]
+
+    def check(self, record: dict) -> dict | None:
+        if record.get("type") != "IP":
+            return None
+
+        src_ip = record.get("src_ip")
+        dst_ip = record.get("dst_ip")
+        if not src_ip or not dst_ip:
+            return None
+
+        # Exfiltration check applies strictly to outbound traffic (internal -> external)
+        if not _is_internal(src_ip):
+            return None
+        if _is_internal(dst_ip):
+            return None
+
+        # Exclude broadcast and multicast destinations
+        if dst_ip == "255.255.255.255" or dst_ip.startswith("224.") or dst_ip.lower().startswith("ff"):
+            return None
+
+        if _is_trusted(src_ip):
+            return None
+
+        # Ignore DNS queries (port 53 is monitored by DnsRule)
+        if record.get("dst_port") == 53:
+            return None
+
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        flow_key = (src_ip, dst_ip)
+
+        payload = record.get("payload", b"")
+        ip_len = int(record.get("ip_len") or 0)
+        bytes_sent = max(len(payload), max(0, ip_len - 40))
+        if bytes_sent <= 0:
+            return None
+
+        # Check for direct archive / database dump signature in outbound payload
+        matched_sig = None
+        if payload:
+            for magic, desc in self._EXFIL_SIGNATURES:
+                if payload.startswith(magic) or (magic == b"ustar" and magic in payload[:512]):
+                    matched_sig = desc
+                    break
+
+        with self._lock:
+            last_alert = self._cooldown.get(flow_key, 0.0)
+            in_cooldown = (now - last_alert) < self.ALERT_COOLDOWN_S
+
+            if flow_key not in self._flows:
+                if len(self._flows) >= self.MAX_TRACKED_FLOWS:
+                    self._flows.pop(next(iter(self._flows)))
+                self._flows[flow_key] = deque()
+
+            dq = self._flows[flow_key]
+            dq.append((now, bytes_sent))
+
+            cutoff = now - self.window
+            while dq and dq[0][0] < cutoff:
+                dq.popleft()
+
+            total_bytes = sum(b for _, b in dq)
+
+            # Trigger condition: volumetric threshold exceeded OR sensitive signature detected
+            if (total_bytes >= self.byte_threshold or matched_sig) and not in_cooldown:
+                self._cooldown[flow_key] = now
+
+                if matched_sig:
+                    sub_type = "SIGNATURE_EXFIL"
+                    detail = (
+                        f"{src_ip} transmitting {matched_sig} to external host {dst_ip}:{record.get('dst_port')} "
+                        f"({bytes_sent} bytes) — possible sensitive data exfiltration"
+                    )
+                else:
+                    sub_type = "VOLUMETRIC_EXFIL"
+                    detail = (
+                        f"{src_ip} transmitted {total_bytes} bytes to external host {dst_ip} "
+                        f"in {self.window}s (≥{self.byte_threshold}) — possible outbound data exfiltration"
+                    )
+
+                logger.debug(f"DATA_EXFIL fired: {detail}")
+                return {
+                    "rule_name": self.name,
+                    "rule_version": self.rule_version,
+                    "src_ip": src_ip,
+                    "dst_ip": dst_ip,
+                    "src_port": record.get("src_port"),
+                    "dst_port": record.get("dst_port"),
+                    "protocol": record.get("protocol", "TCP"),
+                    "severity": "high",
+                    "confidence": "high",
+                    "detail": detail,
+                    "evidence": {
+                        "sub_type": sub_type,
+                        "bytes_transferred": total_bytes if not matched_sig else bytes_sent,
+                        "threshold": self.byte_threshold,
+                        "window_s": self.window,
+                        "matched_signature": matched_sig,
+                    },
+                    "window_start": dq[0][0] if dq else now,
+                    "window_end": now,
+                }
+
+        return None
+
+
+# =============================================================================
 # Alert Spool & Rule Engine Orchestrator
 # =============================================================================
 
@@ -2610,6 +2783,10 @@ class RuleEngine:
             SlowPortScanRule(
                 threshold=getattr(cfg, "SLOW_SCAN_THRESHOLD", 30),
                 window=getattr(cfg, "SLOW_SCAN_WINDOW", 120),
+            ),
+            DataExfiltrationRule(
+                byte_threshold=getattr(cfg, "DATA_EXFIL_BYTE_THRESHOLD", 50000),
+                window=getattr(cfg, "DATA_EXFIL_WINDOW", 30),
             ),
         ]
 
