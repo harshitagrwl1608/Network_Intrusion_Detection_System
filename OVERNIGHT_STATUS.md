@@ -642,7 +642,53 @@ Under the initial architecture (`5d22fba`):
 
 ---
 
+## Cycle 18: TCP Zero-Window / Sockstress DoS Detection (`TcpZeroWindowRule`)
+
+### 1. Root Cause Hypothesis & Goal
+- **Sockstress & Zero-Window Resource Exhaustion:** Attackers establish TCP connections to victim servers (e.g. web, database, or SSH) and persistently advertise a receive window size of 0 (`win=0`). When the victim attempts to send response data, the client's window probe ACKs keep `win=0`, forcing the server kernel to maintain socket buffers and persistently run zero-window retransmit probes (persist timer). A burst of such connections exhausts server socket descriptors and memory without triggering volumetric SYN flood thresholds.
+- **Engine Invisibility:** Prior to this cycle, neither `sniffer.py` nor `rules.py` extracted or tracked `tcp_window`, allowing Sockstress and persistent zero-window attacks to pass undetected.
+- **Precision Requirements:** Extract `tcp_window` in `sniffer._parse_packet()` and `replay_text_log()`, implement stateful `TcpZeroWindowRule` tracking zero-window packets per `(src_ip, dst_ip)` pair, alert when ≥ `threshold` (default: 20) zero-window packets occur within `window` (default: 10s), enforce 60s cooldown to prevent alert flooding, and ensure standard TCP connections with normal window sizes (e.g. `win=65535`) produce zero false positives.
+
+### 2. Implementation
+- In `ids_project/config.py`:
+  - Added `TCP_ZERO_WINDOW_THRESHOLD = 20`, `TCP_ZERO_WINDOW_WINDOW = 10`, and `TCP_ZERO_WINDOW_COOLDOWN = 60.0`.
+- In `ids_project/capture/sniffer.py`:
+  - Extracted `tcp_window = int(pkt[TCP].window) if hasattr(pkt[TCP], "window") else None` in `_parse_packet()`.
+  - Extracted `tcp_window` from `win (\d+)` tokens in `replay_text_log()`.
+  - Added `"tcp_window": tcp_window` to normalized packet record dicts.
+- In `ids_project/engine/rules.py`:
+  - Implemented `TcpZeroWindowRule`: Stateful detection tracking `(src_ip, dst_ip)` zero-window advertisements. Alerts on `count >= self.threshold` in sliding window with per-pair cooldown and state bounding.
+  - Registered `TcpZeroWindowRule` in `RuleEngine.rules`.
+- In `ids_project/tests/test_tcp_zero_window.py`:
+  - Created 8 unit tests covering zero-window burst alert firing, sub-threshold silence, positive window immunity, non-TCP immunity, trusted host exemption, cooldown alert suppression, disabled rule toggle, and `prune_stale` memory cleanup.
+  - All 8 unit tests pass in 0.002s.
+- In `ids_project/evaluation/generate_test_pcap.py` & `run_eval.py`:
+  - Added Scenario S37: TCP Zero-Window burst of 25 zero-window packets targeting port 80 → `TCP_ZERO_WINDOW`.
+  - Added benign negative scenario `gen_benign_tcp_normal_window`: Legitimate TCP ACKs with `win=65535` → 0 false positives.
+  - Registered `TcpZeroWindowRule` in `ids_project/evaluation/run_eval.py`.
+  - Regenerated test PCAPs (1,159 attack packets, 806 benign packets) and labels (37 scenarios).
+
+### 3. Files Changed
+- `ids_project/config.py`
+- `ids_project/capture/sniffer.py`
+- `ids_project/engine/rules.py`
+- `ids_project/tests/test_tcp_zero_window.py`
+- `ids_project/evaluation/generate_test_pcap.py`
+- `ids_project/evaluation/run_eval.py`
+- `ids_project/evaluation/scenarios/test_labels.csv`
+- `ids_project/data/test_attacks.pcap`
+- `ids_project/data/test_benign.pcap`
+- `OVERNIGHT_STATUS.md`
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_tcp_zero_window.py`: OK (8 tests passed in 0.002s).
+- `python3 -m unittest discover ids_project/tests`: OK (224 tests passed in 47.2s).
+- `python3 ids_project/evaluation/run_eval.py`: OK (37/37 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
+- `git diff --check`: Exit code 0.
+
+---
+
 ## Final Session Summary & Checklist
-- **Session Stop Condition:** Completed Cycles 8 through 17 enhancements, comprehensive tests, and clean evaluation.
-- **Total Cycles Completed:** 17
-- **All Applicable Regression Tests:** 216 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (36/36 scenarios).
+- **Session Stop Condition:** Completed Cycles 8 through 18 enhancements, comprehensive tests, and clean evaluation.
+- **Total Cycles Completed:** 18
+- **All Applicable Regression Tests:** 224 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (37/37 scenarios).

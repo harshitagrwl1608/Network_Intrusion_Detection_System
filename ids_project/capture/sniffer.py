@@ -118,6 +118,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
         initial_syn = False
         tcp_seq     = None
         tcp_flags   = None
+        tcp_window  = None
         tcp_payload_seq = None
         payload     = b""
         dns_query   = None
@@ -134,6 +135,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             flags = pkt[TCP].flags
             tcp_seq = int(pkt[TCP].seq)
             tcp_flags = int(flags)
+            tcp_window = int(pkt[TCP].window) if hasattr(pkt[TCP], "window") else None
             syn_flag = bool(flags & 0x02)  # SYN bit
             initial_syn = bool(flags & 0x02) and not bool(flags & 0x10)  # SYN set, ACK clear
             tcp_payload_seq = (tcp_seq + int(bool(flags & 0x02))) & 0xFFFFFFFF
@@ -181,6 +183,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             "initial_syn": initial_syn,
             "tcp_seq": tcp_seq,
             "tcp_flags": tcp_flags,
+            "tcp_window": tcp_window,
             "tcp_payload_seq": tcp_payload_seq,
             "icmp_type": icmp_type,
             "icmp_code": icmp_code,
@@ -413,6 +416,9 @@ def _replay_text_log(log_path: str, rule_engine):
             initial_syn = is_any_syn and not bool(tcp_flags & 0x10)
             syn_flag = is_any_syn
 
+            win_m = re.search(r'\bwin\s+(\d+)\b', detail)
+            tcp_window = int(win_m.group(1)) if win_m else None
+
             protocol = "TCP" if "Flags" in detail else (
                 "UDP" if "UDP" in rest_of_line else proto_name
             )
@@ -428,6 +434,7 @@ def _replay_text_log(log_path: str, rule_engine):
                 "syn_flag":    syn_flag,
                 "initial_syn": initial_syn,
                 "tcp_flags": tcp_flags,
+                "tcp_window": tcp_window,
                 "timestamp":   ts,
                 "event_timestamp": ts,
                 "processing_timestamp": time.time(),

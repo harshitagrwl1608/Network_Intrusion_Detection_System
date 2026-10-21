@@ -119,3 +119,9 @@ SLOW_SCAN_WINDOW    = int(os.getenv("SLOW_SCAN_WINDOW", 120))    # seconds (defa
 # Detects high-volume outbound data transfers or raw database/archive dumps to external IPs.
 DATA_EXFIL_BYTE_THRESHOLD = int(os.getenv("DATA_EXFIL_BYTE_THRESHOLD", 50000))  # bytes in window
 DATA_EXFIL_WINDOW         = int(os.getenv("DATA_EXFIL_WINDOW", 30))              # seconds in window
+
+# --- TCP Zero-Window / Sockstress DoS Detection (TcpZeroWindowRule) ---
+# Detects persistent zero-window advertisements aimed at exhausting socket buffers / memory.
+TCP_ZERO_WINDOW_THRESHOLD = int(os.getenv("TCP_ZERO_WINDOW_THRESHOLD", 20))  # zero-window pkts in window
+TCP_ZERO_WINDOW_WINDOW    = int(os.getenv("TCP_ZERO_WINDOW_WINDOW", 10))     # seconds
+TCP_ZERO_WINDOW_COOLDOWN  = float(os.getenv("TCP_ZERO_WINDOW_COOLDOWN", 60.0))  # per-pair cooldown seconds

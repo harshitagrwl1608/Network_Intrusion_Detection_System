@@ -35,3 +35,4 @@ S33,PAYLOAD_HIT,192.168.1.86,192.168.1.1,80,TCP,Automated recon scanner probe ta
 S34,DNS_ANOMALY,192.168.1.100,8.8.8.8,53,UDP,Low-entropy hex-encoded data chunk exfiltration in DNS query
 S35,TLS_ANOMALY,192.168.1.101,198.51.100.99,443,TCP,TLS Client Hello containing literal IP address in SNI extension
 S36,PAYLOAD_HIT,192.168.1.102,192.168.1.1,80,TCP,WebDAV PROPFIND directory reconnaissance and method tampering
+S37,TCP_ZERO_WINDOW,192.168.1.103,192.168.1.1,80,TCP,TCP Zero-Window / Sockstress burst: 25 zero-window packets in <1s

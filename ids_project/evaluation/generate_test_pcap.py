@@ -741,6 +741,24 @@ def gen_webdav_method_tampering(base: float) -> list:
     return [pkt]
 
 
+def gen_tcp_zero_window(base: float) -> list:
+    """S37: TCP Zero-Window / Sockstress DoS burst → TCP_ZERO_WINDOW."""
+    scenario(
+        "S37", "TCP_ZERO_WINDOW",
+        "TCP Zero-Window / Sockstress burst: 25 zero-window packets in <1s",
+        src_ip="192.168.1.103", dst_ip="192.168.1.1",
+        dst_port="80", protocol="TCP",
+    )
+    pkts = []
+    for i in range(25):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.103", dst="192.168.1.1") /
+               TCP(sport=54360 + (i % 5), dport=80, flags="A", window=0))
+        pkt.time = base + 310.0 + i * 0.03
+        pkts.append(pkt)
+    return pkts
+
+
 
 
 
@@ -1071,6 +1089,18 @@ def gen_benign_rest_verbs(base: float) -> list:
     return pkts
 
 
+def gen_benign_tcp_normal_window(base: float) -> list:
+    """Legitimate TCP ACKs with standard window sizes (win=65535) should NOT fire."""
+    pkts = []
+    for i in range(25):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.45", dst="93.184.216.34") /
+               TCP(sport=50600 + i, dport=80, flags="A", window=65535))
+        pkt.time = base + 22.0 + i * 0.05
+        pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1119,6 +1149,7 @@ def generate_all():
     attack_pkts += gen_hex_chunk_dns_tunnel(base)
     attack_pkts += gen_tls_direct_ip_sni(base)
     attack_pkts += gen_webdav_method_tampering(base)
+    attack_pkts += gen_tcp_zero_window(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)
@@ -1150,6 +1181,7 @@ def generate_all():
     benign_pkts += gen_benign_uuid_dns(base)
     benign_pkts += gen_benign_tls_legitimate_sni(base)
     benign_pkts += gen_benign_rest_verbs(base)
+    benign_pkts += gen_benign_tcp_normal_window(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")

@@ -2898,6 +2898,113 @@ class TlsAnomalyRule:
         }
 
 
+# =============================================================================
+# Rule 17: TCP Zero-Window / Sockstress DoS Detection
+# =============================================================================
+
+class TcpZeroWindowRule:
+    """
+    Detects Sockstress and TCP zero-window denial-of-service attacks.
+    An adversary establishes or probes TCP connections and repeatedly advertises
+    a receive window of 0 (win=0), forcing the victim host to maintain connection
+    state and repeatedly send zero-window probes (persist timer), eventually
+    exhausting TCP socket descriptors, kernel memory, and connection slots.
+    """
+    name = "TCP_ZERO_WINDOW"
+    rule_version = "1.0"
+
+    def __init__(self, threshold: int = 20, window: int = 10, cooldown: float = 60.0,
+                 max_tracked: int = 4096, enabled: bool = True):
+        self.threshold = max(1, int(threshold))
+        self.window = max(1, int(window))
+        self.cooldown = float(cooldown)
+        self.max_tracked = max(100, int(max_tracked))
+        self.enabled = bool(enabled)
+        self._lock = threading.Lock()
+        # Key: (src_ip, dst_ip) -> deque([(ts, dst_port), ...])
+        self._history: dict[tuple[str, str], deque] = defaultdict(deque)
+        # Key: (src_ip, dst_ip) -> float (last alert ts)
+        self._fired: dict[tuple[str, str], float] = {}
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.window
+        cooldown_cutoff = now - self.cooldown
+        with self._lock:
+            for k in list(self._history):
+                dq = self._history[k]
+                while dq and dq[0][0] < cutoff:
+                    dq.popleft()
+                if not dq:
+                    del self._history[k]
+            for k in list(self._fired):
+                if self._fired[k] < cooldown_cutoff:
+                    del self._fired[k]
+
+    def check(self, record: dict) -> dict | None:
+        if not self.enabled:
+            return None
+        if record.get("type") != "IP" or record.get("protocol") != "TCP":
+            return None
+
+        # Check if packet advertises window size of 0
+        tcp_window = record.get("tcp_window")
+        if tcp_window is None or tcp_window != 0:
+            return None
+
+        src_ip = record.get("src_ip", "")
+        dst_ip = record.get("dst_ip", "")
+        dst_port = record.get("dst_port")
+        if not src_ip or not dst_ip or _is_trusted(src_ip):
+            return None
+
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        key = (src_ip, dst_ip)
+        cutoff = now - self.window
+
+        with self._lock:
+            # Bound total tracked keys to prevent state exhaustion
+            if key not in self._history and len(self._history) >= self.max_tracked:
+                self._history.pop(next(iter(self._history)))
+
+            dq = self._history[key]
+            dq.append((now, dst_port))
+            while dq and dq[0][0] < cutoff:
+                dq.popleft()
+
+            count = len(dq)
+            if count >= self.threshold:
+                last_fired = self._fired.get(key, 0.0)
+                if now - last_fired < self.cooldown:
+                    return None
+                self._fired[key] = now
+                window_start = dq[0][0]
+                detail = (
+                    f"{src_ip} sent {count} TCP zero-window advertisements to {dst_ip} "
+                    f"in {self.window}s (≥{self.threshold}) — possible Sockstress / TCP resource exhaustion DoS"
+                )
+                logger.debug(f"TCP_ZERO_WINDOW fired: {detail}")
+                return {
+                    "rule_name": self.name,
+                    "rule_version": self.rule_version,
+                    "src_ip": src_ip,
+                    "dst_ip": dst_ip,
+                    "src_port": record.get("src_port"),
+                    "dst_port": dst_port,
+                    "protocol": "TCP",
+                    "severity": "high",
+                    "confidence": "high",
+                    "detail": detail,
+                    "evidence": {
+                        "zero_window_count": count,
+                        "threshold": self.threshold,
+                        "window_s": self.window,
+                        "target_port": dst_port,
+                    },
+                    "window_start": window_start,
+                    "window_end": now,
+                }
+        return None
+
 
 # =============================================================================
 # Alert Spool & Rule Engine Orchestrator
@@ -3135,6 +3242,11 @@ class RuleEngine:
             TlsAnomalyRule(
                 cooldown=getattr(cfg, "TLS_COOLDOWN_S", 60.0),
                 enabled=getattr(cfg, "TLS_INSPECTION", True),
+            ),
+            TcpZeroWindowRule(
+                threshold=getattr(cfg, "TCP_ZERO_WINDOW_THRESHOLD", 20),
+                window=getattr(cfg, "TCP_ZERO_WINDOW_WINDOW", 10),
+                cooldown=getattr(cfg, "TCP_ZERO_WINDOW_COOLDOWN", 60.0),
             ),
         ]
 
