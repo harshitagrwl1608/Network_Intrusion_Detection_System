@@ -91,6 +91,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             "src_port": None,
             "protocol": "ARP",
             "syn_flag": False,
+            "initial_syn": False,
             "icmp_type": None,
             "icmp_code": None,
             "ip_len": None,
@@ -105,19 +106,22 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
         proto_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
         proto = proto_map.get(proto_num, str(proto_num))
 
-        dst_port  = None
-        src_port  = None
-        syn_flag  = False
-        payload   = b""
-        dns_query = None
-        icmp_type = None
-        icmp_code = None
-        ip_len    = pkt[IP].len  # total IP packet length in bytes
+        dst_port    = None
+        src_port    = None
+        syn_flag    = False
+        initial_syn = False
+        payload     = b""
+        dns_query   = None
+        icmp_type   = None
+        icmp_code   = None
+        ip_len      = pkt[IP].len  # total IP packet length in bytes
 
         if TCP in pkt:
             dst_port = pkt[TCP].dport
             src_port = pkt[TCP].sport
-            syn_flag = bool(pkt[TCP].flags & 0x02)  # SYN bit
+            flags = pkt[TCP].flags
+            syn_flag = bool(flags & 0x02)  # SYN bit
+            initial_syn = bool(flags & 0x02) and not bool(flags & 0x10)  # SYN set, ACK clear
             if Raw in pkt:
                 payload = bytes(pkt[Raw].load)[: _PAYLOAD_MAX_BYTES]
         elif UDP in pkt:
@@ -145,6 +149,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             "src_port": src_port,
             "protocol": proto,
             "syn_flag": syn_flag,
+            "initial_syn": initial_syn,
             "icmp_type": icmp_type,
             "icmp_code": icmp_code,
             "ip_len": ip_len,
@@ -206,79 +211,139 @@ def _parse_tcpdump_endpoint(ep: str):
 
 
 def _replay_text_log(log_path: str, rule_engine):
-    """Parses an ASCII tcpdump output log and feeds records to the rule engine."""
+    """
+    Parses an ASCII tcpdump output log and feeds records to the rule engine.
+
+    Supported timestamp formats:
+      - HH:MM:SS.frac             (tcpdump -nn)
+      - YYYY-MM-DD HH:MM:SS.frac  (tcpdump -tttt -nn)  ← documented in README
+      - HH:MM:SS                  (no fractional seconds)
+
+    Reports skipped lines and warns if zero records parsed.
+    """
     import re
     from datetime import datetime, date
 
     logger.info(f"Detected ASCII tcpdump text log: {log_path}")
-    processed = 0
-    today = date.today()
+    processed  = 0
+    skipped    = 0
+    today      = date.today()
+
+    # Regex that matches both full-date and time-only prefixes
+    TS_RE = re.compile(
+        r'^'
+        r'(?P<ts>(?:\d{4}-\d{2}-\d{2}\s+)?\d{2}:\d{2}:\d{2}(?:\.\d+)?)'
+        r'\s+'
+    )
+
+    def _parse_ts(ts_str: str) -> float:
+        """Return a POSIX timestamp from the matched timestamp string."""
+        ts_str = ts_str.strip()
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+            "%H:%M:%S.%f",
+            "%H:%M:%S",
+        ):
+            try:
+                if fmt.startswith("%H"):
+                    dt = datetime.strptime(f"{today} {ts_str}", f"%Y-%m-%d {fmt}")
+                else:
+                    dt = datetime.strptime(ts_str, fmt)
+                return dt.timestamp()
+            except ValueError:
+                continue
+        return time.time()
 
     with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line = line.strip()
+        for raw_line in f:
+            line = raw_line.strip()
             if not line:
                 continue
 
-            # Match: HH:MM:SS.microsec (IP|IP6|ARP) <src> > <dst>: [flags/details]
-            m = re.match(r'^(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(IP[6]?|ARP)\s+([^>]+)\s+>\s+([^:]+):\s*(.*)', line)
-            if not m:
-                # Handle ARP lines like: HH:MM:SS ARP, Request who-has ... / ARP, Reply ...
-                m_arp = re.match(r'^(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+ARP,\s*(.*)', line)
-                if m_arp:
-                    t_str, rest = m_arp.groups()
-                    try:
-                        dt = datetime.strptime(f"{today} {t_str}", "%Y-%m-%d %H:%M:%S.%f")
-                        ts = dt.timestamp()
-                    except ValueError:
-                        ts = time.time()
-                    
-                    # Check ARP reply: "Reply 192.168.1.1 is-at 00:11:22:33:44:01"
-                    m_reply = re.search(r'Reply\s+([^\s]+)\s+is-at\s+([0-9a-fA-F:]+)', rest)
-                    if m_reply:
-                        ip, mac = m_reply.groups()
-                        record = {
-                            "type": "ARP",
-                            "src_ip": ip,
-                            "src_mac": mac,
-                            "dst_ip": None,
-                            "dst_port": None,
-                            "protocol": "ARP",
-                            "syn_flag": False,
-                            "timestamp": ts,
-                        }
-                        rule_engine.check(record)
-                        processed += 1
+            ts_m = TS_RE.match(line)
+            if not ts_m:
+                skipped += 1
+                continue
+            ts_str = ts_m.group("ts")
+            rest_of_line = line[ts_m.end():]
+
+            ts = _parse_ts(ts_str)
+
+            # --- ARP lines ---
+            if rest_of_line.startswith("ARP"):
+                m_reply = re.search(
+                    r'Reply\s+([^\s]+)\s+is-at\s+([0-9a-fA-F:]+)',
+                    rest_of_line,
+                )
+                if m_reply:
+                    ip, mac = m_reply.groups()
+                    record = {
+                        "type": "ARP",
+                        "src_ip":  ip,
+                        "src_mac": mac,
+                        "dst_ip":  None,
+                        "dst_port": None,
+                        "protocol": "ARP",
+                        "syn_flag": False,
+                        "initial_syn": False,
+                        "timestamp": ts,
+                        "event_timestamp": ts,
+                        "processing_timestamp": time.time(),
+                    }
+                    rule_engine.check(record)
+                    processed += 1
+                else:
+                    skipped += 1
                 continue
 
-            t_str, proto_name, src_ep, dst_ep, rest = m.groups()
-            try:
-                dt = datetime.strptime(f"{today} {t_str}", "%Y-%m-%d %H:%M:%S.%f")
-                ts = dt.timestamp()
-            except ValueError:
-                ts = time.time()
+            # --- IP / IP6 lines ---
+            m = re.match(
+                r'(IP[6]?)\s+([^>]+)\s+>\s+([^:]+):\s*(.*)',
+                rest_of_line,
+            )
+            if not m:
+                skipped += 1
+                continue
 
+            proto_name, src_ep, dst_ep, detail = m.groups()
             src_host, src_port = _parse_tcpdump_endpoint(src_ep.strip())
             dst_host, dst_port = _parse_tcpdump_endpoint(dst_ep.strip())
 
-            # Detect SYN flag (Flags [S] or Flags [S.])
-            syn_flag = bool(re.search(r'Flags\s+\[S[\.\w]*\]', rest))
+            # SYN-only flag: [S] is initial SYN; [S.] is SYN-ACK (server response)
+            is_syn_ack  = bool(re.search(r'Flags\s+\[S\.', detail))
+            is_any_syn  = bool(re.search(r'Flags\s+\[S',  detail))
+            initial_syn = is_any_syn and not is_syn_ack
+            syn_flag    = is_any_syn
+
+            protocol = "TCP" if "Flags" in detail else (
+                "UDP" if "UDP" in rest_of_line else proto_name
+            )
 
             record = {
-                "type": "IP",
-                "src_ip": src_host,
-                "dst_ip": dst_host,
-                "src_mac": None,
-                "src_port": src_port,   # used by PortScanRule FP filter
-                "dst_port": dst_port,
-                "protocol": "TCP" if "Flags" in rest else ("UDP" if "UDP" in rest else proto_name),
-                "syn_flag": syn_flag,
-                "timestamp": ts,
+                "type":        "IP",
+                "src_ip":      src_host,
+                "dst_ip":      dst_host,
+                "src_mac":     None,
+                "src_port":    src_port,
+                "dst_port":    dst_port,
+                "protocol":    protocol,
+                "syn_flag":    syn_flag,
+                "initial_syn": initial_syn,
+                "timestamp":   ts,
+                "event_timestamp": ts,
+                "processing_timestamp": time.time(),
+                "payload":     b"",
+                "dns_query":   None,
             }
             rule_engine.check(record)
             processed += 1
 
-    logger.info(f"Replay complete: {processed} text log entries processed")
+    if skipped:
+        logger.warning(f"Text log replay: {skipped} lines could not be parsed (skipped)")
+    if processed == 0:
+        logger.error("Text log replay: zero records were successfully parsed.")
+    logger.info(f"Replay complete: {processed} text log entries processed ({skipped} skipped)")
 
 
 def replay_pcap(pcap_path: str, rule_engine):

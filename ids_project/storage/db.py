@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     window_end    REAL,
     country     TEXT,
     country_code TEXT,
-    city        TEXT
+    city        TEXT,
+    idempotency_key TEXT
 );
 
 CREATE TABLE IF NOT EXISTS observations (
@@ -98,7 +99,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     window_end    DOUBLE PRECISION,
     country     TEXT,
     country_code TEXT,
-    city        TEXT
+    city        TEXT,
+    idempotency_key TEXT
 );
 
 CREATE TABLE IF NOT EXISTS observations (
@@ -142,7 +144,8 @@ def get_connection():
         except ImportError:
             raise RuntimeError("psycopg2 not installed. Run: pip install psycopg2-binary")
     else:
-        os.makedirs(os.path.dirname(config.SQLITE_PATH), exist_ok=True)
+        d = os.path.dirname(config.SQLITE_PATH) or "."
+        os.makedirs(d, exist_ok=True)
         conn = sqlite3.connect(config.SQLITE_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
@@ -179,6 +182,7 @@ def _migrate_columns(conn, cur):
         ("alerts",       "evidence_json", "TEXT"),
         ("alerts",       "window_start",  "REAL"),
         ("alerts",       "window_end",    "REAL"),
+        ("alerts",       "idempotency_key", "TEXT"),
     ]
     for table, col, col_type in migrations:
         try:
@@ -190,6 +194,25 @@ def _migrate_columns(conn, cur):
                 _log.getLogger(__name__).warning(
                     f"Unexpected migration error ({table}.{col}): {exc}"
                 )
+    # Create the idempotency index only AFTER the column migration has run.
+    # Existing databases may not have idempotency_key yet, so putting the
+    # index in the initial schema would fail before _migrate_columns() adds it.
+    try:
+        if config.DB_BACKEND == "postgres":
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_idempotency_pg "
+                "ON alerts(idempotency_key)"
+            )
+        else:
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_idempotency "
+                "ON alerts(idempotency_key)"
+            )
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            f"Could not create alerts idempotency index: {exc}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -197,25 +220,26 @@ def _migrate_columns(conn, cur):
 # ---------------------------------------------------------------------------
 
 def write_alert(conn, alert: dict):
-    """Insert one alert into the alerts table. Thread-safe."""
+    """Insert one alert into the alerts table. Thread-safe and idempotent."""
     sql = """
-        INSERT INTO alerts (
+        INSERT OR IGNORE INTO alerts (
             timestamp, rule_name, rule_version,
             src_ip, dst_ip, src_port, dst_port, protocol,
             detail, severity, confidence,
             evidence_json, window_start, window_end,
-            country, country_code, city
+            country, country_code, city, idempotency_key
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """ if config.DB_BACKEND == "sqlite" else """
         INSERT INTO alerts (
             timestamp, rule_name, rule_version,
             src_ip, dst_ip, src_port, dst_port, protocol,
             detail, severity, confidence,
             evidence_json, window_start, window_end,
-            country, country_code, city
+            country, country_code, city, idempotency_key
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (idempotency_key) DO NOTHING
     """
     values = (
         alert.get("timestamp", time.time()),
@@ -235,6 +259,7 @@ def write_alert(conn, alert: dict):
         alert.get("country"),
         alert.get("country_code"),
         alert.get("city"),
+        alert.get("idempotency_key") or alert.get("uuid"),
     )
     with _sqlite_lock:
         cur = conn.cursor()

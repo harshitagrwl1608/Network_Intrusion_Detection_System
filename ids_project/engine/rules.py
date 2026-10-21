@@ -230,10 +230,20 @@ class PortScanRule:
         if src_port and src_port in WELL_KNOWN_SERVICE_PORTS:
             return None
 
-        # Only count SYN packets (new connection attempts); skip ACK/PSH traffic
+        # Explicitly restrict to TCP only. UDP probes are not counted as scan
+        # attempts by this rule (that would need a separate UDP-scan rule).
         protocol = record.get("protocol", "")
-        if protocol == "TCP" and not record.get("syn_flag"):
+        if protocol != "TCP":
             return None
+
+        # Only count initial SYN (SYN=1, ACK=0) — pure new connection attempts.
+        # SYN-ACK packets (SYN=1, ACK=1) are server responses and must not count.
+        if "initial_syn" in record:
+            if not record.get("initial_syn"):
+                return None
+        else:
+            if not record.get("syn_flag"):
+                return None
 
         dst_ip = record.get("dst_ip", "")
         dst_port = record.get("dst_port")
@@ -359,8 +369,15 @@ class SynFloodRule:
                 del self._history[key]
 
     def check(self, record: dict) -> dict | None:
-        if not record.get("syn_flag"):
+        if record.get("protocol") != "TCP":
             return None
+        # Only count initial SYN (SYN=1, ACK=0); skip SYN-ACK server responses
+        if "initial_syn" in record:
+            if not record.get("initial_syn"):
+                return None
+        else:
+            if not record.get("syn_flag"):
+                return None
 
         src = record.get("src_ip", "")
         dst = record.get("dst_ip", "")
@@ -425,12 +442,17 @@ class SynFloodRule:
 
 class ArpSpoofRule:
     name = "ARP_SPOOF"
-    rule_version = "1.1"
+    rule_version = "1.2"
+
+    # Per-IP cooldown: once an alert fires for a given IP, suppress repeats
+    # for this many seconds to avoid alert storms. Set to 0 to disable.
+    ALERT_COOLDOWN_S: float = 120.0
 
     def __init__(self, table_path: str):
         self.table_path = table_path
         self._lock = threading.RLock()
-        self._table: dict[str, str] = {}  # ip → mac
+        self._table: dict[str, str] = {}    # ip → mac
+        self._cooldown: dict[str, float] = {}  # ip → last_alert_time
         self._dirty = False
         self._load()
 
@@ -490,6 +512,12 @@ class ArpSpoofRule:
                 return None
 
             if known_mac != mac:
+                now_t = record.get("timestamp", time.time())
+                if ip in self._cooldown:
+                    if now_t - self._cooldown[ip] < self.ALERT_COOLDOWN_S:
+                        return None  # suppress — already alerted recently
+                self._cooldown[ip] = now_t
+
                 logger.debug(f"ARP_SPOOF fired: {ip} was {known_mac}, now {mac}")
                 return {
                     "rule_name": self.name,
@@ -509,6 +537,7 @@ class ArpSpoofRule:
                         "ip": ip,
                         "previous_mac": known_mac,
                         "new_mac": mac,
+                        "cooldown_s": self.ALERT_COOLDOWN_S,
                     },
                     "window_start": None,
                     "window_end": None,
@@ -807,10 +836,12 @@ class DnsRule:
         src = record.get("src_ip", "unknown")
         now = record.get("timestamp", time.time())
 
-        # Whitelist known-legit high-entropy CDN / cloud domains
+        # --- Allowlist: applied only to entropy check, NOT to length/frequency ---
+        # Broad suffix allowlisting should not suppress other anomaly signals.
+        # A high-entropy domain under a CDN suffix is excused from entropy only;
+        # an unusually LONG or REPEATED query under that suffix still fires.
         dl = domain.lower()
-        if any(dl.endswith(w) for w in _DGA_WHITELIST_SUFFIXES):
-            return None
+        entropy_exempt = any(dl.endswith(w) for w in _DGA_WHITELIST_SUFFIXES)
 
         labels = domain.split(".")
         subdomain = labels[0] if labels else domain
@@ -818,10 +849,16 @@ class DnsRule:
 
         entropy  = _shannon_entropy(subdomain)
         too_long = len(domain) > self.max_query_len
-        # Require label length >= 8 to avoid FPs on short words
-        high_ent = len(subdomain) >= 8 and entropy >= self.entropy_threshold
+        # Require label length >= 8 to avoid FPs on short words.
+        # Also skip entropy check when domain is on the CDN allowlist.
+        high_ent = (
+            not entropy_exempt
+            and len(subdomain) >= 8
+            and entropy >= self.entropy_threshold
+        )
 
         # ── Query frequency: count repeated queries to same parent domain ──
+        # freq_threshold=0 disables frequency detection entirely
         with self._lock:
             fkey = (src, parent)
             self._freq[fkey] = [
@@ -830,7 +867,10 @@ class DnsRule:
             self._freq[fkey].append(now)
             query_count = len(self._freq[fkey])
 
-        high_freq = query_count >= self._freq_threshold
+        high_freq = (
+            self._freq_threshold > 0
+            and query_count >= self._freq_threshold
+        )
 
         if not (high_ent or too_long or high_freq):
             return None
@@ -888,27 +928,174 @@ class DnsRule:
 
 
 # =============================================================================
-# Rule Engine Orchestrator
+# Alert Spool & Rule Engine Orchestrator
 # =============================================================================
+
+class AlertSpool:
+    """
+    Durable, bounded local disk spool for alert persistence during database outages.
+
+    Guarantees:
+    - Bounded disk usage: capped at max_size alerts (default 5,000).
+    - Thread-safe append, drain, count, and clear operations.
+    - Preserves alerts on disk when primary database connection or writes fail.
+    - Drains spooled alerts into the database upon recovery, maintaining idempotency.
+    - Rejects new additions when capacity is reached, enabling explicit backpressure drops.
+    """
+    def __init__(self, spool_path: str, max_size: int = 5000):
+        self.spool_path = spool_path
+        self.max_size = max_size
+        self._lock = threading.Lock()
+        self._count = 0
+        self._init_count()
+
+    def _init_count(self):
+        """Count existing entries in spool file on startup."""
+        if not os.path.exists(self.spool_path):
+            self._count = 0
+            return
+        count = 0
+        try:
+            with open(self.spool_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        count += 1
+            self._count = count
+        except Exception as exc:
+            logger.warning(f"Error reading spool file {self.spool_path}: {exc}")
+            self._count = 0
+
+    @staticmethod
+    def _fsync_parent(path: str):
+        """Persist directory-entry changes where the platform supports it."""
+        directory = os.path.dirname(os.path.abspath(path)) or "."
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        fd = os.open(directory, flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def count(self) -> int:
+        with self._lock:
+            return self._count
+
+    def append(self, alert: dict) -> bool:
+        """
+        Append an alert to the spool file.
+        Returns True if spooled successfully, False if spool is full or unwriteable.
+        """
+        with self._lock:
+            if self._count >= self.max_size:
+                return False
+            try:
+                dirname = os.path.dirname(self.spool_path)
+                if dirname:
+                    os.makedirs(dirname, exist_ok=True)
+                with open(self.spool_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(alert, default=str) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                # Persist directory metadata too when the spool file is new.
+                self._fsync_parent(self.spool_path)
+                self._count += 1
+                return True
+            except Exception as exc:
+                logger.error(f"Failed to append alert to spool {self.spool_path}: {exc}")
+                return False
+
+    def drain(self, write_fn) -> int:
+        """
+        Attempt to drain all spooled alerts using write_fn(alert).
+        If write_fn succeeds for an alert, it is marked as persisted.
+        If write_fn fails on an alert, draining halts immediately,
+        unpersisted alerts remain in the spool file, and the exception is re-raised.
+        Returns the number of alerts successfully recovered and written.
+        """
+        with self._lock:
+            if self._count == 0 or not os.path.exists(self.spool_path):
+                return 0
+
+            persisted = 0
+            remaining = []
+            drain_err = None
+
+            try:
+                with open(self.spool_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            except Exception as exc:
+                logger.error(f"Failed to read spool during drain: {exc}")
+                raise
+
+            for line in lines:
+                line_s = line.strip()
+                if not line_s:
+                    continue
+                if drain_err is not None:
+                    remaining.append(line)
+                    continue
+
+                try:
+                    alert = json.loads(line_s)
+                    write_fn(alert)
+                    persisted += 1
+                except Exception as exc:
+                    drain_err = exc
+                    remaining.append(line)
+
+            try:
+                if remaining:
+                    tmp_path = self.spool_path + ".tmp"
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        f.writelines(remaining)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp_path, self.spool_path)
+                    self._count = len(remaining)
+                    self._fsync_parent(self.spool_path)
+                else:
+                    if os.path.exists(self.spool_path):
+                        os.remove(self.spool_path)
+                    self._count = 0
+                    self._fsync_parent(self.spool_path)
+            except Exception as exc:
+                logger.error(f"Failed to update spool file after drain: {exc}")
+                raise
+
+            if drain_err is not None:
+                raise drain_err
+
+            return persisted
+
+    def clear(self):
+        with self._lock:
+            try:
+                if os.path.exists(self.spool_path):
+                    os.remove(self.spool_path)
+            except Exception:
+                pass
+            self._count = 0
+
 
 class RuleEngine:
     """
     Runs all rules against every packet record.
-    Writes any resulting alerts to the database asynchronously.
+    Writes any resulting alerts to the database asynchronously with local disk spooling.
     Also tracks seen devices for the dashboard device list.
 
-    All rules are run for every packet — no early exit.  A packet may
+    All rules are run for every packet — no early exit. A packet may
     legitimately trigger multiple independent rules; both alerts are
     valuable and should be persisted.
     """
 
-    def __init__(self, db_conn, blocklist, cfg):
+    def __init__(self, db_conn, blocklist, cfg, event_clock=None):
         from storage.db import write_alert, upsert_device
         import engine.rules as _rules_mod
         import queue
 
         self._write_alert  = write_alert
         self._upsert_device = upsert_device
+        self._event_clock = event_clock
 
         # Load trusted hosts from config into module-level set
         trusted = getattr(cfg, "TRUSTED_HOSTS", set())
@@ -929,19 +1116,51 @@ class RuleEngine:
             DnsRule(
                 entropy_threshold=getattr(cfg, "DNS_ENTROPY_THRESHOLD", 3.8),
                 max_query_len=getattr(cfg, "DNS_QUERY_MAX_LEN", 60),
-                # Wire frequency config from environment (P1 — was hard-coded)
                 freq_threshold=getattr(cfg, "DNS_FREQ_THRESHOLD", 20),
                 freq_window=getattr(cfg, "DNS_FREQ_WINDOW", 60),
             ),
         ]
 
-        # Bounded async writer queue with explicit stop sentinel
-        self._write_queue: queue.Queue = queue.Queue(maxsize=2000)
+        # Bounded alert queue + durable disk spool backup
+        alert_q_max = getattr(cfg, "ALERT_QUEUE_MAXSIZE", 1000)
+        self._alert_queue: queue.Queue = queue.Queue(maxsize=alert_q_max)
+
+        spool_path = getattr(cfg, "ALERT_SPOOL_PATH", None)
+        if not spool_path:
+            sqlite_path = getattr(cfg, "SQLITE_PATH", "alerts.db")
+            if sqlite_path and sqlite_path != ":memory:":
+                spool_path = sqlite_path + ".spool.jsonl"
+            else:
+                import tempfile
+                spool_path = os.path.join(tempfile.gettempdir(), f"netguard_spool_{os.getpid()}_{id(self)}.jsonl")
+        spool_max = getattr(cfg, "ALERT_SPOOL_MAX_SIZE", 5000)
+        self._spool = AlertSpool(spool_path, max_size=spool_max)
+
+        # Device queue is bounded with deduplication and periodic refresh
+        DEVICE_REFRESH_INTERVAL = 300  # 5 minutes
+        self._device_refresh_s: float = DEVICE_REFRESH_INTERVAL
+        self._device_queue: queue.Queue = queue.Queue(maxsize=1000)
+        self._seen_devices: dict = {}
+
+        self._stats = {
+            "alert_writes": 0,
+            "device_writes": 0,
+            "alerts_dropped": 0,
+            "devices_dropped": 0,
+            "alerts_spooled": 0,
+            "spool_recoveries": 0,
+            "shutdown_timeout": False,
+        }
         self._stop_event = threading.Event()
-        self._writer_thread = threading.Thread(
-            target=self._db_writer_loop, daemon=True, name="db-writer"
+
+        self._alert_writer = threading.Thread(
+            target=self._alert_writer_loop, daemon=True, name="alert-writer"
         )
-        self._writer_thread.start()
+        self._device_writer = threading.Thread(
+            target=self._device_writer_loop, daemon=True, name="device-writer"
+        )
+        self._alert_writer.start()
+        self._device_writer.start()
 
         # GC thread for stateful rules
         self._gc_thread = threading.Thread(
@@ -952,58 +1171,281 @@ class RuleEngine:
         import atexit
         atexit.register(self.flush)
 
+    def prune_stale(self, now: float = None):
+        """
+        Prune stale stateful rule histories.
+        If *now* is not specified, queries self._event_clock() or time.time().
+        Enables deterministic testing and on-demand GC without waiting for the
+        background GC thread loop.
+        """
+        if now is None:
+            clock = self._event_clock or time.time
+            now = clock()
+        for rule in self.rules:
+            if hasattr(rule, "prune_stale"):
+                try:
+                    rule.prune_stale(now)
+                except Exception as e:
+                    logger.error(f"Rule GC error for {rule.name}: {e}")
+
     def _gc_loop(self):
+        """
+        Periodically prune stale stateful rule histories.
+        clock: uses self._event_clock if provided (e.g. during replay),
+        otherwise falls back to time.time.
+        """
         while not self._stop_event.is_set():
             time.sleep(10)
-            now = time.time()
-            for rule in self.rules:
-                if hasattr(rule, "prune_stale"):
-                    try:
-                        rule.prune_stale(now)
-                    except Exception as e:
-                        logger.error(f"Rule GC error for {rule.name}: {e}")
+            self.prune_stale()
 
-    def _db_writer_loop(self):
+    def _alert_writer_loop(self):
+        """
+        Drain the alert queue and persist each alert to the DB.
+
+        Reliability & Recovery Architecture:
+          - Bounded in-memory queue + durable local disk spool (AlertSpool).
+          - Exponential backoff with cap for connection failures (0.5s to 5.0s max).
+          - Transient write failures trigger reconnection and retry before falling back
+            to durable spooling (never silent drops).
+          - When DB connection recovers, spooled alerts are automatically drained and
+            persisted before accepting new queue traffic.
+          - Idempotent writes via idempotency_key prevent duplicate database rows.
+          - Bounded memory and bounded disk usage ensure persistent outages cannot
+            cause memory leaks or tight loops.
+        """
         import queue as _queue
-        from storage.db import get_connection
-        conn = get_connection()
-        while True:
+        from storage.db import get_connection, init_db
+
+        conn = None
+        consecutive_failures = 0
+        last_connect_time = 0.0
+
+        def _get_backoff():
+            return min(5.0, 0.2 * (2 ** min(consecutive_failures, 4)))
+
+        def _try_connect():
+            nonlocal conn, consecutive_failures, last_connect_time
+            last_connect_time = time.time()
             try:
-                task, data = self._write_queue.get(timeout=1)
-                if task == "stop":
-                    self._write_queue.task_done()
+                c = get_connection()
+                init_db(c)
+                conn = c
+                consecutive_failures = 0
+                logger.info("Alert writer: connected to database.")
+                return True
+            except Exception as exc:
+                consecutive_failures += 1
+                conn = None
+                delay = _get_backoff()
+                logger.warning(
+                    f"Alert writer: DB connection failed ({exc}). Retrying in {delay:.1f}s..."
+                )
+                return False
+
+        def _drain_spool():
+            nonlocal conn
+            if conn is None or self._spool.count() == 0:
+                return
+            def _write_spooled(spooled_alert):
+                self._write_alert(conn, spooled_alert)
+                self._stats["alert_writes"] += 1
+                self._stats["spool_recoveries"] += 1
+            try:
+                recovered = self._spool.drain(_write_spooled)
+                if recovered > 0:
+                    logger.info(f"Alert writer: recovered {recovered} spooled alerts into DB.")
+            except Exception as exc:
+                logger.warning(f"Alert writer: error draining spool ({exc}).")
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                conn = None
+
+        # Initial connection attempt
+        _try_connect()
+        # Drain any alerts already spooled from earlier runs
+        _drain_spool()
+
+        while True:
+            # If not connected, check if it's time to retry connection
+            if conn is None and not self._stop_event.is_set():
+                if time.time() - last_connect_time >= _get_backoff():
+                    if _try_connect():
+                        _drain_spool()
+
+            try:
+                sentinel, data = self._alert_queue.get(timeout=0.1)
+                if sentinel == "stop":
+                    self._alert_queue.task_done()
                     break
-                if task == "alert":
-                    self._write_alert(conn, data)
-                elif task == "device":
-                    self._upsert_device(conn, data["mac"], data["ip"])
-                self._write_queue.task_done()
+
+                if conn is not None and self._spool.count() > 0:
+                    _drain_spool()
+
+                if conn is not None:
+                    # Attempt write with retry
+                    write_ok = False
+                    for attempt in range(2):
+                        try:
+                            self._write_alert(conn, data)
+                            self._stats["alert_writes"] += 1
+                            write_ok = True
+                            break
+                        except Exception as write_err:
+                            logger.warning(
+                                f"Alert write transient failure (attempt {attempt+1}/2): {write_err}"
+                            )
+                            try:
+                                conn.close()
+                            except Exception:
+                                pass
+                            conn = None
+                            if attempt == 0:
+                                if _try_connect():
+                                    continue
+                            break
+
+                    if not write_ok:
+                        # Write failed even after retry/reconnect -> spool to disk
+                        spooled = self._spool.append(data)
+                        if spooled:
+                            self._stats["alerts_spooled"] = self._spool.count()
+                            logger.warning(
+                                f"Alert write failed after retry — spooled to disk: rule={data.get('rule_name')}"
+                            )
+                        else:
+                            self._stats["alerts_dropped"] += 1
+                            logger.error(
+                                f"Alert spool saturated/failed — alert dropped: rule={data.get('rule_name')} (drop count: {self._stats['alerts_dropped']})"
+                            )
+                else:
+                    # DB is currently disconnected -> buffer to durable spool
+                    spooled = self._spool.append(data)
+                    if spooled:
+                        self._stats["alerts_spooled"] = self._spool.count()
+                        logger.warning(
+                            f"DB unavailable — alert spooled to disk: rule={data.get('rule_name')}"
+                        )
+                    else:
+                        self._stats["alerts_dropped"] += 1
+                        logger.error(
+                            f"DB unavailable & spool saturated — alert dropped: rule={data.get('rule_name')} (drop count: {self._stats['alerts_dropped']})"
+                        )
+
+                self._alert_queue.task_done()
             except _queue.Empty:
                 if self._stop_event.is_set():
                     break
-            except Exception as e:
-                logger.error(f"DB writer error: {e}")
-                try:
-                    self._write_queue.task_done()
-                except Exception:
-                    pass
 
-    def _enqueue(self, task: str, data):
-        """Put work onto the bounded queue; drop and log if full."""
+        # -------------------------------------------------------------
+        # Clean Shutdown: Drain queue and attempt final spool drain
+        # -------------------------------------------------------------
+        while True:
+            try:
+                sentinel, data = self._alert_queue.get_nowait()
+                if sentinel == "alert":
+                    if conn is not None:
+                        try:
+                            self._write_alert(conn, data)
+                            self._stats["alert_writes"] += 1
+                        except Exception:
+                            if self._spool.append(data):
+                                self._stats["alerts_spooled"] = self._spool.count()
+                            else:
+                                self._stats["alerts_dropped"] += 1
+                    else:
+                        if self._spool.append(data):
+                            self._stats["alerts_spooled"] = self._spool.count()
+                        else:
+                            self._stats["alerts_dropped"] += 1
+                self._alert_queue.task_done()
+            except _queue.Empty:
+                break
+
+        # If DB connection was offline earlier, attempt reconnect to drain spool
+        if conn is None:
+            _try_connect()
+
+        if conn is not None:
+            _drain_spool()
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = None
+
+        self._stats["alerts_spooled"] = self._spool.count()
+
+    def _device_writer_loop(self):
+        """Drain the device queue. Drops and connection failures are non-fatal."""
         import queue as _queue
-        try:
-            self._write_queue.put_nowait((task, data))
-        except _queue.Full:
-            logger.warning(f"Write queue full — dropping {task} entry")
+        from storage.db import get_connection
+
+        conn = None
+        while not self._stop_event.is_set() or not self._device_queue.empty():
+            if conn is None:
+                try:
+                    conn = get_connection()
+                except Exception:
+                    conn = None
+            try:
+                sentinel, data = self._device_queue.get(timeout=0.1)
+                if sentinel == "stop":
+                    self._device_queue.task_done()
+                    break
+                if conn is not None:
+                    try:
+                        self._upsert_device(conn, data["mac"], data["ip"])
+                        self._stats["device_writes"] += 1
+                    except Exception as e:
+                        logger.error(f"Device write error: {e}")
+                else:
+                    self._stats["devices_dropped"] += 1
+                self._device_queue.task_done()
+            except _queue.Empty:
+                if self._stop_event.is_set():
+                    break
+
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def flush(self):
-        """Signal stop, wait for pending writes to drain."""
+        """
+        Signal stop and drain pending writes reliably.
+        Waits for alert writes and spooling to complete or until writer thread exits.
+        Hard timeout prevents infinite hang.
+        """
         self._stop_event.set()
+
+        # Send stop sentinels
         try:
-            self._write_queue.put_nowait(("stop", None))
+            self._alert_queue.put(("stop", None), timeout=1)
         except Exception:
             pass
-        self._writer_thread.join(timeout=5)
+        try:
+            self._device_queue.put_nowait(("stop", None))
+        except Exception:
+            pass
+
+        # Wait for the alert writer thread to exit
+        self._alert_writer.join(timeout=5)
+        if self._alert_writer.is_alive():
+            logger.warning(
+                f"Alert writer thread still alive after flush timeout. "
+                f"Alerts written: {self._stats['alert_writes']}, "
+                f"queue depth: {self._alert_queue.qsize()}"
+            )
+            self._stats["shutdown_timeout"] = True
+
+        self._device_writer.join(timeout=2)
+        if self._gc_thread.is_alive():
+            self._gc_thread.join(timeout=1)
+
+        # Flush per-rule state (e.g. ARP table to disk)
         for rule in self.rules:
             if hasattr(rule, "flush"):
                 try:
@@ -1011,12 +1453,32 @@ class RuleEngine:
                 except Exception as e:
                     logger.error(f"Rule flush error: {e}")
 
+        self._stats["alerts_spooled"] = self._spool.count()
+        logger.info(
+            f"RuleEngine shutdown: alerts={self._stats['alert_writes']}, "
+            f"devices={self._stats['device_writes']}, "
+            f"alerts_dropped={self._stats['alerts_dropped']}, "
+            f"alerts_spooled={self._stats['alerts_spooled']}, "
+            f"devices_dropped={self._stats['devices_dropped']}"
+        )
+
     def check(self, record: dict):
-        # Track seen device
+        # Device refresh: enqueue device write on first-seen OR after the
+        # refresh interval has elapsed so last_seen stays current.
         mac = record.get("src_mac")
         ip  = record.get("src_ip")
         if mac and ip:
-            self._enqueue("device", {"mac": mac, "ip": ip})
+            dev_key = (mac, ip)
+            now_wall = time.time()
+            last_write = self._seen_devices.get(dev_key, 0.0)
+            if now_wall - last_write >= self._device_refresh_s:
+                self._seen_devices[dev_key] = now_wall
+                import queue as _queue
+                try:
+                    self._device_queue.put_nowait(("device", {"mac": mac, "ip": ip}))
+                except _queue.Full:
+                    self._stats["devices_dropped"] += 1
+                    logger.warning(f"Device queue full — dropped ({mac}, {ip})")
 
         # Run ALL rules — no early exit
         for rule in self.rules:
@@ -1028,10 +1490,35 @@ class RuleEngine:
                         "event_timestamp",
                         record.get("timestamp", time.time()),
                     )
-                    # Serialise evidence dict to JSON string for DB persistence (§3.7)
+                    # Serialise evidence dict to JSON string for DB persistence
                     if "evidence" in alert:
-                        alert["evidence_json"] = json.dumps(alert["evidence"])
-                    self._enqueue("alert", alert)
+                        alert["evidence_json"] = json.dumps(alert["evidence"], default=str)
+                    if "idempotency_key" not in alert:
+                        import uuid
+                        alert["idempotency_key"] = (
+                            f"{alert.get('rule_name')}:{alert.get('src_ip')}:"
+                            f"{alert.get('dst_ip')}:{alert.get('dst_port')}:"
+                            f"{alert.get('timestamp')}:{uuid.uuid4().hex[:8]}"
+                        )
+                    import queue as _queue
+                    try:
+                        self._alert_queue.put_nowait(("alert", alert))
+                    except _queue.Full:
+                        # Queue saturation backpressure policy:
+                        # Spool directly to durable disk storage
+                        spooled = self._spool.append(alert)
+                        if spooled:
+                            self._stats["alerts_spooled"] = self._spool.count()
+                            logger.warning(
+                                f"Alert queue full ({self._alert_queue.maxsize}) — "
+                                f"spooled to disk under backpressure: {alert.get('rule_name')}"
+                            )
+                        else:
+                            self._stats["alerts_dropped"] += 1
+                            logger.error(
+                                f"Alert queue and spool saturated — alert dropped: "
+                                f"{alert.get('rule_name')} (drop count: {self._stats['alerts_dropped']})"
+                            )
                     logger.info(
                         f"[ALERT] {alert['rule_name']} v{alert.get('rule_version','?')} "
                         f"— {alert['detail']}"
