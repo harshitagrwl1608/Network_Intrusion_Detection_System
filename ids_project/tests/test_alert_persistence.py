@@ -63,6 +63,39 @@ class TestAlertPersistence(unittest.TestCase):
             if os.path.exists(bare_name):
                 os.remove(bare_name)
 
+    def test_spool_append_and_atomic_drain_fsync_changes(self):
+        """Spool append and atomic rewrite/removal fsync file and directory metadata."""
+        import json
+
+        spool_path = os.path.join(self.tmp_dir, "fsync.spool.jsonl")
+        spool = AlertSpool(spool_path, max_size=10)
+        with patch("engine.rules.os.fsync", wraps=os.fsync) as fsync_mock:
+            self.assertTrue(spool.append(self._make_alert()))
+            self.assertGreaterEqual(
+                fsync_mock.call_count, 2,
+                "append should fsync both the spool file and its parent directory",
+            )
+
+        self.assertTrue(spool.append(self._make_alert()))
+        attempts = [0]
+
+        def fail_second_write(_alert):
+            attempts[0] += 1
+            if attempts[0] == 2:
+                raise RuntimeError("simulated DB write failure")
+
+        with patch("engine.rules.os.fsync", wraps=os.fsync) as fsync_mock:
+            with self.assertRaises(RuntimeError):
+                spool.drain(fail_second_write)
+            self.assertGreaterEqual(
+                fsync_mock.call_count, 2,
+                "atomic spool rewrite should fsync the temporary file and parent directory",
+            )
+        self.assertEqual(spool.count(), 1)
+        with open(spool_path, encoding="utf-8") as f:
+            remaining = [json.loads(line) for line in f if line.strip()]
+        self.assertEqual(len(remaining), 1)
+
     def test_alerts_not_dropped_under_device_saturation(self):
         """
         Device inventory queue saturation must not prevent alerts from being
@@ -218,33 +251,34 @@ class TestAlertPersistence(unittest.TestCase):
 
     def test_queue_saturation_backpressure_policy(self):
         """
-        4. When the in-memory alert queue is full, the backpressure policy
-        spools alerts to disk rather than crashing, deadlocking, or silently dropping.
+        Exercise RuleEngine.check()'s real queue.Full handler by triggering an
+        actual blocklist rule and making the bounded queue reject its enqueue.
+        The production handler must spool the generated alert.
         """
-        setattr(config, "ALERT_QUEUE_MAXSIZE", 2)
+        import json
+        import queue
+        from engine.blocklist import BlocklistData
+
         conn = get_connection()
-        engine = RuleEngine(conn, set(), config)
+        blocklist = BlocklistData(exact={"198.51.100.42"}, networks=[])
+        engine = RuleEngine(conn, blocklist, config)
         try:
-            # Enqueue alerts directly to fill the queue
-            engine._alert_queue.put_nowait(("alert", self._make_alert()))
-            engine._alert_queue.put_nowait(("alert", self._make_alert()))
-            self.assertTrue(engine._alert_queue.full())
-
-            # Now call check() with an alert-generating record
-            # The backpressure policy will catch queue.Full and spool to disk
             spool_count_before = engine._spool.count()
-            # Send packet matching blocklist rule to generate alert
-            blocklist_alert = self._make_alert("PORT_SCAN")
-            # Directly test queue saturation backpressure
-            try:
-                engine._alert_queue.put_nowait(("alert", blocklist_alert))
-            except Exception:
-                # Emulate check() backpressure
-                spooled = engine._spool.append(blocklist_alert)
-                self.assertTrue(spooled)
+            # Deterministically model a full queue without racing the writer thread.
+            with patch.object(engine._alert_queue, "put_nowait", side_effect=queue.Full):
+                engine.check({
+                    "type": "IP",
+                    "src_ip": "198.51.100.42",
+                    "dst_ip": "10.0.0.1",
+                    "protocol": "TCP",
+                    "timestamp": time.time(),
+                })
 
-            self.assertGreater(engine._spool.count(), spool_count_before)
-            engine.flush()
+            self.assertEqual(engine._spool.count(), spool_count_before + 1)
+            self.assertEqual(engine._stats["alerts_dropped"], 0)
+            with open(engine._spool.spool_path, encoding="utf-8") as f:
+                alerts = [json.loads(line) for line in f if line.strip()]
+            self.assertTrue(any(a.get("rule_name") == "BLOCKLIST" for a in alerts))
         finally:
             engine.flush()
 
