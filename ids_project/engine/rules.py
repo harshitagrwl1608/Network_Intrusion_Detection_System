@@ -965,6 +965,17 @@ class AlertSpool:
             logger.warning(f"Error reading spool file {self.spool_path}: {exc}")
             self._count = 0
 
+    @staticmethod
+    def _fsync_parent(path: str):
+        """Persist directory-entry changes where the platform supports it."""
+        directory = os.path.dirname(os.path.abspath(path)) or "."
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        fd = os.open(directory, flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
     def count(self) -> int:
         with self._lock:
             return self._count
@@ -984,6 +995,9 @@ class AlertSpool:
                 with open(self.spool_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(alert, default=str) + "\n")
                     f.flush()
+                    os.fsync(f.fileno())
+                # Persist directory metadata too when the spool file is new.
+                self._fsync_parent(self.spool_path)
                 self._count += 1
                 return True
             except Exception as exc:
@@ -1035,14 +1049,18 @@ class AlertSpool:
                     with open(tmp_path, "w", encoding="utf-8") as f:
                         f.writelines(remaining)
                         f.flush()
+                        os.fsync(f.fileno())
                     os.replace(tmp_path, self.spool_path)
                     self._count = len(remaining)
+                    self._fsync_parent(self.spool_path)
                 else:
                     if os.path.exists(self.spool_path):
                         os.remove(self.spool_path)
                     self._count = 0
+                    self._fsync_parent(self.spool_path)
             except Exception as exc:
                 logger.error(f"Failed to update spool file after drain: {exc}")
+                raise
 
             if drain_err is not None:
                 raise drain_err
