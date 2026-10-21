@@ -278,7 +278,43 @@ Under the initial architecture (`5d22fba`):
 
 ---
 
+## Cycle 9: Priority 1 Engine Enhancement — TCP Flag Anomaly & Malformed Packet Detection
+
+### 1. Root Cause Hypothesis & Goal
+- **Malformed Packet Exploits & Fingerprinting:** Attackers craft illegal TCP flag combinations to fingerprint operating system network stacks, exploit protocol parser bugs, or bypass stateless firewall filters (e.g. `SYN+FIN`, `SYN+RST`, `ALL_FLAGS`/Kamikaze probes).
+- **Stealth Probe Disambiguation:** `TcpStealthScanRule` detects scans across 15+ ports using FIN/NULL/Xmas probes. However, single or isolated packets with conflicting flags (e.g. `SYN+FIN`) should be flagged immediately without needing a 15-probe scan threshold, while cleanly exempting Xmas probes (`0x29`) that are handled by `TcpStealthScanRule` to prevent double-alerting.
+- **Alert Flood Prevention:** Stateful per-(source, anomaly_type) cooldown is required to avoid alert storms if a malformed flood is directed at a target.
+
+### 2. Implementation
+- In `ids_project/engine/rules.py`:
+  - Implemented `TcpFlagAnomalyRule`:
+    - Checks for `ALL_FLAGS` (0x3F), `SYN+FIN` (0x03), `SYN+RST` (0x06), standalone `PSH_WITHOUT_ACK` (0x08), and standalone `URG_WITHOUT_ACK` (0x20).
+    - Explicitly exempts Xmas scan probes (`_FIN | _PSH | _URG = 0x29`) and pure FIN probes handled by `TcpStealthScanRule`.
+    - Enforces a 60-second alert cooldown per `(src_ip, anomaly_type)` with LRU capacity pruning (5,000 states).
+    - Registered `TcpFlagAnomalyRule` in `RuleEngine.rules` right after `BlocklistRule`.
+- In `ids_project/tests/test_tcp_flag_anomaly.py`:
+  - Added unit test suite (9 tests) verifying detection of SYN+FIN, SYN+RST, Kamikaze, unacknowledged PSH, legitimate flag exemptions (SYN, SYN-ACK, ACK, PSH-ACK, FIN-ACK, RST, RST-ACK, ECN, Xmas), cooldown enforcement, and memory bounding.
+- In `ids_project/evaluation/generate_test_pcap.py` & `run_eval.py`:
+  - Added Scenario S28: `TCP_FLAG_ANOMALY` (SYN+FIN packet evasion).
+  - Registered `TcpFlagAnomalyRule` in `known_rules` and `_run_metadata()`.
+
+### 3. Files Changed
+- `ids_project/engine/rules.py`
+- `ids_project/tests/test_tcp_flag_anomaly.py` (New test suite)
+- `ids_project/evaluation/generate_test_pcap.py`
+- `ids_project/evaluation/run_eval.py`
+- `ids_project/evaluation/scenarios/test_labels.csv`
+- `ids_project/data/test_attacks.pcap`
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_tcp_flag_anomaly.py`: OK (9 tests passed).
+- `python3 -m unittest discover ids_project/tests`: OK (167 tests passed in 51.7s).
+- `python3 ids_project/evaluation/run_eval.py`: OK (28/28 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
+- `git diff --check`: Exit code 0.
+
+---
+
 ## Final Session Summary & Checklist
-- **Session Stop Condition:** Completed Cycle 8 enhancements, comprehensive tests, and clean evaluation.
-- **Total Cycles Completed:** 8
-- **All Applicable Regression Tests:** 158 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (27/27 scenarios).
+- **Session Stop Condition:** Completed Cycle 8 and Cycle 9 enhancements, comprehensive tests, and clean evaluation.
+- **Total Cycles Completed:** 9
+- **All Applicable Regression Tests:** 167 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (28/28 scenarios).

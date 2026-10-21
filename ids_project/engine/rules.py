@@ -516,6 +516,146 @@ class TcpStealthScanRule:
 
 
 # =============================================================================
+# Rule: TCP Flag Anomaly & Malformed Packet Detection
+# =============================================================================
+
+class TcpFlagAnomalyRule:
+    """
+    Detect malformed TCP packets carrying illegal or conflicting flag combinations.
+
+    In the TCP state machine (RFC 793, RFC 3168):
+      - SYN and FIN cannot be set simultaneously (SYN_FIN: 0x03).
+      - SYN and RST cannot be set simultaneously (SYN_RST: 0x06).
+      - All control flags set simultaneously (ALL_FLAGS / Kamikaze: 0x3F).
+      - PSH set without ACK or SYN (PSH_WITHOUT_ACK: 0x08).
+      - URG set without ACK (URG_WITHOUT_ACK: 0x20).
+
+    These packets are used for OS fingerprinting (e.g. Nmap scan evasion),
+    firewall evasion, or malformed stack exploitation.
+    Stateful cooldown prevents alert storms if an attacker sends a flood.
+    """
+
+    name = "TCP_FLAG_ANOMALY"
+    rule_version = "1.0"
+    ALERT_COOLDOWN_S = 60.0
+
+    def __init__(self, cooldown: float = 60.0, max_states: int = 5000):
+        self.cooldown = float(cooldown)
+        self.max_states = int(max_states)
+        self._lock = threading.RLock()
+        # (src_ip, anomaly_type) → last_alert_timestamp
+        self._cooldown: dict[tuple, float] = {}
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.cooldown
+        with self._lock:
+            for key in list(self._cooldown):
+                if self._cooldown[key] < cutoff:
+                    del self._cooldown[key]
+
+    def check(self, record: dict) -> dict | None:
+        if record.get("type") != "IP" or record.get("protocol") != "TCP":
+            return None
+
+        src = record.get("src_ip", "")
+        if not src or _is_trusted(src):
+            return None
+
+        flags = record.get("tcp_flags")
+        if flags is None:
+            return None
+        flags = int(flags)
+
+        # Standard TCP flags
+        _FIN = 0x01
+        _SYN = 0x02
+        _RST = 0x04
+        _PSH = 0x08
+        _ACK = 0x10
+        _URG = 0x20
+
+        anomaly_type = None
+        severity = "medium"
+        desc = ""
+
+        # Ignore Xmas probes (_FIN | _PSH | _URG = 0x29) and pure FIN probes — handled by TcpStealthScanRule
+        if (flags & (_FIN | _PSH | _URG)) == (_FIN | _PSH | _URG) and not (flags & (_SYN | _RST | _ACK)):
+            return None
+
+        # 1. All control flags set (SYN+FIN+RST+PSH+ACK+URG = 0x3F)
+        if (flags & 0x3F) == 0x3F:
+            anomaly_type = "ALL_FLAGS"
+            severity = "high"
+            desc = "All 6 standard TCP control flags set simultaneously (Kamikaze/Xmas probe)"
+        # 2. SYN + FIN (0x03)
+        elif (flags & (_SYN | _FIN)) == (_SYN | _FIN):
+            anomaly_type = "SYN_FIN"
+            severity = "high"
+            desc = "SYN+FIN flags set simultaneously (illegal connection open/close request)"
+        # 3. SYN + RST (0x06)
+        elif (flags & (_SYN | _RST)) == (_SYN | _RST):
+            anomaly_type = "SYN_RST"
+            severity = "high"
+            desc = "SYN+RST flags set simultaneously (illegal connection open/abort request)"
+        # 4. PSH without ACK or SYN
+        elif (flags & _PSH) and not (flags & (_ACK | _SYN)):
+            anomaly_type = "PSH_WITHOUT_ACK"
+            severity = "medium"
+            desc = "PSH flag set without ACK or SYN"
+        # 5. URG without ACK
+        elif (flags & _URG) and not (flags & _ACK):
+            anomaly_type = "URG_WITHOUT_ACK"
+            severity = "medium"
+            desc = "URG flag set without ACK"
+
+        if not anomaly_type:
+            return None
+
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        key = (src, anomaly_type)
+
+        with self._lock:
+            last = self._cooldown.get(key)
+            if last is not None and now - last < self.cooldown:
+                return None
+
+            if key not in self._cooldown and len(self._cooldown) >= self.max_states:
+                self._cooldown.pop(next(iter(self._cooldown)))
+            self._cooldown[key] = now
+
+        dst = record.get("dst_ip", "")
+        dst_port = record.get("dst_port")
+        src_port = record.get("src_port")
+
+        logger.debug(f"{self.name} fired: {src}→{dst}:{dst_port} {anomaly_type} (flags=0x{flags:02x})")
+
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src,
+            "dst_ip": dst,
+            "src_port": src_port,
+            "dst_port": dst_port,
+            "protocol": "TCP",
+            "severity": severity,
+            "confidence": "high",
+            "detail": (
+                f"{src} sent malformed TCP packet to {dst}:{dst_port} "
+                f"with invalid flags (0x{flags:02x}) — {desc}"
+            ),
+            "evidence": {
+                "anomaly_type": anomaly_type,
+                "tcp_flags": flags,
+                "flags_hex": f"0x{flags:02x}",
+                "description": desc,
+                "note": "Illegal TCP flag combinations are commonly used for OS fingerprinting, firewall evasion, or malformed packet attacks.",
+            },
+            "window_start": None,
+            "window_end": None,
+        }
+
+
+# =============================================================================
 # Rule 3: SYN Burst / Connection-Rate Abuse  (§3.3 — label clarified)
 # =============================================================================
 
@@ -2253,6 +2393,7 @@ class RuleEngine:
 
         self.rules = [
             BlocklistRule(blocklist),
+            TcpFlagAnomalyRule(),
             PortScanRule(cfg.PORT_SCAN_THRESHOLD, cfg.TIME_WINDOW),
             UdpScanRule(
                 getattr(cfg, "UDP_SCAN_THRESHOLD", 15), cfg.TIME_WINDOW

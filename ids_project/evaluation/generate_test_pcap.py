@@ -552,6 +552,21 @@ def gen_deserialization(base: float) -> list:
     return [pkt]
 
 
+def gen_tcp_flag_anomaly(base: float) -> list:
+    """S28: Malformed TCP packet with conflicting SYN+FIN flags → TCP_FLAG_ANOMALY."""
+    scenario(
+        "S28", "TCP_FLAG_ANOMALY",
+        "Malformed TCP packet with conflicting SYN+FIN flags",
+        src_ip="192.168.1.97", dst_ip="192.168.1.1",
+        dst_port="80", protocol="TCP",
+    )
+    pkt = (_make_eth() /
+           IP(src="192.168.1.97", dst="192.168.1.1") /
+           TCP(sport=54328, dport=80, flags="SF"))
+    pkt.time = base + 230.0
+    return [pkt]
+
+
 # ---------------------------------------------------------------------------
 # Benign negative packet generators  (should NOT fire any rule)
 # ---------------------------------------------------------------------------
@@ -805,6 +820,7 @@ def generate_all():
     attack_pkts += gen_xxe_injection(base)
     attack_pkts += gen_shellshock(base)
     attack_pkts += gen_deserialization(base)
+    attack_pkts += gen_tcp_flag_anomaly(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)

@@ -26,3 +26,4 @@ S24,DNS_ANOMALY,192.168.1.94,8.8.8.8,53,UDP,DNS subdomain data exfiltration: 25 
 S25,PAYLOAD_HIT,192.168.1.81,192.168.1.1,80,TCP,XML External Entity (XXE) injection in HTTP body
 S26,PAYLOAD_HIT,192.168.1.82,192.168.1.1,80,TCP,Shellshock bash environment function injection in HTTP header
 S27,PAYLOAD_HIT,192.168.1.83,192.168.1.1,8080,TCP,Java serialized object magic bytes payload
+S28,TCP_FLAG_ANOMALY,192.168.1.97,192.168.1.1,80,TCP,Malformed TCP packet with conflicting SYN+FIN flags
