@@ -35,6 +35,7 @@ PORT_SCAN_THRESHOLD = int(os.getenv("PORT_SCAN_THRESHOLD", 15))   # distinct por
 TCP_STEALTH_SCAN_THRESHOLD = int(os.getenv("TCP_STEALTH_SCAN_THRESHOLD", 15))  # FIN/NULL/Xmas destination ports
 UDP_SCAN_THRESHOLD = int(os.getenv("UDP_SCAN_THRESHOLD", 15))     # distinct UDP ports OR hosts in window
 SYN_FLOOD_THRESHOLD = int(os.getenv("SYN_FLOOD_THRESHOLD", 100))  # SYN packets in window
+RST_FLOOD_THRESHOLD = int(os.getenv("RST_FLOOD_THRESHOLD", 100))  # RST packets in window
 DISTRIBUTED_SYN_FLOOD_THRESHOLD = int(os.getenv("DISTRIBUTED_SYN_FLOOD_THRESHOLD", 500))
 DISTRIBUTED_SYN_FLOOD_MIN_SOURCES = int(os.getenv("DISTRIBUTED_SYN_FLOOD_MIN_SOURCES", 20))
 TIME_WINDOW = int(os.getenv("TIME_WINDOW", 10))                    # seconds
@@ -71,6 +72,10 @@ DNS_QUERY_MAX_LEN     = int(os.getenv("DNS_QUERY_MAX_LEN", 60))         # chars;
 # Query-frequency detection: alert if src queries same parent domain >= N times in T seconds.
 DNS_FREQ_THRESHOLD    = int(os.getenv("DNS_FREQ_THRESHOLD", 20))         # queries in window
 DNS_FREQ_WINDOW       = int(os.getenv("DNS_FREQ_WINDOW", 60))            # seconds
+# Subdomain exfiltration: alert if src uses >= N distinct subdomains under same parent in window.
+# Attackers encode data in subdomains (e.g. aGVsbG8=.evil.com). Set 0 to disable.
+DNS_SUBDOMAIN_THRESHOLD = int(os.getenv("DNS_SUBDOMAIN_THRESHOLD", 20))  # distinct subdomains
+DNS_SUBDOMAIN_WINDOW    = int(os.getenv("DNS_SUBDOMAIN_WINDOW", 60))     # seconds
 
 # --- Analysis ---
 ANALYSIS_INTERVAL = int(os.getenv("ANALYSIS_INTERVAL", 30))       # seconds between runs
@@ -88,3 +93,16 @@ ALERT_RETENTION_DAYS = int(os.getenv("ALERT_RETENTION_DAYS", 7))
 
 # Default time window shown by the dashboard history view (days).
 HISTORY_DAYS = int(os.getenv("HISTORY_DAYS", 7))
+
+# --- Brute Force Detection (BruteForceRule) ---
+# Fires when a source makes >= N SYN attempts to the same auth port in the window.
+# Auth ports: SSH(22), RDP(3389), SMB(445), MySQL(3306), VNC(5900), etc.
+# Raise threshold or increase window to reduce FPs on legitimate retry-heavy services.
+BRUTE_FORCE_THRESHOLD = int(os.getenv("BRUTE_FORCE_THRESHOLD", 20))  # SYN attempts in window
+BRUTE_FORCE_WINDOW    = int(os.getenv("BRUTE_FORCE_WINDOW", 60))     # seconds
+
+# --- Slow (Low-and-Slow) Port Scan Detection (SlowPortScanRule) ---
+# Catches scanners that evade the 10s PortScanRule by spreading probes over a longer window.
+# Higher threshold than PortScanRule because the long window accumulates more incidental traffic.
+SLOW_SCAN_THRESHOLD = int(os.getenv("SLOW_SCAN_THRESHOLD", 30))  # distinct ports/hosts in window
+SLOW_SCAN_WINDOW    = int(os.getenv("SLOW_SCAN_WINDOW", 120))    # seconds (default: 2 minutes)

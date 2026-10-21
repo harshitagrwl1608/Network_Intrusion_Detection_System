@@ -39,10 +39,11 @@ from scapy.all import (
 # ---------------------------------------------------------------------------
 # Paths — all isolated from production data
 # ---------------------------------------------------------------------------
-OUTPUT_ATTACK = "data/test_attacks.pcap"
-OUTPUT_BENIGN = "data/test_benign.pcap"
-TEST_BLOCKLIST = "data/test_blocklist.txt"  # isolated — not the production blocklist
-LABELS_CSV = "evaluation/scenarios/test_labels.csv"
+_PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+OUTPUT_ATTACK = os.path.join(_PROJECT_DIR, "data", "test_attacks.pcap")
+OUTPUT_BENIGN = os.path.join(_PROJECT_DIR, "data", "test_benign.pcap")
+TEST_BLOCKLIST = os.path.join(_PROJECT_DIR, "data", "test_blocklist.txt")  # isolated — not the production blocklist
+LABELS_CSV = os.path.join(os.path.dirname(__file__), "scenarios", "test_labels.csv")
 
 # Test-only malicious IP — documentation range (RFC 5737), never in production feeds
 TEST_MALICIOUS_IP = "198.51.100.42"
@@ -421,10 +422,134 @@ def gen_dns_frequency_burst(base: float) -> list:
         pkt = (_make_eth() /
                IP(src="192.168.1.93", dst="8.8.8.8") /
                UDP(sport=54400 + i, dport=53) /
-               DNS(rd=1, qd=DNSQR(qname=f"q{i}.rate-test.example.com")))
+               DNS(rd=1, qd=DNSQR(qname="api.rate-test.example.com")))
         pkt.time = base + 123.0 + i * 0.02
         packets.append(pkt)
     return packets
+
+
+def gen_brute_force_ssh(base: float) -> list:
+    """S21: Rapid SYN connection burst targeting SSH auth port 22 → BRUTE_FORCE."""
+    scenario(
+        "S21", "BRUTE_FORCE",
+        "SSH credential brute force: 22 connection attempts in rapid succession",
+        src_ip="192.168.1.95", dst_ip="192.168.1.1",
+        dst_port="22", protocol="TCP",
+    )
+    pkts = []
+    for i in range(22):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.95", dst="192.168.1.1") /
+               TCP(sport=50000 + i, dport=22, flags="S"))
+        pkt.time = base + 130.0 + i * 0.05
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_slow_vertical_port_scan(base: float) -> list:
+    """S22: 32 distinct ports probed over 56s evades 10s window → SLOW_PORT_SCAN."""
+    scenario(
+        "S22", "SLOW_PORT_SCAN",
+        "Low-and-slow vertical port scan: 32 ports probed over 56 seconds",
+        src_ip="192.168.1.96", dst_ip="192.168.1.1",
+        protocol="TCP",
+    )
+    pkts = []
+    for i, port in enumerate(range(20000, 20032)):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.96", dst="192.168.1.1") /
+               TCP(sport=51000 + i, dport=port, flags="S"))
+        pkt.time = base + 140.0 + i * 1.8
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_rst_flood(base: float) -> list:
+    """S23: 120 RST packets in rapid succession → SYN_FLOOD (RST flood)."""
+    scenario(
+        "S23", "SYN_FLOOD",
+        "RST flood: 120 RST packets to port 80 in <10s",
+        src_ip="192.168.1.201", dst_ip="192.168.1.1",
+        dst_port="80", protocol="TCP",
+    )
+    pkts = []
+    for seq in range(120):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.201", dst="192.168.1.1") /
+               TCP(sport=12000 + seq, dport=80, flags="R"))
+        pkt.time = base + 200.0 + seq * 0.02
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_dns_subdomain_exfil(base: float) -> list:
+    """S24: 25 distinct subdomains under one parent domain → DNS_ANOMALY (DNS_EXFIL)."""
+    scenario(
+        "S24", "DNS_ANOMALY",
+        "DNS subdomain data exfiltration: 25 unique subdomains under one parent",
+        src_ip="192.168.1.94", dst_ip="8.8.8.8",
+        dst_port="53", protocol="UDP",
+    )
+    pkts = []
+    for i in range(25):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.94", dst="8.8.8.8") /
+               UDP(sport=54500 + i, dport=53) /
+               DNS(rd=1, qd=DNSQR(qname=f"chunk{i:03d}.tunnel-exfil.com")))
+        pkt.time = base + 210.0 + i * 0.1
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_xxe_injection(base: float) -> list:
+    """S25: XML External Entity (XXE) injection payload → PAYLOAD_HIT."""
+    scenario(
+        "S25", "PAYLOAD_HIT",
+        "XML External Entity (XXE) injection in HTTP body",
+        src_ip="192.168.1.81", dst_ip="192.168.1.1",
+        dst_port="80", protocol="TCP",
+    )
+    payload = b'POST /xml HTTP/1.1\r\nHost: target\r\n\r\n<?xml version="1.0"?><!DOCTYPE root [<!ENTITY test SYSTEM "file:///etc/passwd">]><root>&test;</root>'
+    pkt = (_make_eth() /
+           IP(src="192.168.1.81", dst="192.168.1.1") /
+           TCP(sport=54325, dport=80, flags="PA") /
+           Raw(load=payload))
+    pkt.time = base + 220.0
+    return [pkt]
+
+
+def gen_shellshock(base: float) -> list:
+    """S26: Shellshock function definition injection → PAYLOAD_HIT."""
+    scenario(
+        "S26", "PAYLOAD_HIT",
+        "Shellshock bash environment function injection in HTTP header",
+        src_ip="192.168.1.82", dst_ip="192.168.1.1",
+        dst_port="80", protocol="TCP",
+    )
+    payload = b'GET /cgi-bin/test.cgi HTTP/1.1\r\nUser-Agent: () { :;}; /bin/bash -c "id"\r\n\r\n'
+    pkt = (_make_eth() /
+           IP(src="192.168.1.82", dst="192.168.1.1") /
+           TCP(sport=54326, dport=80, flags="PA") /
+           Raw(load=payload))
+    pkt.time = base + 221.0
+    return [pkt]
+
+
+def gen_deserialization(base: float) -> list:
+    """S27: Java serialized object magic bytes in HTTP payload → PAYLOAD_HIT."""
+    scenario(
+        "S27", "PAYLOAD_HIT",
+        "Java serialized object magic bytes payload",
+        src_ip="192.168.1.83", dst_ip="192.168.1.1",
+        dst_port="8080", protocol="TCP",
+    )
+    payload = b'POST /api/remoting HTTP/1.1\r\nHost: target\r\n\r\n\xac\xed\x00\x05sr\x00\x11java.lang.Process'
+    pkt = (_make_eth() /
+           IP(src="192.168.1.83", dst="192.168.1.1") /
+           TCP(sport=54327, dport=8080, flags="PA") /
+           Raw(load=payload))
+    pkt.time = base + 222.0
+    return [pkt]
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +717,55 @@ def gen_benign_distributed_syn_below_source_threshold(base: float) -> list:
     return pkts
 
 
+def gen_benign_slow_scan_below_threshold(base: float) -> list:
+    """Fourteen probes over 30s stay below the 30-port slow scan threshold."""
+    pkts = []
+    for i, port in enumerate(range(30000, 30014)):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.33", dst="192.168.1.1") /
+               TCP(sport=56000 + i, dport=port, flags="S"))
+        pkt.time = base + 10.0 + i * 2.0
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_benign_auth_attempts_below_threshold(base: float) -> list:
+    """Five SSH connections over 30s stay below the 20-attempt brute force threshold."""
+    pkts = []
+    for i in range(5):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.34", dst="192.168.1.1") /
+               TCP(sport=57000 + i, dport=22, flags="S"))
+        pkt.time = base + 11.0 + i * 6.0
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_benign_dns_few_subdomains(base: float) -> list:
+    """Three standard corporate subdomains stay below exfil threshold."""
+    pkts = []
+    for i, sub in enumerate(["mail", "www", "vpn"]):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.35", dst="8.8.8.8") /
+               UDP(sport=58000 + i, dport=53) /
+               DNS(rd=1, qd=DNSQR(qname=f"{sub}.corp-internal.com")))
+        pkt.time = base + 12.0 + i * 1.0
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_benign_rst_handshakes(base: float) -> list:
+    """Five normal TCP reset packets stay below RST flood threshold."""
+    pkts = []
+    for i in range(5):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.36", dst="192.168.1.1") /
+               TCP(sport=59000 + i, dport=80, flags="R"))
+        pkt.time = base + 13.0 + i * 1.0
+        pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -624,6 +798,13 @@ def generate_all():
     attack_pkts += gen_nested_label_dga(base)
     attack_pkts += gen_dns_frequency_burst(base)
     attack_pkts += gen_tcp_stealth_scan(base)
+    attack_pkts += gen_brute_force_ssh(base)
+    attack_pkts += gen_slow_vertical_port_scan(base)
+    attack_pkts += gen_rst_flood(base)
+    attack_pkts += gen_dns_subdomain_exfil(base)
+    attack_pkts += gen_xxe_injection(base)
+    attack_pkts += gen_shellshock(base)
+    attack_pkts += gen_deserialization(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)
@@ -643,6 +824,10 @@ def generate_all():
     benign_pkts += gen_benign_udp_repeated_target(base)
     benign_pkts += gen_benign_ipv6_icmp_repeated_target(base)
     benign_pkts += gen_benign_distributed_syn_below_source_threshold(base)
+    benign_pkts += gen_benign_slow_scan_below_threshold(base)
+    benign_pkts += gen_benign_auth_attempts_below_threshold(base)
+    benign_pkts += gen_benign_dns_few_subdomains(base)
+    benign_pkts += gen_benign_rst_handshakes(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")

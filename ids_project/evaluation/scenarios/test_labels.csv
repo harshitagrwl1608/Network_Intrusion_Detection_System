@@ -19,3 +19,10 @@ S17,PAYLOAD_HIT,192.0.2.17,192.0.2.80,80,TCP,Single URL-encoded SQL injection si
 S18,DNS_ANOMALY,192.168.1.92,8.8.8.8,53,UDP,High-entropy nested DNS label
 S19,DNS_ANOMALY,192.168.1.93,8.8.8.8,53,UDP,Burst of 20 distinct DNS names under one parent
 S20,TCP_STEALTH_SCAN,192.0.2.20,192.0.2.80,,TCP,Vertical TCP FIN/NULL/Xmas stealth scan
+S21,BRUTE_FORCE,192.168.1.95,192.168.1.1,22,TCP,SSH credential brute force: 22 connection attempts in rapid succession
+S22,SLOW_PORT_SCAN,192.168.1.96,192.168.1.1,,TCP,Low-and-slow vertical port scan: 32 ports probed over 56 seconds
+S23,SYN_FLOOD,192.168.1.201,192.168.1.1,80,TCP,RST flood: 120 RST packets to port 80 in <10s
+S24,DNS_ANOMALY,192.168.1.94,8.8.8.8,53,UDP,DNS subdomain data exfiltration: 25 unique subdomains under one parent
+S25,PAYLOAD_HIT,192.168.1.81,192.168.1.1,80,TCP,XML External Entity (XXE) injection in HTTP body
+S26,PAYLOAD_HIT,192.168.1.82,192.168.1.1,80,TCP,Shellshock bash environment function injection in HTTP header
+S27,PAYLOAD_HIT,192.168.1.83,192.168.1.1,8080,TCP,Java serialized object magic bytes payload

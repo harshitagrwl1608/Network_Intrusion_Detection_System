@@ -23,26 +23,37 @@ Alert schema (§5.2 of roadmap):
   window_end       float — end of the detection window (stateful rules)
 
 Rule order (cheapest → most expensive):
-  1. BlocklistRule     — stateless, O(1)+O(networks) lookup
-  2. PortScanRule      — stateful, vertical + horizontal TCP scan tracking
-  3. UdpScanRule       — stateful, vertical + horizontal UDP scan tracking
-  4. TcpStealthScanRule — stateful FIN/NULL/Xmas vertical TCP scan tracking
-  5. SynFloodRule      — stateful, SYN burst rate per (src,dst,port)
+  1. BlocklistRule          — stateless, O(1)+O(networks) lookup
+  2. PortScanRule           — stateful, vertical + horizontal TCP scan (severity scales with breadth)
+  3. UdpScanRule            — stateful, vertical + horizontal UDP scan tracking
+  4. TcpStealthScanRule     — stateful FIN/NULL/Xmas vertical TCP scan tracking
+  5. SynFloodRule           — stateful, SYN burst + RST flood rate per source/destination
   6. DistributedSynFloodRule — SYN burst per destination across many sources
-  7. IcmpSweepRule     — stateful, ICMP echo target sweep by source
-  8. ArpSpoofRule      — stateful, persistent IP→MAC table
-  9. PayloadRule       — bounded TCP stream DPI + regex signatures (all matches)
- 10. DnsRule           — stateful Shannon-entropy + query-frequency
+  7. IcmpSweepRule          — stateful, ICMP echo target sweep by source
+  8. ArpSpoofRule           — stateful, persistent IP→MAC table
+  9. PayloadRule            — bounded TCP stream DPI + regex signatures (all matches)
+     Signatures: SQL_INJECTION, XSS, CREDENTIAL_LEAK, CMD_INJECTION, PATH_TRAVERSAL,
+     SSRF, LOG4SHELL, XXE, SSTI, SHELLSHOCK, DESERIALIZATION, HEADER_INJECTION
+ 10. DnsRule                — stateful Shannon-entropy + query-frequency + subdomain exfiltration
+ 11. BruteForceRule         — stateful, repeated auth-port connection attempts per (src,dst,port)
+ 12. SlowPortScanRule       — stateful, low-and-slow vertical/horizontal TCP scan over long window
 
 False Positive Mitigations:
   - PortScanRule: ignores hosts whose SOURCE port is a well-known service
     (servers replying to clients, not scanners).
   - PortScanRule: only counts SYN packets (new connection attempts).
-  - SynFloodRule: only fires on service destination ports (≤ 49151).
+  - PortScanRule: severity scales with scan breadth (medium at threshold, high at 2× threshold).
+  - SynFloodRule: only fires on service destination ports (≤ 49151) for SYN floods.
+  - SynFloodRule: RST flood checks aggregate all RSTs from src→dst; fires on very high rates.
   - Configurable TRUSTED_HOSTS whitelist for TCP/UDP scans, SYN-flood rules,
     and ICMP sweeps.
   - Configurable WELL_KNOWN_SERVICE_PORTS set.
-  - DnsRule: whitelists common high-entropy-but-legit CDN patterns.
+  - DnsRule: whitelists common high-entropy-but-legit CDN patterns (entropy check only).
+  - DnsRule: subdomain exfiltration requires ≥ distinct_subdomain_threshold unique
+    subdomains under one parent domain in a short window; repeated same subdomain not counted.
+  - BruteForceRule: only fires on known authentication ports; tunable thresholds per-port.
+  - SlowPortScanRule: longer window (default 120s) and higher port threshold to avoid FPs
+    from normal slow browsing patterns.
   - All stateful rules: per-rule threading.Lock (§3.8).
 
 Thread safety:
@@ -214,6 +225,13 @@ class PortScanRule:
         # A single src probing the same port across many hosts.
         self._horiz: dict[tuple, list] = defaultdict(list)
 
+        # Per-key last alert time (cooldown to prevent alert storms).
+        # State is kept after firing so the count can grow to 2× threshold.
+        self._vert_fired:  dict[tuple, float] = {}
+        self._horiz_fired: dict[tuple, float] = {}
+        # Re-fire cooldown = one full window (avoids alerting every packet once over threshold)
+        self._alert_cooldown: float = float(window)
+
     def prune_stale(self, now: float):
         cutoff = now - self.window
         with self._lock:
@@ -224,6 +242,11 @@ class PortScanRule:
                         d[key] = active
                     else:
                         del d[key]
+            # Evict stale cooldown entries
+            for fired in (self._vert_fired, self._horiz_fired):
+                for key in list(fired):
+                    if fired[key] < cutoff:
+                        del fired[key]
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP":
@@ -297,71 +320,84 @@ class PortScanRule:
 
             if vert_fired:
                 window_start = min(t for t, _ in vertical)
-                self._vert.pop(vkey, None)  # reset to prevent alert storm
-                logger.debug(
-                    f"{self.name} (vertical) fired: {src}→{dst_ip} "
-                    f"{distinct_ports} ports"
-                )
-                return {
-                    "rule_name": self.name,
-                    "rule_version": self.rule_version,
-                    "src_ip": src,
-                    "dst_ip": dst_ip,
-                    "src_port": src_port,
-                    "dst_port": dst_port,
-                    "protocol": protocol,
-                    "severity": "high",
-                    "confidence": "heuristic",
-                    "detail": (
-                        f"{src} sent {'SYN' if self.protocol == 'TCP' else 'UDP probes'} "
-                        f"to {distinct_ports} distinct ports on {dst_ip} in {self.window}s "
-                        f"— possible vertical {self.protocol} port scan"
-                    ),
-                    "evidence": {
-                        "scan_type": "vertical",
-                        "transport": self.protocol,
-                        "distinct_ports": distinct_ports,
-                        "target_host": dst_ip,
-                        "window_s": self.window,
-                        "threshold": self.threshold,
-                    },
-                    "window_start": window_start,
-                    "window_end": now,
-                }
+                # Severity scales with breadth: medium at threshold, high at 2×
+                vert_severity = "high" if distinct_ports >= self.threshold * 2 else "medium"
+                last_vert_alert = self._vert_fired.get(vkey)
+                if last_vert_alert is not None and now - last_vert_alert < self._alert_cooldown:
+                    # Within cooldown: suppress, but keep state for growing count
+                    pass  # fall through to return None
+                else:
+                    self._vert_fired[vkey] = now
+                    logger.debug(
+                        f"{self.name} (vertical) fired: {src}→{dst_ip} "
+                        f"{distinct_ports} ports [{vert_severity}]"
+                    )
+                    return {
+                        "rule_name": self.name,
+                        "rule_version": self.rule_version,
+                        "src_ip": src,
+                        "dst_ip": dst_ip,
+                        "src_port": src_port,
+                        "dst_port": dst_port,
+                        "protocol": protocol,
+                        "severity": vert_severity,
+                        "confidence": "heuristic",
+                        "detail": (
+                            f"{src} sent {'SYN' if self.protocol == 'TCP' else 'UDP probes'} "
+                            f"to {distinct_ports} distinct ports on {dst_ip} in {self.window}s "
+                            f"— possible vertical {self.protocol} port scan"
+                        ),
+                        "evidence": {
+                            "scan_type": "vertical",
+                            "transport": self.protocol,
+                            "distinct_ports": distinct_ports,
+                            "target_host": dst_ip,
+                            "window_s": self.window,
+                            "threshold": self.threshold,
+                        },
+                        "window_start": window_start,
+                        "window_end": now,
+                    }
 
             if horiz_fired:
                 window_start = min(t for t, _ in horizontal)
-                self._horiz.pop(hkey, None)
-                logger.debug(
-                    f"{self.name} (horizontal) fired: {src} port {dst_port} "
-                    f"→ {distinct_hosts} hosts"
-                )
-                return {
-                    "rule_name": self.name,
-                    "rule_version": self.rule_version,
-                    "src_ip": src,
-                    "dst_ip": dst_ip,
-                    "src_port": src_port,
-                    "dst_port": dst_port,
-                    "protocol": protocol,
-                    "severity": "high",
-                    "confidence": "heuristic",
-                    "detail": (
-                        f"{src} sent {'SYN' if self.protocol == 'TCP' else 'UDP probes'} "
-                        f"to port {dst_port} on {distinct_hosts} distinct hosts in "
-                        f"{self.window}s — possible horizontal {self.protocol} port scan"
-                    ),
-                    "evidence": {
-                        "scan_type": "horizontal",
-                        "transport": self.protocol,
-                        "distinct_hosts": distinct_hosts,
-                        "scanned_port": dst_port,
-                        "window_s": self.window,
-                        "threshold": self.threshold,
-                    },
-                    "window_start": window_start,
-                    "window_end": now,
-                }
+                # Severity scales with breadth: medium at threshold, high at 2×
+                horiz_severity = "high" if distinct_hosts >= self.threshold * 2 else "medium"
+                last_horiz_alert = self._horiz_fired.get(hkey)
+                if last_horiz_alert is not None and now - last_horiz_alert < self._alert_cooldown:
+                    pass
+                else:
+                    self._horiz_fired[hkey] = now
+                    logger.debug(
+                        f"{self.name} (horizontal) fired: {src} port {dst_port} "
+                        f"→ {distinct_hosts} hosts [{horiz_severity}]"
+                    )
+                    return {
+                        "rule_name": self.name,
+                        "rule_version": self.rule_version,
+                        "src_ip": src,
+                        "dst_ip": dst_ip,
+                        "src_port": src_port,
+                        "dst_port": dst_port,
+                        "protocol": protocol,
+                        "severity": horiz_severity,
+                        "confidence": "heuristic",
+                        "detail": (
+                            f"{src} sent {'SYN' if self.protocol == 'TCP' else 'UDP probes'} "
+                            f"to port {dst_port} on {distinct_hosts} distinct hosts in "
+                            f"{self.window}s — possible horizontal {self.protocol} port scan"
+                        ),
+                        "evidence": {
+                            "scan_type": "horizontal",
+                            "transport": self.protocol,
+                            "distinct_hosts": distinct_hosts,
+                            "scanned_port": dst_port,
+                            "window_s": self.window,
+                            "threshold": self.threshold,
+                        },
+                        "window_start": window_start,
+                        "window_end": now,
+                    }
 
         return None
 
@@ -484,38 +520,48 @@ class TcpStealthScanRule:
 # =============================================================================
 
 class SynFloodRule:
+    """Detect SYN flood and RST flood attacks from a single source."""
+
     name = "SYN_FLOOD"
-    rule_version = "1.2"
+    rule_version = "1.3"
 
     def __init__(self, threshold: int = 100, window: int = 10,
-                 max_flows: int = 8192):
+                 max_flows: int = 8192,
+                 rst_threshold: int = 100, rst_window: int = 10,
+                 max_rst_flows: int = 4096):
         self.threshold = threshold
         self.window = window
         self.max_flows = max(1, int(max_flows))
+        # RST flood parameters: RSTs from one src to one dst (any port)
+        self.rst_threshold = max(1, int(rst_threshold))
+        self.rst_window = max(1, int(rst_window))
+        self.max_rst_flows = max(1, int(max_rst_flows))
         self._lock = threading.RLock()
         # (src_ip, dst_ip, dst_port) → list of SYN timestamps
         self._history: dict[tuple, list] = defaultdict(list)
+        # (src_ip, dst_ip) → list of RST timestamps
+        self._rst_history: dict[tuple, list] = defaultdict(list)
 
     def prune_stale(self, now: float):
-        cutoff = now - self.window
+        cutoff_syn = now - self.window
+        cutoff_rst = now - self.rst_window
         with self._lock:
             for key in list(self._history):
-                active = [t for t in self._history[key] if cutoff <= t <= now]
+                active = [t for t in self._history[key] if cutoff_syn <= t <= now]
                 if active:
                     self._history[key] = active
                 else:
                     del self._history[key]
+            for key in list(self._rst_history):
+                active = [t for t in self._rst_history[key] if cutoff_rst <= t <= now]
+                if active:
+                    self._rst_history[key] = active
+                else:
+                    del self._rst_history[key]
 
     def check(self, record: dict) -> dict | None:
         if record.get("protocol") != "TCP":
             return None
-        # Only count initial SYN (SYN=1, ACK=0); skip SYN-ACK server responses
-        if "initial_syn" in record:
-            if not record.get("initial_syn"):
-                return None
-        else:
-            if not record.get("syn_flag"):
-                return None
 
         src = record.get("src_ip", "")
         dst = record.get("dst_ip", "")
@@ -524,11 +570,72 @@ class SynFloodRule:
         if _is_trusted(src):
             return None
 
+        now = record.get("timestamp", time.time())
+        tcp_flags = int(record.get("tcp_flags") or 0)
+        _RST = 0x04
+        _SYN = 0x02
+        _ACK = 0x10
+
+        is_rst = bool(tcp_flags & _RST) and not bool(tcp_flags & _SYN)
+
+        # ── RST Flood detection ───────────────────────────────────────────────
+        # RSTs from one source to one destination (any port) at high rate.
+        # RST floods are used to tear down TCP connections en masse.
+        if is_rst and dst:
+            rkey = (src, dst)
+            with self._lock:
+                if rkey not in self._rst_history and len(self._rst_history) >= self.max_rst_flows:
+                    self._rst_history.pop(next(iter(self._rst_history)))
+                rst_hist = self._rst_history.get(rkey, [])
+                if not (rst_hist and now < rst_hist[-1]):
+                    rst_hist = [t for t in rst_hist if 0 <= now - t <= self.rst_window]
+                    rst_hist.append(now)
+                    self._rst_history.pop(rkey, None)
+                    self._rst_history[rkey] = rst_hist
+                    rst_count = len(rst_hist)
+                    rst_window_start = rst_hist[0]
+                    if rst_count >= self.rst_threshold:
+                        self._rst_history.pop(rkey, None)
+                        logger.debug(f"SYN_FLOOD (RST) fired: {src} → {dst} ({rst_count} RSTs)")
+                        return {
+                            "rule_name": self.name,
+                            "rule_version": self.rule_version,
+                            "src_ip": src,
+                            "dst_ip": dst,
+                            "src_port": record.get("src_port"),
+                            "dst_port": dst_port,
+                            "protocol": "TCP",
+                            "severity": "high",
+                            "confidence": "heuristic",
+                            "detail": (
+                                f"{src} sent {rst_count} RST packets to {dst} "
+                                f"in {self.rst_window}s — possible RST flood / connection teardown attack"
+                            ),
+                            "evidence": {
+                                "flood_type": "RST",
+                                "rst_count": rst_count,
+                                "window_s": self.rst_window,
+                                "threshold": self.rst_threshold,
+                                "note": "RST flood can exhaust connection tables or disrupt existing sessions.",
+                            },
+                            "window_start": rst_window_start,
+                            "window_end": now,
+                        }
+            return None  # RST processed — don't also check SYN path
+
+        # ── SYN Flood detection ───────────────────────────────────────────────
+        # Only count initial SYN (SYN=1, ACK=0); skip SYN-ACK server responses
+        if "initial_syn" in record:
+            if not record.get("initial_syn"):
+                return None
+        else:
+            if not record.get("syn_flag"):
+                return None
+
         # SYN floods target services; skip ephemeral dst ports (IANA: 49152-65535)
         if dst_port and dst_port > 49151:
             return None
 
-        now = record.get("timestamp", time.time())
         key = (src, dst, dst_port)
 
         with self._lock:
@@ -565,6 +672,7 @@ class SynFloodRule:
                     f"in {self.window}s — possible SYN burst / flood"
                 ),
                 "evidence": {
+                    "flood_type": "SYN",
                     "syn_count": count,
                     "window_s": self.window,
                     "threshold": self.threshold,
@@ -960,7 +1068,7 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
     (
         "XSS",
         re.compile(
-            rb"(?i)(<script[\s>]|javascript:|onerror\s*=|onload\s*=|alert\s*\()"
+            rb"(?i)(<script[\s>]|javascript:|onerror\s*=|onload\s*=|alert\s*\(|document\.cookie|document\.write\s*\()"
         ),
         "heuristic",
     ),
@@ -1012,6 +1120,54 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
             rb"(?i)(\$\{jndi:|j\$\{:|j\$\{lower:|j\$\{::-j\}ndi:)"
         ),
         "high",
+    ),
+    # XML External Entity (XXE) injection
+    (
+        "XXE",
+        re.compile(
+            rb"(?i)(<!ENTITY\s+[%\w]+\s+SYSTEM\s|<!DOCTYPE[^>]+SYSTEM\s|<!\[CDATA\[|ENTITY\s+#\w+\s+SYSTEM)"
+        ),
+        "high",
+    ),
+    # Server-Side Template Injection (SSTI) — Jinja2/Twig/Freemarker/Spring patterns
+    # Matches:
+    #   {{ expr }}         — Jinja2, Twig, Handlebars, Hugo
+    #   {% tag arg %}      — Jinja2 block tags
+    #   ${expr}            — Spring EL, Freemarker, JSP, Groovy GString
+    #   #{expr}            — Thymeleaf, Spring EL
+    # Uses [^{}]+ inside the braces to catch expressions with operators (+, -, *, /, %, =, .)
+    (
+        "SSTI",
+        re.compile(
+            rb"(?s)(\{\{\s*[^{}]+\s*\}\}|\{%\s*\w+[^%]*%\}|\$\{[^}]+\}|#\{[^}]+\})"
+        ),
+        "heuristic",
+    ),
+    # Shellshock (CVE-2014-6271 / 6278) — bash function export header
+    (
+        "SHELLSHOCK",
+        re.compile(
+            rb"\(\s*\)\s*\{\s*[^}]*;\s*\}\s*;|\(\s*\)\s*\{\s*[^}]+\}\s*;",
+        ),
+        "high",
+    ),
+    # Java/Python deserialization gadget markers
+    (
+        "DESERIALIZATION",
+        re.compile(
+            rb"(?s)(\xac\xed\x00\x05|rO0AB|O:8:\"stdClass\"|a:\d+:\{|"
+            rb"java\.lang\.Runtime|ProcessBuilder|java\.io\.ObjectInputStream|"
+            rb"pickle\.loads|__reduce__|__class__\.mro)"
+        ),
+        "high",
+    ),
+    # HTTP Response Splitting / Header Injection
+    (
+        "HEADER_INJECTION",
+        re.compile(
+            rb"(?i)(\r\n\s*(Set-Cookie|Location|Content-Type):\s*|%0[dD]%0[aA]\s*[\w-]+:)"
+        ),
+        "heuristic",
     ),
 ]
 
@@ -1301,6 +1457,8 @@ class DnsRule:
         freq_window: int = 60,
         max_frequency_keys: int = 10_000,
         max_seen_keys: int = 10_000,
+        subdomain_threshold: int = 20,
+        subdomain_window: int = 60,
     ):
         self.entropy_threshold = entropy_threshold
         self.max_query_len     = max_query_len
@@ -1309,6 +1467,9 @@ class DnsRule:
         self._freq_window      = freq_window
         self._max_frequency_keys = max(1, int(max_frequency_keys))
         self._max_seen_keys = max(1, int(max_seen_keys))
+        # Subdomain exfiltration parameters
+        self._subdomain_threshold = max(0, int(subdomain_threshold))
+        self._subdomain_window = max(1, int(subdomain_window))
         self._lock = threading.RLock()
 
         # (src_ip, parent_domain, anomaly_type) → last_alert_time (dedup)
@@ -1316,6 +1477,9 @@ class DnsRule:
 
         # (src_ip, parent_domain) → bounded [timestamps] (query frequency)
         self._freq: dict[tuple, list] = defaultdict(list)
+
+        # (src_ip, parent_domain) → [(timestamp, subdomain)] (subdomain exfil)
+        self._subdomain_freq: dict[tuple, list] = {}
 
     def _parent_domain(self, domain: str) -> str:
         """
@@ -1346,14 +1510,21 @@ class DnsRule:
         self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
 
     def prune_stale(self, now: float):
-        cutoff = now - self._freq_window
+        cutoff_freq = now - self._freq_window
+        cutoff_sd = now - self._subdomain_window
         with self._lock:
             for key in list(self._freq):
-                active = [t for t in self._freq[key] if cutoff <= t <= now]
+                active = [t for t in self._freq[key] if cutoff_freq <= t <= now]
                 if active:
                     self._freq[key] = active
                 else:
                     del self._freq[key]
+            for key in list(self._subdomain_freq):
+                active = [(t, s) for t, s in self._subdomain_freq[key] if cutoff_sd <= t <= now]
+                if active:
+                    self._subdomain_freq[key] = active
+                else:
+                    del self._subdomain_freq[key]
             if len(self._seen) > 5000:
                 self._prune_seen(now)
 
@@ -1436,11 +1607,45 @@ class DnsRule:
 
         high_freq = query_count >= self._freq_threshold > 0
 
-        if not (high_ent or too_long or high_freq):
+        # ── Subdomain exfiltration: many distinct subdomains under one parent ──
+        # DNS tunneling via data-in-subdomains uses a large number of unique
+        # subdomains (e.g. aGVsbG8=.evil.com, d29ybGQ=.evil.com). Legitimate
+        # services use a small finite set of subdomains.
+        high_subdomain = False
+        subdomain_count = 0
+        subdomain_window_start = None
+        if self._subdomain_threshold > 0:
+            with self._lock:
+                sdkey = (src, parent)
+                if sdkey not in self._subdomain_freq and len(self._subdomain_freq) >= self._max_frequency_keys:
+                    self._subdomain_freq.pop(next(iter(self._subdomain_freq)))
+                # Store (timestamp, subdomain_label) pairs
+                sd_history = self._subdomain_freq.get(sdkey, [])
+                if not (sd_history and now < sd_history[-1][0]):
+                    sd_history = [
+                        (t, s) for t, s in sd_history
+                        if 0 <= now - t <= self._subdomain_window
+                        and s != subdomain  # don't double-count same subdomain
+                    ]
+                    sd_history.append((now, subdomain))
+                    self._subdomain_freq.pop(sdkey, None)
+                    self._subdomain_freq[sdkey] = sd_history
+                    subdomain_count = len({s for _, s in sd_history})
+                    if sd_history:
+                        subdomain_window_start = sd_history[0][0]
+                    high_subdomain = subdomain_count >= self._subdomain_threshold
+
+        if not (high_ent or too_long or high_freq or high_subdomain):
             return None
 
-        sub_type = "DNS_FREQ" if high_freq and not (high_ent or too_long) \
-                   else ("DNS_DGA" if high_ent else "DNS_TUNNEL")
+        if high_subdomain:
+            sub_type = "DNS_EXFIL"
+        elif high_freq and not (high_ent or too_long):
+            sub_type = "DNS_FREQ"
+        elif high_ent:
+            sub_type = "DNS_DGA"
+        else:
+            sub_type = "DNS_TUNNEL"
 
         # Deduplicate by parent and anomaly class. Randomized query labels under
         # one domain otherwise evade per-QNAME cooldowns and can flood alerts.
@@ -1467,8 +1672,16 @@ class DnsRule:
                 f"query_count={query_count} to '{parent}' "
                 f"in {self._freq_window}s (≥{self._freq_threshold})"
             )
+        if high_subdomain:
+            reason.append(
+                f"distinct_subdomains={subdomain_count} under '{parent}' "
+                f"in {self._subdomain_window}s (≥{self._subdomain_threshold})"
+            )
 
         logger.debug(f"{sub_type} fired: {src} queried '{domain}' [{', '.join(reason)}]")
+        # DNS_EXFIL is high severity — subdomain exfiltration is a deliberate
+        # covert channel, not an accidental anomaly.
+        severity = "high" if (high_ent or too_long or high_subdomain) else "medium"
         return {
             "rule_name": self.name,
             "rule_version": self.rule_version,
@@ -1477,7 +1690,7 @@ class DnsRule:
             "src_port": record.get("src_port"),
             "dst_port": 53,
             "protocol": record.get("protocol", "UDP"),
-            "severity": "medium" if high_freq and not (high_ent or too_long) else "high",
+            "severity": severity,
             "confidence": "heuristic",
             "detail": (
                 f"{src} queried suspicious domain '{domain}' "
@@ -1494,10 +1707,371 @@ class DnsRule:
                 "query_count_saturated": query_count_saturated,
                 "freq_window_s": self._freq_window,
                 "freq_threshold": self._freq_threshold,
+                "distinct_subdomains": subdomain_count,
+                "subdomain_threshold": self._subdomain_threshold,
+                "subdomain_window_s": self._subdomain_window,
             },
-            "window_start": freq_window_start if high_freq else None,
-            "window_end": now if high_freq else None,
+            "window_start": (
+                subdomain_window_start if high_subdomain
+                else (freq_window_start if high_freq else None)
+            ),
+            "window_end": now if (high_freq or high_subdomain) else None,
         }
+
+
+# =============================================================================
+# Rule 11: Brute Force Detection  (auth port repeated connection attempts)
+# =============================================================================
+
+# Ports commonly targeted by brute-force credential attacks.
+# Only connections to THESE destination ports are counted by BruteForceRule.
+_BRUTE_FORCE_AUTH_PORTS: frozenset = frozenset({
+    22,    # SSH
+    23,    # Telnet
+    21,    # FTP
+    25,    # SMTP AUTH
+    110,   # POP3
+    143,   # IMAP
+    389,   # LDAP
+    445,   # SMB
+    3306,  # MySQL
+    3389,  # RDP
+    5432,  # PostgreSQL
+    5900,  # VNC
+    6379,  # Redis
+    27017, # MongoDB
+    8080,  # HTTP-alt admin panels
+    8443,  # HTTPS-alt admin panels
+})
+
+
+class BruteForceRule:
+    """
+    Detect repeated authentication attempts from a single source to a single
+    auth-port destination, indicative of credential brute-forcing.
+
+    Detection logic:
+      - Counts initial SYN packets (new connection attempts) to known auth ports.
+      - Fires when a source makes >= threshold SYN attempts to the same (dst, port)
+        pair within the window.
+      - Only fires on known authentication ports (see _BRUTE_FORCE_AUTH_PORTS).
+      - Trusted sources and common service reply ports are exempted.
+
+    False Positive Mitigations:
+      - Only auth ports are counted (not arbitrary services).
+      - Trusted sources (TRUSTED_HOSTS) are exempted.
+      - Alert cooldown prevents alert storms from the same (src, dst, port) triple.
+      - Configurable threshold and window via config / RuleEngine wiring.
+    """
+
+    name = "BRUTE_FORCE"
+    rule_version = "1.0"
+
+    # Per-(src, dst, port) cooldown after firing. Prevents re-alerting for the
+    # same ongoing brute-force burst; renewed bursts after the cooldown will fire.
+    ALERT_COOLDOWN_S: float = 60.0
+
+    def __init__(self, threshold: int = 20, window: int = 60,
+                 max_states: int = 8192):
+        self.threshold = max(2, int(threshold))
+        self.window = max(1, int(window))
+        self.max_states = max(1, int(max_states))
+        self._lock = threading.RLock()
+        # (src_ip, dst_ip, dst_port) → list of SYN timestamps
+        self._history: dict[tuple, list] = {}
+        # (src_ip, dst_ip, dst_port) → last_alert_time (cooldown)
+        self._cooldown: dict[tuple, float] = {}
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.window
+        with self._lock:
+            for key in list(self._history):
+                active = [t for t in self._history[key] if cutoff <= t <= now]
+                if active:
+                    self._history[key] = active
+                else:
+                    del self._history[key]
+            cooldown_cutoff = now - self.ALERT_COOLDOWN_S
+            self._cooldown = {k: v for k, v in self._cooldown.items() if v > cooldown_cutoff}
+
+    def check(self, record: dict) -> dict | None:
+        if record.get("type") != "IP" or record.get("protocol") != "TCP":
+            return None
+
+        dst_port = record.get("dst_port")
+        if dst_port not in _BRUTE_FORCE_AUTH_PORTS:
+            return None
+
+        # Only count initial SYN (SYN=1, ACK=0) — new connection attempts
+        if "initial_syn" in record:
+            if not record.get("initial_syn"):
+                return None
+        else:
+            if not record.get("syn_flag"):
+                return None
+
+        src = record.get("src_ip", "")
+        dst = record.get("dst_ip", "")
+        if not src or not dst:
+            return None
+        if _is_trusted(src):
+            return None
+
+        # Ignore servers replying from known service ports
+        src_port = record.get("src_port")
+        if src_port and src_port in WELL_KNOWN_SERVICE_PORTS:
+            return None
+
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        key = (src, dst, dst_port)
+
+        with self._lock:
+            # Cooldown: if we just fired for this triple, suppress until cooldown expires
+            last_alert = self._cooldown.get(key)
+            if last_alert is not None and now - last_alert < self.ALERT_COOLDOWN_S:
+                # Still update history for accurate counting after cooldown
+                pass
+
+            if key not in self._history and len(self._history) >= self.max_states:
+                self._history.pop(next(iter(self._history)))
+            history = self._history.get(key, [])
+            if history and now < history[-1]:
+                return None  # reject reordered events
+            history = [t for t in history if 0 <= now - t <= self.window]
+            history.append(now)
+            self._history.pop(key, None)
+            self._history[key] = history
+            count = len(history)
+            window_start = history[0]
+
+            if count < self.threshold:
+                return None
+
+            # Enforce cooldown AFTER threshold check so we measure alert suppression,
+            # not attempt suppression.
+            if last_alert is not None and now - last_alert < self.ALERT_COOLDOWN_S:
+                return None
+
+            # Record alert time and reset history for the next burst window
+            self._cooldown[key] = now
+            self._history.pop(key, None)
+
+        logger.debug(
+            f"BRUTE_FORCE fired: {src} → {dst}:{dst_port} "
+            f"({count} SYNs in {self.window}s)"
+        )
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src,
+            "dst_ip": dst,
+            "src_port": src_port,
+            "dst_port": dst_port,
+            "protocol": "TCP",
+            "severity": "high",
+            "confidence": "heuristic",
+            "detail": (
+                f"{src} made {count} connection attempts to {dst}:{dst_port} "
+                f"(auth port) in {self.window}s — possible credential brute-force"
+            ),
+            "evidence": {
+                "attempt_count": count,
+                "auth_port": dst_port,
+                "window_s": self.window,
+                "threshold": self.threshold,
+                "note": (
+                    "Counts SYN packets to authentication ports; does not verify "
+                    "whether credentials were submitted or accepted."
+                ),
+            },
+            "window_start": window_start,
+            "window_end": now,
+        }
+
+
+# =============================================================================
+# Rule 12: Slow Port Scan Detection  (low-and-slow evasion variant)
+# =============================================================================
+
+class SlowPortScanRule:
+    """
+    Detect low-and-slow vertical or horizontal TCP port scans that evade the
+    standard PortScanRule's short 10-second window by spreading probes over
+    a longer time period (default: 120 seconds).
+
+    Attackers deliberately reduce probe rates to avoid threshold-based IDS
+    detection. This rule catches such evasion by maintaining a longer sliding
+    window with a higher port count threshold.
+
+    Detection logic:
+      - Vertical: (src, dst) → distinct dst_ports in the slow window
+      - Horizontal: (src, port) → distinct dst_hosts in the slow window
+      - Uses a higher threshold than PortScanRule to avoid FPs from normal
+        slow browsing (e.g., a browser slowly loading a page with many resources).
+
+    False Positive Mitigations:
+      - Only initial SYN packets are counted.
+      - Trusted sources are exempted.
+      - Known service SOURCE ports are exempted (server replies).
+      - Default threshold (30 ports) is 2× the PortScanRule threshold to
+        compensate for the longer window accumulating incidental activity.
+      - Alert cooldown prevents storm after a long burst.
+    """
+
+    name = "SLOW_PORT_SCAN"
+    rule_version = "1.0"
+
+    def __init__(self, threshold: int = 30, window: int = 120,
+                 max_states: int = 5000):
+        self.threshold = max(2, int(threshold))
+        self.window = max(1, int(window))
+        self.max_states = max(1, int(max_states))
+        self._lock = threading.RLock()
+        # Vertical scan: (src_ip, dst_ip) → [(ts, dst_port)]
+        self._vert: dict[tuple, list] = {}
+        # Horizontal scan: (src_ip, dst_port) → [(ts, dst_ip)]
+        self._horiz: dict[tuple, list] = {}
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.window
+        with self._lock:
+            for d in (self._vert, self._horiz):
+                for key in list(d):
+                    active = [e for e in d[key] if cutoff <= e[0] <= now]
+                    if active:
+                        d[key] = active
+                    else:
+                        del d[key]
+
+    def check(self, record: dict) -> dict | None:
+        if record.get("type") != "IP" or record.get("protocol") != "TCP":
+            return None
+
+        src = record.get("src_ip", "")
+        if _is_trusted(src):
+            return None
+
+        src_port = record.get("src_port")
+        if src_port and src_port in WELL_KNOWN_SERVICE_PORTS:
+            return None
+
+        # Only count initial SYN (SYN=1, ACK=0)
+        if "initial_syn" in record:
+            if not record.get("initial_syn"):
+                return None
+        else:
+            if not record.get("syn_flag"):
+                return None
+
+        dst_ip = record.get("dst_ip", "")
+        dst_port = record.get("dst_port")
+        if dst_port is None:
+            return None
+
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        vkey = (src, dst_ip)
+        hkey = (src, dst_port)
+
+        with self._lock:
+            # Reject late events
+            if (self._vert.get(vkey) and now < max(t for t, _ in self._vert[vkey])) or \
+               (self._horiz.get(hkey) and now < max(t for t, _ in self._horiz[hkey])):
+                return None
+
+            # Capacity eviction
+            if vkey not in self._vert and len(self._vert) >= self.max_states:
+                self._vert.pop(next(iter(self._vert)))
+            if hkey not in self._horiz and len(self._horiz) >= self.max_states:
+                self._horiz.pop(next(iter(self._horiz)))
+
+            # Vertical history update (deduplicate per port)
+            vertical = [(t, p) for t, p in self._vert.get(vkey, [])
+                        if 0 <= now - t <= self.window and p != dst_port]
+            vertical.append((now, dst_port))
+            self._vert.pop(vkey, None)
+            self._vert[vkey] = vertical
+            distinct_ports = len({p for _, p in vertical})
+
+            # Horizontal history update (deduplicate per host)
+            horizontal = [(t, ip) for t, ip in self._horiz.get(hkey, [])
+                          if 0 <= now - t <= self.window and ip != dst_ip]
+            horizontal.append((now, dst_ip))
+            self._horiz.pop(hkey, None)
+            self._horiz[hkey] = horizontal
+            distinct_hosts = len({ip for _, ip in horizontal})
+
+            vert_fired  = distinct_ports >= self.threshold
+            horiz_fired = distinct_hosts >= self.threshold
+
+            if vert_fired:
+                window_start = min(t for t, _ in vertical)
+                self._vert.pop(vkey, None)
+                logger.debug(
+                    f"{self.name} (vertical) fired: {src}→{dst_ip} "
+                    f"{distinct_ports} ports over {self.window}s"
+                )
+                return {
+                    "rule_name": self.name,
+                    "rule_version": self.rule_version,
+                    "src_ip": src,
+                    "dst_ip": dst_ip,
+                    "src_port": src_port,
+                    "dst_port": dst_port,
+                    "protocol": "TCP",
+                    "severity": "medium",
+                    "confidence": "heuristic",
+                    "detail": (
+                        f"{src} sent SYN packets to {distinct_ports} distinct ports on "
+                        f"{dst_ip} over {self.window}s — possible low-and-slow vertical TCP scan"
+                    ),
+                    "evidence": {
+                        "scan_type": "slow_vertical",
+                        "transport": "TCP",
+                        "distinct_ports": distinct_ports,
+                        "target_host": dst_ip,
+                        "window_s": self.window,
+                        "threshold": self.threshold,
+                        "note": "Slow scan evasion: probes spread over extended time window.",
+                    },
+                    "window_start": window_start,
+                    "window_end": now,
+                }
+
+            if horiz_fired:
+                window_start = min(t for t, _ in horizontal)
+                self._horiz.pop(hkey, None)
+                logger.debug(
+                    f"{self.name} (horizontal) fired: {src} port {dst_port} "
+                    f"→ {distinct_hosts} hosts over {self.window}s"
+                )
+                return {
+                    "rule_name": self.name,
+                    "rule_version": self.rule_version,
+                    "src_ip": src,
+                    "dst_ip": dst_ip,
+                    "src_port": src_port,
+                    "dst_port": dst_port,
+                    "protocol": "TCP",
+                    "severity": "medium",
+                    "confidence": "heuristic",
+                    "detail": (
+                        f"{src} sent SYN to port {dst_port} on {distinct_hosts} distinct hosts "
+                        f"over {self.window}s — possible low-and-slow horizontal TCP scan"
+                    ),
+                    "evidence": {
+                        "scan_type": "slow_horizontal",
+                        "transport": "TCP",
+                        "distinct_hosts": distinct_hosts,
+                        "scanned_port": dst_port,
+                        "window_s": self.window,
+                        "threshold": self.threshold,
+                        "note": "Slow scan evasion: probes spread over extended time window.",
+                    },
+                    "window_start": window_start,
+                    "window_end": now,
+                }
+
+        return None
 
 
 # =============================================================================
@@ -1686,7 +2260,11 @@ class RuleEngine:
             TcpStealthScanRule(
                 getattr(cfg, "TCP_STEALTH_SCAN_THRESHOLD", 15), cfg.TIME_WINDOW
             ),
-            SynFloodRule(cfg.SYN_FLOOD_THRESHOLD, cfg.TIME_WINDOW),
+            SynFloodRule(
+                cfg.SYN_FLOOD_THRESHOLD, cfg.TIME_WINDOW,
+                rst_threshold=getattr(cfg, "RST_FLOOD_THRESHOLD", 100),
+                rst_window=getattr(cfg, "TIME_WINDOW", 10),
+            ),
             DistributedSynFloodRule(
                 getattr(cfg, "DISTRIBUTED_SYN_FLOOD_THRESHOLD", 500),
                 getattr(cfg, "DISTRIBUTED_SYN_FLOOD_MIN_SOURCES", 20),
@@ -1705,6 +2283,16 @@ class RuleEngine:
                 max_query_len=getattr(cfg, "DNS_QUERY_MAX_LEN", 60),
                 freq_threshold=getattr(cfg, "DNS_FREQ_THRESHOLD", 20),
                 freq_window=getattr(cfg, "DNS_FREQ_WINDOW", 60),
+                subdomain_threshold=getattr(cfg, "DNS_SUBDOMAIN_THRESHOLD", 20),
+                subdomain_window=getattr(cfg, "DNS_SUBDOMAIN_WINDOW", 60),
+            ),
+            BruteForceRule(
+                threshold=getattr(cfg, "BRUTE_FORCE_THRESHOLD", 20),
+                window=getattr(cfg, "BRUTE_FORCE_WINDOW", 60),
+            ),
+            SlowPortScanRule(
+                threshold=getattr(cfg, "SLOW_SCAN_THRESHOLD", 30),
+                window=getattr(cfg, "SLOW_SCAN_WINDOW", 120),
             ),
         ]
 

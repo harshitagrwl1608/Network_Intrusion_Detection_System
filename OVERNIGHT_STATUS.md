@@ -232,8 +232,53 @@ Under the initial architecture (`5d22fba`):
 
 ---
 
+## Cycle 8: Priority 1 Engine Enhancement — Multi-Vector Detection, New Rules & Extended Evaluation
+
+### 1. Root Cause Hypothesis & Goal
+- **Auth Service Brute-Force Blindspot:** Existing rules tracked port scans across distinct ports or hosts, but rapid repeated connection attempts to a single authentication service (SSH 22, RDP 3389, SMB 445, MySQL 3306) did not meet port-scan diversity thresholds and were missed.
+- **Low-and-Slow Scan Evasion:** The 10-second window in `PortScanRule` allowed stealthy reconnaissance (e.g. 1 probe every 1.5s) to evade detection.
+- **RST Flood Denial-of-Service:** Connection teardown attacks using high-rate TCP RST packets were not tracked in connection flood rules.
+- **DNS Subdomain Data Exfiltration:** DNS tunneling that encodes exfiltrated data across many distinct subdomains under a single parent needed dedicated tracking and priority over generic query frequency.
+- **Extended DPI Coverage:** Web applications face XXE, SSTI, Shellshock, deserialization, and HTTP response splitting/header injection attacks that require signature coverage.
+- **Evaluation Integration:** New detection rules and signatures needed synthetic PCAP generation and scenario manifest tracking to guarantee 100% precision and recall without false positives.
+
+### 2. Implementation
+- In `ids_project/engine/rules.py`:
+  - Added `BruteForceRule`: stateful tracking of initial SYNs to authentication ports (`_BRUTE_FORCE_AUTH_PORTS`) with sliding window and alert cooldown.
+  - Added `SlowPortScanRule`: stateful tracking of vertical and horizontal scans over an extended window (120s) with higher threshold (30 ports/hosts).
+  - Extended `SynFloodRule`: added RST flood detection with configurable `rst_threshold` and `rst_window`.
+  - Extended `DnsRule`: added subdomain exfiltration detection (`DNS_EXFIL`) prioritized over generic query frequency.
+  - Scaled severity in `PortScanRule` based on scan breadth.
+  - Extended `PayloadRule`: added XXE, SSTI, Shellshock, Java deserialization, and CRLF header injection signatures.
+  - Registered all new rules in `RuleEngine` orchestrator.
+- In `ids_project/config.py`:
+  - Added tuneable settings: `BRUTE_FORCE_THRESHOLD`, `BRUTE_FORCE_WINDOW`, `SLOW_SCAN_THRESHOLD`, `SLOW_SCAN_WINDOW`, `RST_FLOOD_THRESHOLD`, `DNS_SUBDOMAIN_THRESHOLD`, `DNS_SUBDOMAIN_WINDOW`.
+- In `ids_project/tests/test_new_rules_cycle8.py`:
+  - Added 43 unit and regression tests covering all new rules, evasion cases, and edge behaviors.
+- In `ids_project/evaluation/generate_test_pcap.py` & `run_eval.py`:
+  - Anchored paths to project root for deterministic generation regardless of invocation CWD.
+  - Added attack scenarios S21 to S27 (SSH brute force, slow port scan, RST flood, DNS subdomain exfil, XXE, Shellshock, deserialization).
+  - Added benign negative scenarios ensuring zero false positives on slow scans, normal SSH, corporate DNS, and normal RSTs.
+  - Registered new rules and settings in evaluation metadata.
+
+### 3. Files Changed
+- `ids_project/config.py`
+- `ids_project/engine/rules.py`
+- `ids_project/tests/test_new_rules_cycle8.py`
+- `ids_project/evaluation/generate_test_pcap.py`
+- `ids_project/evaluation/run_eval.py`
+- `ids_project/evaluation/scenarios/test_labels.csv`
+- `ids_project/data/test_attacks.pcap`
+- `ids_project/data/test_benign.pcap`
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest discover ids_project/tests`: OK (158 tests passed in 47.4s).
+- `python3 ids_project/evaluation/run_eval.py`: OK (27/27 scenarios, 0 benign FPs, 100% Precision, 100% Recall, 100% F1, exit 0).
+- `git diff --check`: Exit code 0.
+
+---
+
 ## Final Session Summary & Checklist
-- **Session Stop Condition:** Completed durable alert spooling, comprehensive tests, and clean evaluation.
-- **Total Cycles Completed:** 7
-- **Branch Pushed:** `antigravity/overnight-work` (strictly no changes to `main` or `agent-control`).
-- **All Applicable Regression Tests:** 48 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall.
+- **Session Stop Condition:** Completed Cycle 8 enhancements, comprehensive tests, and clean evaluation.
+- **Total Cycles Completed:** 8
+- **All Applicable Regression Tests:** 158 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (27/27 scenarios).
