@@ -599,7 +599,50 @@ Under the initial architecture (`5d22fba`):
 
 ---
 
+## Cycle 17: HTTP Method Tampering & WebDAV Reconnaissance (`PayloadRule` Expansion)
+
+### 1. Root Cause Hypothesis & Goal
+- **HTTP Method Tampering / Verb Tampering & WebDAV Probing:** Attackers utilize non-standard or debugging HTTP methods (`TRACE`, `TRACK`, `DEBUG`, `PROPFIND`, `PROPPATCH`, `MKCOL`, `COPY`, `MOVE`, `LOCK`, `UNLOCK`, `SEARCH`) and proprietary headers (e.g. `Translate: f`) to bypass authentication limiters, disclose ASP source code, or exploit WebDAV vulnerabilities (e.g. IIS WebDAV buffer overflows).
+- **Webshell Execution Markers:** Attackers uploading or injecting webshells employ characteristic PHP/ASP/JSP functions (e.g., `<?php system($_GET['cmd'])`, `eval(base64_decode($_POST['c']))`, `assert($_REQUEST['x'])`, `Runtime.getRuntime().exec()`).
+- **HEADER_INJECTION False Positive Hazard on Legitimate Traffic:** The existing `HEADER_INJECTION` regex checked `(\r\n\s*(Set-Cookie|Location|Content-Type):\s*|%0[dD]%0[aA]\s*[\w-]+:)`. Because `Content-Type` was included in the unencoded CRLF group, every standard HTTP request with headers separated by `\r\n` (e.g. `Host: ...\r\nContent-Type: application/json`) triggered a false positive.
+- **Precision Requirements:** Restrict unencoded CRLF in `HEADER_INJECTION` to response-only headers (`Set-Cookie|Location`), retain percent-encoded CRLF injection for arbitrary headers (`%0d%0a...:`), add `HTTP_METHOD_TAMPERING` and `WEBSHELL_INJECTION` to `_PAYLOAD_SIGNATURES`, verify benign REST verbs (`PUT`, `DELETE`, `PATCH`, `OPTIONS`) generate zero alerts, and bump `PayloadRule.rule_version` to `"1.7"`.
+
+### 2. Implementation
+- In `ids_project/engine/rules.py`:
+  - Added `HTTP_METHOD_TAMPERING` regex:
+    `rb"(?i)(?:^|\r\n)\s*(TRACE|TRACK|DEBUG|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK|SEARCH)\s+/[^\r\n]*\s+HTTP/[0-9.]+|Translate:\s*f\b"`
+  - Added `WEBSHELL_INJECTION` regex:
+    PHP/JSP/ASP execution markers (`eval(base64_decode...)`, `system($_GET...)`, `Runtime.getRuntime().exec()`, `preg_replace(/.../e)`).
+  - Fixed `HEADER_INJECTION` regex by removing `Content-Type` from raw CRLF match.
+  - Bumped `PayloadRule.rule_version` from `"1.6"` to `"1.7"`.
+- In `ids_project/tests/test_payload_detection.py`:
+  - Added unit tests for HTTP method tampering (`TRACE`, `TRACK`, `DEBUG`, `PROPFIND`, `Translate: f`).
+  - Added unit tests for webshell injection markers.
+  - Expanded `test_benign_web_traffic_does_not_fire` with standard REST verbs (`PUT`, `DELETE`, `PATCH`, `OPTIONS`, `GET /tracking/...`) with `Content-Type` headers.
+  - All 25 tests pass in 0.023s.
+- In `ids_project/evaluation/generate_test_pcap.py` & `run_eval.py`:
+  - Added Scenario S36: WebDAV `PROPFIND /webdav/files` reconnaissance on port 80 → `PAYLOAD_HIT`.
+  - Added benign negative scenario `gen_benign_rest_verbs`: Legitimate `PUT`, `DELETE`, `PATCH` REST API requests → 0 false positives.
+  - Regenerated test PCAPs (1,134 attack packets, 781 benign packets) and labels (36 scenarios).
+
+### 3. Files Changed
+- `ids_project/engine/rules.py`
+- `ids_project/tests/test_payload_detection.py`
+- `ids_project/evaluation/generate_test_pcap.py`
+- `ids_project/evaluation/scenarios/test_labels.csv`
+- `ids_project/data/test_attacks.pcap`
+- `ids_project/data/test_benign.pcap`
+- `OVERNIGHT_STATUS.md`
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_payload_detection.py`: OK (25 tests passed in 0.023s).
+- `python3 -m unittest discover ids_project/tests`: OK (216 tests passed in 47.8s).
+- `python3 ids_project/evaluation/run_eval.py`: OK (36/36 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
+- `git diff --check`: Exit code 0.
+
+---
+
 ## Final Session Summary & Checklist
-- **Session Stop Condition:** Completed Cycles 8, 9, 10, 11, 12, 13, 14, 15, and 16 enhancements, comprehensive tests, and clean evaluation.
-- **Total Cycles Completed:** 16
-- **All Applicable Regression Tests:** 214 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (35/35 scenarios).
+- **Session Stop Condition:** Completed Cycles 8 through 17 enhancements, comprehensive tests, and clean evaluation.
+- **Total Cycles Completed:** 17
+- **All Applicable Regression Tests:** 216 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (36/36 scenarios).

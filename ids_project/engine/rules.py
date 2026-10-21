@@ -1548,7 +1548,7 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
     (
         "HEADER_INJECTION",
         re.compile(
-            rb"(?i)(\r\n\s*(Set-Cookie|Location|Content-Type):\s*|%0[dD]%0[aA]\s*[\w-]+:)"
+            rb"(?i)(\r\n\s*(Set-Cookie|Location):\s*|%0[dD]%0[aA]\s*[\w-]+:)"
         ),
         "heuristic",
     ),
@@ -1576,6 +1576,26 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
             rb"powershell(\.exe)?\s+-[^\r\n]*(enc|nop|downloadstring|iex)|"
             rb"iex\s*\(\s*(new-object\s+net\.webclient|iwr)|"
             rb"0<&196;exec\s*196<>/dev/tcp/|mkfifo\s+/tmp/[\w.-]+;\s*cat\s+/tmp/)"
+        ),
+        "high",
+    ),
+    # HTTP Method Tampering, Cross-Site Tracing (XST), and WebDAV method probing
+    (
+        "HTTP_METHOD_TAMPERING",
+        re.compile(
+            rb"(?i)(?:^|\r\n)\s*(TRACE|TRACK|DEBUG|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK|SEARCH)\s+/[^\r\n]*\s+HTTP/[0-9.]+|Translate:\s*f\b"
+        ),
+        "high",
+    ),
+    # Malicious web shell upload / code execution injection markers
+    (
+        "WEBSHELL_INJECTION",
+        re.compile(
+            rb"(?i)(<\?php\s+(eval|assert|system|passthru|shell_exec|exec|popen)\b|"
+            rb"\b(eval|assert)\s*\(\s*(base64_decode|gzinflate|gzuncompress|str_rot13|\$_POST|\$_GET|\$_REQUEST|\$_COOKIE)\b|"
+            rb"\b(system|exec|passthru|shell_exec|popen|proc_open)\s*\(\s*\$_(GET|POST|REQUEST|COOKIE)\b|"
+            rb"\bpreg_replace\s*\(\s*['\"]/.*?/e['\"]\s*,|"
+            rb"\bRuntime\.getRuntime\(\)\.exec\s*\()"
         ),
         "high",
     ),
@@ -1613,7 +1633,7 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.6"
+    rule_version = "1.7"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048):

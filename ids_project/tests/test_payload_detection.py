@@ -211,11 +211,47 @@ class TestPayloadRule(unittest.TestCase):
             self.assertIn("REVERSE_SHELL_CRADLE", signatures)
             self.assertEqual(alert["severity"], "high")
 
+    def test_http_method_tampering_and_webdav(self):
+        tamper_requests = (
+            b"TRACE / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            b"TRACK / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            b"DEBUG /test.aspx HTTP/1.1\r\nHost: example.com\r\nCommand: stop-debug\r\n\r\n",
+            b"PROPFIND /webdav/ HTTP/1.1\r\nHost: example.com\r\nDepth: 1\r\n\r\n",
+            b"GET /login.asp HTTP/1.1\r\nHost: example.com\r\nTranslate: f\r\n\r\n",
+        )
+        for req in tamper_requests:
+            pkt = self.packet(req, 5400)
+            alert = self.rule.check(pkt)
+            self.assertIsNotNone(alert, f"Expected alert for HTTP method tampering: {req}")
+            signatures = [h["signature"] for h in alert["evidence"]["hits"]]
+            self.assertIn("HTTP_METHOD_TAMPERING", signatures)
+            self.assertEqual(alert["severity"], "high")
+
+    def test_webshell_injection(self):
+        shells = (
+            b"<?php system($_GET['cmd']); ?>",
+            b"<?php eval(base64_decode($_POST['c'])); ?>",
+            b"POST /upload.php HTTP/1.1\r\n\r\ncode=assert($_REQUEST['x'])",
+            b"POST /api HTTP/1.1\r\n\r\nRuntime.getRuntime().exec(\"id\")",
+        )
+        for shell in shells:
+            pkt = self.packet(shell, 5500)
+            alert = self.rule.check(pkt)
+            self.assertIsNotNone(alert, f"Expected alert for webshell marker: {shell}")
+            signatures = [h["signature"] for h in alert["evidence"]["hits"]]
+            self.assertIn("WEBSHELL_INJECTION", signatures)
+            self.assertEqual(alert["severity"], "high")
+
     def test_benign_web_traffic_does_not_fire(self):
         benign_requests = (
             b"GET /index.html HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n\r\n",
             b"GET /static/css/app.css HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:109.0)\r\n\r\n",
             b"POST /api/contact HTTP/1.1\r\nHost: example.com\r\nUser-Agent: curl/7.88.1\r\nContent-Length: 18\r\n\r\nname=Alice&env=prod",
+            b"PUT /api/v1/user/10 HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\n\r\n{\"name\":\"bob\"}",
+            b"DELETE /api/v1/user/10 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            b"PATCH /api/v1/settings HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\n\r\n{\"active\":true}",
+            b"OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            b"GET /tracking/order?id=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
         )
         for req in benign_requests:
             pkt = self.packet(req, 5300)

@@ -719,6 +719,28 @@ def gen_tls_direct_ip_sni(base: float) -> list:
     return [pkt]
 
 
+def gen_webdav_method_tampering(base: float) -> list:
+    """S36: WebDAV PROPFIND / HTTP method tampering request → PAYLOAD_HIT."""
+    scenario(
+        "S36", "PAYLOAD_HIT",
+        "WebDAV PROPFIND directory reconnaissance and method tampering",
+        src_ip="192.168.1.102", dst_ip="192.168.1.1",
+        dst_port="80", protocol="TCP",
+    )
+    payload = (
+        b"PROPFIND /webdav/files HTTP/1.1\r\n"
+        b"Host: 192.168.1.1\r\n"
+        b"Depth: 1\r\n"
+        b"Content-Type: text/xml; charset=utf-8\r\n\r\n"
+    )
+    pkt = (_make_eth() /
+           IP(src="192.168.1.102", dst="192.168.1.1") /
+           TCP(sport=54350, dport=80, flags="PA") /
+           Raw(load=payload))
+    pkt.time = base + 300.0
+    return [pkt]
+
+
 
 
 
@@ -1031,6 +1053,24 @@ def gen_benign_tls_legitimate_sni(base: float) -> list:
     return [pkt]
 
 
+def gen_benign_rest_verbs(base: float) -> list:
+    """Standard REST PUT, DELETE, and PATCH requests should NOT fire PayloadRule."""
+    pkts = []
+    requests = [
+        b"PUT /api/v1/user/10 HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\n\r\n{\"status\":\"active\"}",
+        b"DELETE /api/v1/user/10 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        b"PATCH /api/v1/user/10 HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\n\r\n{\"role\":\"editor\"}",
+    ]
+    for i, req in enumerate(requests):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.44", dst="93.184.216.34") /
+               TCP(sport=50500 + i, dport=80, flags="PA") /
+               Raw(load=req))
+        pkt.time = base + 21.0 + i * 0.1
+        pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1078,6 +1118,7 @@ def generate_all():
     attack_pkts += gen_scanner_probe(base)
     attack_pkts += gen_hex_chunk_dns_tunnel(base)
     attack_pkts += gen_tls_direct_ip_sni(base)
+    attack_pkts += gen_webdav_method_tampering(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)
@@ -1108,6 +1149,7 @@ def generate_all():
     benign_pkts += gen_benign_normal_http_assets(base)
     benign_pkts += gen_benign_uuid_dns(base)
     benign_pkts += gen_benign_tls_legitimate_sni(base)
+    benign_pkts += gen_benign_rest_verbs(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")
