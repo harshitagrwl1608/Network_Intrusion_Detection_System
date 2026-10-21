@@ -27,3 +27,4 @@ S25,PAYLOAD_HIT,192.168.1.81,192.168.1.1,80,TCP,XML External Entity (XXE) inject
 S26,PAYLOAD_HIT,192.168.1.82,192.168.1.1,80,TCP,Shellshock bash environment function injection in HTTP header
 S27,PAYLOAD_HIT,192.168.1.83,192.168.1.1,8080,TCP,Java serialized object magic bytes payload
 S28,TCP_FLAG_ANOMALY,192.168.1.97,192.168.1.1,80,TCP,Malformed TCP packet with conflicting SYN+FIN flags
+S29,ICMP_FLOOD,192.168.1.98,192.168.1.1,,ICMP,Targeted ICMP echo flood: 60 echo requests to single host in <2s

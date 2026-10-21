@@ -40,6 +40,8 @@ DISTRIBUTED_SYN_FLOOD_THRESHOLD = int(os.getenv("DISTRIBUTED_SYN_FLOOD_THRESHOLD
 DISTRIBUTED_SYN_FLOOD_MIN_SOURCES = int(os.getenv("DISTRIBUTED_SYN_FLOOD_MIN_SOURCES", 20))
 TIME_WINDOW = int(os.getenv("TIME_WINDOW", 10))                    # seconds
 ICMP_SWEEP_THRESHOLD = int(os.getenv("ICMP_SWEEP_THRESHOLD", 12))  # distinct echo targets in window
+ICMP_FLOOD_THRESHOLD = int(os.getenv("ICMP_FLOOD_THRESHOLD", 50))  # echo requests to single target
+ICMP_FLOOD_WINDOW    = int(os.getenv("ICMP_FLOOD_WINDOW", 5))      # seconds in flood window
 
 # --- Trusted Hosts (exempt from scan, SYN-flood, and ICMP sweep rules) ---
 # Add your gateway, local DNS server, CDN ranges, or CIDR blocks.

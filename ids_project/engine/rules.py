@@ -1028,6 +1028,126 @@ class IcmpSweepRule:
         }
 
 
+# =============================================================================
+# Rule: ICMP Targeted Flood Detection
+# =============================================================================
+
+class IcmpFloodRule:
+    """
+    Detect high-rate ICMP Echo requests (ping flood) directed at a single destination.
+
+    Differentiates between host sweeps (one source probing many hosts, tracked by
+    IcmpSweepRule) and targeted ping floods (high volume directed at a single target).
+
+    Supports both IPv4 ICMP Echo Requests (type 8) and IPv6 ICMPv6 Echo Requests (type 128).
+    Ignores ICMP Echo Replies (types 0 and 129).
+    Stateful cooldown prevents alert storms during an extended flood.
+    """
+
+    name = "ICMP_FLOOD"
+    rule_version = "1.0"
+    ALERT_COOLDOWN_S: float = 60.0
+
+    def __init__(self, threshold: int = 50, window: int = 5,
+                 max_flows: int = 4096, cooldown: float = 60.0):
+        self.threshold = max(1, int(threshold))
+        self.window = max(1, int(window))
+        self.max_flows = max(1, int(max_flows))
+        self.cooldown = float(cooldown)
+        self._lock = threading.RLock()
+        # (src_ip, dst_ip) → list of timestamps
+        self._history: dict[tuple, list[float]] = {}
+        # (src_ip, dst_ip) → last_alert_time
+        self._cooldown: dict[tuple, float] = {}
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.window
+        cutoff_cd = now - self.cooldown
+        with self._lock:
+            for key in list(self._history):
+                active = [t for t in self._history[key] if cutoff <= t <= now]
+                if active:
+                    self._history[key] = active
+                else:
+                    del self._history[key]
+            for key in list(self._cooldown):
+                if self._cooldown[key] < cutoff_cd:
+                    del self._cooldown[key]
+
+    def check(self, record: dict) -> dict | None:
+        proto = record.get("protocol", "")
+        if proto not in ("ICMP", "ICMPV6"):
+            return None
+
+        # Only count Echo Requests: IPv4 type 8, IPv6 type 128
+        expected_type = 128 if proto == "ICMPV6" else 8
+        if record.get("icmp_type") != expected_type:
+            return None
+
+        src = record.get("src_ip", "")
+        dst = record.get("dst_ip", "")
+        if not src or not dst or _is_trusted(src):
+            return None
+
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        key = (src, dst)
+
+        with self._lock:
+            # Check cooldown
+            last_alert = self._cooldown.get(key)
+            if last_alert is not None and now - last_alert < self.cooldown:
+                return None
+
+            if key not in self._history and len(self._history) >= self.max_flows:
+                self._history.pop(next(iter(self._history)))
+
+            history = self._history.get(key, [])
+            if history and now < history[-1]:
+                return None  # reject out-of-order timestamps
+            history = [t for t in history if 0 <= now - t <= self.window]
+            history.append(now)
+            self._history.pop(key, None)
+            self._history[key] = history
+
+            count = len(history)
+            window_start = history[0]
+
+            if count < self.threshold:
+                return None
+
+            # Threshold reached: set cooldown and reset history for next burst
+            self._cooldown[key] = now
+            self._history.pop(key, None)
+
+        logger.debug(f"{self.name} fired: {src}→{dst} ({count} echo requests in {self.window}s)")
+
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src,
+            "dst_ip": dst,
+            "src_port": None,
+            "dst_port": None,
+            "protocol": proto,
+            "severity": "high",
+            "confidence": "high",
+            "detail": (
+                f"{src} sent {count} ICMP echo requests to {dst} "
+                f"in {self.window}s — possible targeted ICMP echo flood"
+            ),
+            "evidence": {
+                "icmp_type": expected_type,
+                "packet_count": count,
+                "target_host": dst,
+                "window_s": self.window,
+                "threshold": self.threshold,
+                "note": "High rate of ICMP echo requests to a single destination can exhaust bandwidth or stack processing capacity.",
+            },
+            "window_start": window_start,
+            "window_end": now,
+        }
+
+
 # Rule 5: ARP Spoofing Detection
 # =============================================================================
 class ArpSpoofRule:
@@ -2413,6 +2533,10 @@ class RuleEngine:
             ),
             IcmpSweepRule(
                 getattr(cfg, "ICMP_SWEEP_THRESHOLD", 12), cfg.TIME_WINDOW
+            ),
+            IcmpFloodRule(
+                threshold=getattr(cfg, "ICMP_FLOOD_THRESHOLD", 50),
+                window=getattr(cfg, "ICMP_FLOOD_WINDOW", 5),
             ),
             ArpSpoofRule(cfg.ARP_TABLE_PATH),
             PayloadRule(

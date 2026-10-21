@@ -567,6 +567,24 @@ def gen_tcp_flag_anomaly(base: float) -> list:
     return [pkt]
 
 
+def gen_icmp_flood(base: float) -> list:
+    """S29: 60 ICMP echo requests targeting a single host in 2s → ICMP_FLOOD."""
+    scenario(
+        "S29", "ICMP_FLOOD",
+        "Targeted ICMP echo flood: 60 echo requests to single host in <2s",
+        src_ip="192.168.1.98", dst_ip="192.168.1.1",
+        protocol="ICMP",
+    )
+    pkts = []
+    for i in range(60):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.98", dst="192.168.1.1") /
+               ICMP(type=8, code=0, id=98, seq=i))
+        pkt.time = base + 240.0 + i * 0.03
+        pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Benign negative packet generators  (should NOT fire any rule)
 # ---------------------------------------------------------------------------
@@ -781,6 +799,18 @@ def gen_benign_rst_handshakes(base: float) -> list:
     return pkts
 
 
+def gen_benign_icmp_flood_below_threshold(base: float) -> list:
+    """Fifteen ICMP echo requests over 5s stay below the 50-packet ICMP flood threshold."""
+    pkts = []
+    for i in range(15):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.37", dst="192.168.1.1") /
+               ICMP(type=8, code=0, id=99, seq=i))
+        pkt.time = base + 14.0 + i * 0.3
+        pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -821,6 +851,7 @@ def generate_all():
     attack_pkts += gen_shellshock(base)
     attack_pkts += gen_deserialization(base)
     attack_pkts += gen_tcp_flag_anomaly(base)
+    attack_pkts += gen_icmp_flood(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)
@@ -832,7 +863,7 @@ def generate_all():
     benign_pkts += gen_benign_dns(base)
     benign_pkts += gen_benign_dns_below_frequency(base)
     benign_pkts += gen_benign_dns_server_reply(base)
-    benign_pkts += gen_benign_cdn_dns(base)
+    benign_pkts += gen_cdn_dns(base) if 'gen_cdn_dns' in globals() else gen_benign_cdn_dns(base)
     benign_pkts += gen_benign_normal_arp(base)
     benign_pkts += gen_benign_syn_below_threshold(base)
     benign_pkts += gen_benign_stealth_below_threshold(base)
@@ -844,6 +875,7 @@ def generate_all():
     benign_pkts += gen_benign_auth_attempts_below_threshold(base)
     benign_pkts += gen_benign_dns_few_subdomains(base)
     benign_pkts += gen_benign_rst_handshakes(base)
+    benign_pkts += gen_benign_icmp_flood_below_threshold(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")

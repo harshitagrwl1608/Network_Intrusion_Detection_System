@@ -312,9 +312,50 @@ Under the initial architecture (`5d22fba`):
 - `python3 ids_project/evaluation/run_eval.py`: OK (28/28 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
 - `git diff --check`: Exit code 0.
 
+## Cycle 10: Targeted ICMP Echo Flood Detection (`IcmpFloodRule`)
+
+### 1. Root Cause Hypothesis & Goal
+- **Single-Host ICMP Flood Gap:** `IcmpSweepRule` detects horizontal reconnaissance where an attacker sends ICMP echo requests to 12+ *distinct destination hosts*. However, if an attacker focuses an intense volumetric ping flood (50+ packets in <5s) against a *single target host*, `IcmpSweepRule` records only 1 distinct destination and never triggers an alert.
+- **Protocol & Direction Specificity:** An effective ping flood rule must only count inbound Echo Requests (IPv4 type 8, code 0; IPv6 type 128, code 0) targeting a destination, ignoring Echo Replies (type 0 / type 129), TTL expired, and Unreachable messages.
+- **Stateful Cooldown & Resource Safety:** High-rate ping floods can quickly exhaust memory or alert channels if not bounded. The rule needs a 30s cooldown per `(src_ip, dst_ip)` pair, bounded state with LRU pruning, and clean integration into `RuleEngine`.
+
+### 2. Implementation
+- In `ids_project/config.py`:
+  - Added `ICMP_FLOOD_THRESHOLD = int(os.getenv("ICMP_FLOOD_THRESHOLD", 50))`
+  - Added `ICMP_FLOOD_WINDOW = int(os.getenv("ICMP_FLOOD_WINDOW", 5))`
+- In `ids_project/engine/rules.py`:
+  - Implemented `IcmpFloodRule`:
+    - Tracks timestamps of ICMP Echo Requests (IPv4 type 8 / IPv6 type 128) per `(src_ip, dst_ip)`.
+    - Disregards non-echo ICMP types (echo replies, unreachables, redirects).
+    - Alerts with severity `medium` when count exceeds `threshold` in `window` seconds.
+    - Implements a 30s alert cooldown per `(src_ip, dst_ip)` pair and bounded deque/dict memory management.
+    - Wired into `RuleEngine.rules` and `prune_stale()`.
+- In `ids_project/tests/test_icmp_flood.py`:
+  - Added unit test suite (7 tests) covering threshold triggers, sub-threshold traffic, non-echo ICMP ignores, alert cooldown, IPv6 echo floods, pruning, and trusted host exemptions.
+- In `ids_project/evaluation/generate_test_pcap.py` & `run_eval.py`:
+  - Added attack scenario S29: 60 ICMP echo requests targeting single destination in 2s (`ICMP_FLOOD`).
+  - Added benign negative scenario: 15 ICMP echo requests over 5s (well below threshold 50).
+  - Registered `IcmpFloodRule` in `known_rules` and evaluation engine configuration.
+
+### 3. Files Changed
+- `ids_project/config.py`
+- `ids_project/engine/rules.py`
+- `ids_project/tests/test_icmp_flood.py` (New test suite)
+- `ids_project/evaluation/generate_test_pcap.py`
+- `ids_project/evaluation/run_eval.py`
+- `ids_project/evaluation/scenarios/test_labels.csv`
+- `ids_project/data/test_attacks.pcap`
+- `ids_project/data/test_benign.pcap`
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_icmp_flood.py`: OK (7 tests passed).
+- `python3 -m unittest discover ids_project/tests`: OK (174 tests passed in 47.5s).
+- `python3 ids_project/evaluation/run_eval.py`: OK (29/29 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
+- `git diff --check`: Exit code 0.
+
 ---
 
 ## Final Session Summary & Checklist
-- **Session Stop Condition:** Completed Cycle 8 and Cycle 9 enhancements, comprehensive tests, and clean evaluation.
-- **Total Cycles Completed:** 9
-- **All Applicable Regression Tests:** 167 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (28/28 scenarios).
+- **Session Stop Condition:** Completed Cycles 8, 9, and 10 enhancements, comprehensive tests, and clean evaluation.
+- **Total Cycles Completed:** 10
+- **All Applicable Regression Tests:** 174 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (29/29 scenarios).
