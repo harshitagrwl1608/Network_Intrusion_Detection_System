@@ -24,24 +24,29 @@ Alert schema (§5.2 of roadmap):
 
 Rule order (cheapest → most expensive):
   1. BlocklistRule     — stateless, O(1)+O(networks) lookup
-  2. PortScanRule      — stateful, vertical + horizontal scan tracking
-  3. SynFloodRule      — stateful, SYN burst rate per (src,dst,port)
-  4. ArpSpoofRule      — stateful, persistent IP→MAC table
-  5. PayloadRule       — stateless regex DPI (returns ALL matches)
-  6. DnsRule           — stateful Shannon-entropy + query-frequency
+  2. PortScanRule      — stateful, vertical + horizontal TCP scan tracking
+  3. UdpScanRule       — stateful, vertical + horizontal UDP scan tracking
+  4. TcpStealthScanRule — stateful FIN/NULL/Xmas vertical TCP scan tracking
+  5. SynFloodRule      — stateful, SYN burst rate per (src,dst,port)
+  6. DistributedSynFloodRule — SYN burst per destination across many sources
+  7. IcmpSweepRule     — stateful, ICMP echo target sweep by source
+  8. ArpSpoofRule      — stateful, persistent IP→MAC table
+  9. PayloadRule       — bounded TCP stream DPI + regex signatures (all matches)
+ 10. DnsRule           — stateful Shannon-entropy + query-frequency
 
 False Positive Mitigations:
   - PortScanRule: ignores hosts whose SOURCE port is a well-known service
     (servers replying to clients, not scanners).
   - PortScanRule: only counts SYN packets (new connection attempts).
   - SynFloodRule: only fires on service destination ports (≤ 49151).
-  - Configurable TRUSTED_HOSTS whitelist.
+  - Configurable TRUSTED_HOSTS whitelist for TCP/UDP scans, SYN-flood rules,
+    and ICMP sweeps.
   - Configurable WELL_KNOWN_SERVICE_PORTS set.
   - DnsRule: whitelists common high-entropy-but-legit CDN patterns.
   - All stateful rules: per-rule threading.Lock (§3.8).
 
 Thread safety:
-  Every stateful rule guards its mutable _history/_table/_seen with a
+  Every stateful rule guards its mutable history/table/stream state with a
   threading.RLock so the capture thread (check) and GC thread
   (prune_stale) cannot race.
 """
@@ -54,7 +59,8 @@ import threading
 import time
 import ipaddress
 import logging
-from collections import defaultdict, Counter
+from urllib.parse import unquote_to_bytes
+from collections import defaultdict, Counter, deque
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +83,7 @@ WELL_KNOWN_SERVICE_PORTS = {
     3306, 5432,    # MySQL, PostgreSQL
 }
 
-# Trusted hosts/IPs that should never be flagged by port-scan or SYN-flood.
+# Trusted hosts/IPs that should never be flagged by scan, SYN-flood, or ICMP rules.
 # Add your gateway, DNS server, trusted CDN IPs here.
 TRUSTED_HOSTS: set = set()  # populated from config by RuleEngine
 
@@ -190,11 +196,14 @@ class BlocklistRule:
 
 class PortScanRule:
     name = "PORT_SCAN"
-    rule_version = "1.2"
+    rule_version = "1.3"
 
-    def __init__(self, threshold: int = 15, window: int = 10):
+    def __init__(self, threshold: int = 15, window: int = 10, protocol: str = "TCP",
+                 max_states: int = 10_000):
         self.threshold = threshold
         self.window = window
+        self.protocol = protocol
+        self.max_states = max(1, int(max_states))
         self._lock = threading.RLock()
 
         # Vertical scan: (src_ip, dst_ip) → [(ts, dst_port)]
@@ -209,13 +218,12 @@ class PortScanRule:
         cutoff = now - self.window
         with self._lock:
             for d in (self._vert, self._horiz):
-                stale = [k for k, v in d.items()
-                         if not [e for e in v if e[0] > cutoff]]
-                for k in stale:
-                    del d[k]
-                for k in list(d):
-                    if k in d:
-                        d[k] = [e for e in d[k] if e[0] > cutoff]
+                for key in list(d):
+                    active = [e for e in d[key] if cutoff <= e[0] <= now]
+                    if active:
+                        d[key] = active
+                    else:
+                        del d[key]
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP":
@@ -230,19 +238,17 @@ class PortScanRule:
         if src_port and src_port in WELL_KNOWN_SERVICE_PORTS:
             return None
 
-        # Explicitly restrict to TCP only. UDP probes are not counted as scan
-        # attempts by this rule (that would need a separate UDP-scan rule).
         protocol = record.get("protocol", "")
-        if protocol != "TCP":
+        if protocol != self.protocol:
             return None
 
-        # Only count initial SYN (SYN=1, ACK=0) — pure new connection attempts.
-        # SYN-ACK packets (SYN=1, ACK=1) are server responses and must not count.
-        if "initial_syn" in record:
-            if not record.get("initial_syn"):
-                return None
-        else:
-            if not record.get("syn_flag"):
+        # TCP scans count initial SYNs only. UDP has no handshake, so the
+        # separate UdpScanRule counts datagrams and relies on distinct targets.
+        if self.protocol == "TCP":
+            if "initial_syn" in record:
+                if not record.get("initial_syn"):
+                    return None
+            elif not record.get("syn_flag"):
                 return None
 
         dst_ip = record.get("dst_ip", "")
@@ -251,34 +257,49 @@ class PortScanRule:
             return None
 
         now = record.get("timestamp", time.time())
+        vkey = (src, dst_ip)
+        hkey = (src, dst_port)
 
         with self._lock:
+            if (self._vert.get(vkey) and now < max(t for t, _ in self._vert[vkey])) or \
+               (self._horiz.get(hkey) and now < max(t for t, _ in self._horiz[hkey])):
+                return None  # don't let late events skew an active window
             # Always update BOTH vertical and horizontal histories first,
             # then check thresholds. This ensures a packet contributes to
             # both scan dimensions even when one threshold fires. (P2 §4)
+            if vkey not in self._vert and len(self._vert) >= self.max_states:
+                self._vert.pop(next(iter(self._vert)))
+            if hkey not in self._horiz and len(self._horiz) >= self.max_states:
+                self._horiz.pop(next(iter(self._horiz)))
 
             # --- Vertical history update ---
-            vkey = (src, dst_ip)
-            self._vert[vkey] = [(t, p) for t, p in self._vert[vkey]
-                                if now - t <= self.window]
-            self._vert[vkey].append((now, dst_port))
-            distinct_ports = len({p for _, p in self._vert[vkey]})
+            # A scan is defined by distinct targets, so retain only the latest
+            # observation per port. Repeated connections to one service must
+            # refresh its window membership without growing state per packet.
+            vertical = [(t, p) for t, p in self._vert.get(vkey, [])
+                        if 0 <= now - t <= self.window and p != dst_port]
+            vertical.append((now, dst_port))
+            self._vert.pop(vkey, None)
+            self._vert[vkey] = vertical
+            distinct_ports = len({p for _, p in vertical})
 
             # --- Horizontal history update ---
-            hkey = (src, dst_port)
-            self._horiz[hkey] = [(t, ip) for t, ip in self._horiz[hkey]
-                                  if now - t <= self.window]
-            self._horiz[hkey].append((now, dst_ip))
-            distinct_hosts = len({ip for _, ip in self._horiz[hkey]})
+            # Likewise, repeated probes to one host do not add scan evidence.
+            horizontal = [(t, ip) for t, ip in self._horiz.get(hkey, [])
+                          if 0 <= now - t <= self.window and ip != dst_ip]
+            horizontal.append((now, dst_ip))
+            self._horiz.pop(hkey, None)
+            self._horiz[hkey] = horizontal
+            distinct_hosts = len({ip for _, ip in horizontal})
 
             vert_fired  = distinct_ports >= self.threshold
             horiz_fired = distinct_hosts >= self.threshold
 
             if vert_fired:
-                window_start = now - self.window
-                self._vert[vkey] = []  # reset to prevent alert storm
+                window_start = min(t for t, _ in vertical)
+                self._vert.pop(vkey, None)  # reset to prevent alert storm
                 logger.debug(
-                    f"PORT_SCAN (vertical) fired: {src}→{dst_ip} "
+                    f"{self.name} (vertical) fired: {src}→{dst_ip} "
                     f"{distinct_ports} ports"
                 )
                 return {
@@ -292,11 +313,13 @@ class PortScanRule:
                     "severity": "high",
                     "confidence": "heuristic",
                     "detail": (
-                        f"{src} sent SYN to {distinct_ports} distinct ports "
-                        f"on {dst_ip} in {self.window}s — possible vertical port scan"
+                        f"{src} sent {'SYN' if self.protocol == 'TCP' else 'UDP probes'} "
+                        f"to {distinct_ports} distinct ports on {dst_ip} in {self.window}s "
+                        f"— possible vertical {self.protocol} port scan"
                     ),
                     "evidence": {
                         "scan_type": "vertical",
+                        "transport": self.protocol,
                         "distinct_ports": distinct_ports,
                         "target_host": dst_ip,
                         "window_s": self.window,
@@ -307,10 +330,10 @@ class PortScanRule:
                 }
 
             if horiz_fired:
-                window_start = now - self.window
-                self._horiz[hkey] = []
+                window_start = min(t for t, _ in horizontal)
+                self._horiz.pop(hkey, None)
                 logger.debug(
-                    f"PORT_SCAN (horizontal) fired: {src} port {dst_port} "
+                    f"{self.name} (horizontal) fired: {src} port {dst_port} "
                     f"→ {distinct_hosts} hosts"
                 )
                 return {
@@ -324,12 +347,13 @@ class PortScanRule:
                     "severity": "high",
                     "confidence": "heuristic",
                     "detail": (
-                        f"{src} sent SYN to port {dst_port} on "
-                        f"{distinct_hosts} distinct hosts in {self.window}s "
-                        f"— possible horizontal port scan"
+                        f"{src} sent {'SYN' if self.protocol == 'TCP' else 'UDP probes'} "
+                        f"to port {dst_port} on {distinct_hosts} distinct hosts in "
+                        f"{self.window}s — possible horizontal {self.protocol} port scan"
                     ),
                     "evidence": {
                         "scan_type": "horizontal",
+                        "transport": self.protocol,
                         "distinct_hosts": distinct_hosts,
                         "scanned_port": dst_port,
                         "window_s": self.window,
@@ -342,17 +366,132 @@ class PortScanRule:
         return None
 
 
+class UdpScanRule(PortScanRule):
+    """UDP scan detector sharing the TCP scanner's vertical/horizontal logic."""
+
+    name = "UDP_SCAN"
+    rule_version = "1.1"
+
+    def __init__(self, threshold: int = 15, window: int = 10,
+                 max_states: int = 10_000):
+        super().__init__(threshold, window, protocol="UDP", max_states=max_states)
+
+
+class TcpStealthScanRule:
+    """Detect vertical FIN, NULL, and Xmas TCP probes."""
+
+    name = "TCP_STEALTH_SCAN"
+    rule_version = "1.0"
+    _FIN, _SYN, _RST, _PSH, _ACK, _URG, _ECE, _CWR = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80
+    _XMAS_FLAGS = _FIN | _PSH | _URG
+    _DISALLOWED_FLAGS = _SYN | _RST | _ACK | _ECE | _CWR
+
+    def __init__(self, threshold: int = 15, window: int = 10,
+                 max_states: int = 10_000):
+        self.threshold = max(1, int(threshold))
+        self.window = max(1, int(window))
+        self.max_states = max(1, int(max_states))
+        self._lock = threading.RLock()
+        self._probes: dict[tuple, list[tuple[float, int, str]]] = {}
+
+    @classmethod
+    def _probe_type(cls, flags: int) -> str | None:
+        if flags & cls._DISALLOWED_FLAGS:
+            return None
+        if flags == 0:
+            return "NULL"
+        if flags == cls._FIN:
+            return "FIN"
+        if flags == cls._XMAS_FLAGS:
+            return "XMAS"
+        return None
+
+    def check(self, record: dict) -> dict | None:
+        if record.get("type") != "IP" or record.get("protocol") != "TCP":
+            return None
+        src, dst = record.get("src_ip", ""), record.get("dst_ip", "")
+        if not src or not dst or _is_trusted(src):
+            return None
+        src_port, dst_port = record.get("src_port"), record.get("dst_port")
+        flags = record.get("tcp_flags")
+        if src_port in WELL_KNOWN_SERVICE_PORTS or dst_port is None or flags is None:
+            return None
+        probe_type = self._probe_type(int(flags))
+        if probe_type is None:
+            return None
+
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        key = (src, dst)
+        cutoff = now - self.window
+        with self._lock:
+            history = self._probes.get(key, [])
+            if history and now < max(ts for ts, _, _ in history):
+                return None
+            active = [(ts, port, kind) for ts, port, kind in history
+                      if cutoff <= ts <= now and port != int(dst_port)]
+            active.append((now, int(dst_port), probe_type))
+            if key not in self._probes and len(self._probes) >= self.max_states:
+                self._probes.pop(next(iter(self._probes)))
+            self._probes.pop(key, None)
+            self._probes[key] = active
+            distinct_ports = len({port for _, port, _ in active})
+            if distinct_ports < self.threshold:
+                return None
+
+            kinds = sorted({kind for _, _, kind in active})
+            window_start = min(ts for ts, _, _ in active)
+            self._probes.pop(key, None)
+            return {
+                "rule_name": self.name,
+                "rule_version": self.rule_version,
+                "src_ip": src,
+                "dst_ip": dst,
+                "src_port": src_port,
+                "dst_port": int(dst_port),
+                "protocol": "TCP",
+                "severity": "high",
+                "confidence": "heuristic",
+                "detail": (
+                    f"{src} sent {distinct_ports} distinct TCP {', '.join(kinds)} probes "
+                    f"to {dst} in {self.window}s — possible TCP stealth port scan"
+                ),
+                "evidence": {
+                    "scan_type": "stealth_vertical",
+                    "probe_types": kinds,
+                    "distinct_ports": distinct_ports,
+                    "target_host": dst,
+                    "window_s": self.window,
+                    "threshold": self.threshold,
+                },
+                "window_start": window_start,
+                "window_end": now,
+            }
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.window
+        with self._lock:
+            for key in list(self._probes):
+                active = [(ts, port, kind) for ts, port, kind in self._probes[key]
+                          if cutoff <= ts <= now]
+                if active:
+                    self._probes[key] = active
+                else:
+                    del self._probes[key]
+
+
 # =============================================================================
 # Rule 3: SYN Burst / Connection-Rate Abuse  (§3.3 — label clarified)
 # =============================================================================
 
 class SynFloodRule:
     name = "SYN_FLOOD"
-    rule_version = "1.1"
+    rule_version = "1.2"
 
-    def __init__(self, threshold: int = 100, window: int = 10):
+    def __init__(self, threshold: int = 100, window: int = 10,
+                 max_flows: int = 8192):
         self.threshold = threshold
         self.window = window
+        self.max_flows = max(1, int(max_flows))
         self._lock = threading.RLock()
         # (src_ip, dst_ip, dst_port) → list of SYN timestamps
         self._history: dict[tuple, list] = defaultdict(list)
@@ -360,13 +499,12 @@ class SynFloodRule:
     def prune_stale(self, now: float):
         cutoff = now - self.window
         with self._lock:
-            stale_keys = []
-            for key, history in self._history.items():
-                self._history[key] = [t for t in history if t > cutoff]
-                if not self._history[key]:
-                    stale_keys.append(key)
-            for key in stale_keys:
-                del self._history[key]
+            for key in list(self._history):
+                active = [t for t in self._history[key] if cutoff <= t <= now]
+                if active:
+                    self._history[key] = active
+                else:
+                    del self._history[key]
 
     def check(self, record: dict) -> dict | None:
         if record.get("protocol") != "TCP":
@@ -394,16 +532,21 @@ class SynFloodRule:
         key = (src, dst, dst_port)
 
         with self._lock:
-            self._history[key] = [
-                t for t in self._history[key] if now - t <= self.window
-            ]
-            self._history[key].append(now)
-            count = len(self._history[key])
+            if key not in self._history and len(self._history) >= self.max_flows:
+                self._history.pop(next(iter(self._history)))
+            history = self._history.get(key, [])
+            if history and now < history[-1]:
+                return None  # ignore reordered events; they cannot be in this window
+            history = [t for t in history if 0 <= now - t <= self.window]
+            history.append(now)
+            self._history.pop(key, None)
+            self._history[key] = history
+            count = len(history)
+            window_start = history[0]
 
         if count >= self.threshold:
             with self._lock:
-                self._history[key] = []
-            window_start = now - self.window
+                self._history.pop(key, None)
             logger.debug(f"SYN_FLOOD fired: {src} → {dst}:{dst_port} ({count} SYNs)")
             return {
                 "rule_name": self.name,
@@ -436,20 +579,222 @@ class SynFloodRule:
         return None
 
 
+class DistributedSynFloodRule:
+    """Detect high-volume initial-SYN bursts to one service from many sources."""
+
+    name = "DISTRIBUTED_SYN_FLOOD"
+    rule_version = "1.1"
+
+    def __init__(self, threshold: int = 500, min_sources: int = 20,
+                 window: int = 10, max_targets: int = 2048):
+        self.threshold = max(1, int(threshold))
+        self.min_sources = max(1, int(min_sources))
+        self.window = max(1, int(window))
+        self.max_targets = max(1, int(max_targets))
+        self._lock = threading.RLock()
+        # (dst_ip, dst_port) → (last threshold packet times, recent source map).
+        # Packet count is exact as a threshold predicate: if the newest
+        # `threshold` events fit in the window, the window contains at least
+        # that many events; if they do not, no older event can restore it.
+        # Keeping the most recently active `min_sources` sources is enough to
+        # decide the distinct-source predicate without retaining every packet.
+        self._history: dict[tuple, tuple[deque[float], dict[str, float]]] = {}
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.window
+        with self._lock:
+            for key in list(self._history):
+                packet_times, sources = self._history[key]
+                packet_times = deque(ts for ts in packet_times if cutoff <= ts <= now)
+                sources = {src: ts for src, ts in sources.items()
+                           if cutoff <= ts <= now}
+                if packet_times:
+                    self._history.pop(key, None)
+                    self._history[key] = (packet_times, sources)
+                else:
+                    del self._history[key]
+
+    def check(self, record: dict) -> dict | None:
+        if record.get("type") != "IP" or record.get("protocol") != "TCP":
+            return None
+        if "initial_syn" in record:
+            if not record.get("initial_syn"):
+                return None
+        elif not record.get("syn_flag"):
+            return None
+
+        src, dst, dst_port = record.get("src_ip"), record.get("dst_ip"), record.get("dst_port")
+        if not src or not dst or not isinstance(dst_port, int) or not 1 <= dst_port <= 49151:
+            return None
+        if _is_trusted(src):
+            return None
+
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        key = (dst, dst_port)
+        with self._lock:
+            state = self._history.get(key)
+            if state is None:
+                if len(self._history) >= self.max_targets:
+                    self._history.pop(next(iter(self._history)))
+                packet_times, sources = deque(), {}
+            else:
+                packet_times, sources = state
+            if packet_times and now < packet_times[-1]:
+                return None
+            packet_times = deque(ts for ts in packet_times
+                                 if 0 <= now - ts <= self.window)
+            sources = {host: ts for host, ts in sources.items()
+                       if 0 <= now - ts <= self.window}
+            packet_times.append(now)
+            if len(packet_times) > self.threshold:
+                packet_times.popleft()
+            sources.pop(src, None)
+            sources[src] = now
+            if len(sources) > self.min_sources:
+                sources.pop(next(iter(sources)))
+            source_count = len(sources)
+            if len(packet_times) < self.threshold or source_count < self.min_sources:
+                self._history.pop(key, None)
+                self._history[key] = (packet_times, sources)
+                return None
+            window_start = packet_times[0]
+            packet_count = len(packet_times)
+            self._history.pop(key, None)
+
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src,
+            "dst_ip": dst,
+            "src_port": record.get("src_port"),
+            "dst_port": dst_port,
+            "protocol": "TCP",
+            "severity": "high",
+            "confidence": "heuristic",
+            "detail": (
+                f"at least {packet_count} initial SYNs from at least {source_count} sources targeted "
+                f"{dst}:{dst_port} in {self.window}s — possible distributed SYN flood"
+            ),
+            "evidence": {
+                "syn_count": packet_count,
+                "distinct_sources": source_count,
+                "counts_are_lower_bounds": True,
+                "window_s": self.window,
+                "threshold": self.threshold,
+                "min_sources": self.min_sources,
+                "note": (
+                    "Counts are threshold-capped lower bounds; initial SYNs only, "
+                    "handshake outcomes are not tracked."
+                ),
+            },
+            "window_start": window_start,
+            "window_end": now,
+        }
+
+
 # =============================================================================
-# Rule 4: ARP Spoofing Detection
+# Rule 4: ICMP Echo Sweep Detection
 # =============================================================================
 
+class IcmpSweepRule:
+    """Detect a source probing distinct IPv4/IPv6 destinations with echo requests."""
+
+    name = "ICMP_SWEEP"
+    rule_version = "1.1"
+
+    def __init__(self, threshold: int = 12, window: int = 10,
+                 max_sources: int = 4096):
+        self.threshold = max(1, int(threshold))
+        self.window = max(1, int(window))
+        self.max_sources = max(1, int(max_sources))
+        self._lock = threading.RLock()
+        self._history: dict[str, list[tuple[float, str]]] = defaultdict(list)
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.window
+        with self._lock:
+            for src in list(self._history):
+                active = [(ts, dst) for ts, dst in self._history[src]
+                          if cutoff <= ts <= now]
+                if active:
+                    self._history[src] = active
+                else:
+                    del self._history[src]
+
+    def check(self, record: dict) -> dict | None:
+        protocol = record.get("protocol")
+        if record.get("type") != "IP" or protocol not in {"ICMP", "ICMPV6"}:
+            return None
+        expected_type = 128 if protocol == "ICMPV6" else 8
+        if record.get("icmp_type") != expected_type or record.get("icmp_code", 0) != 0:
+            return None  # count echo requests, never replies or control messages
+
+        src, dst = record.get("src_ip"), record.get("dst_ip")
+        if not src or not dst or src == dst or _is_trusted(src):
+            return None
+
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        with self._lock:
+            # PCAPs are expected to be ordered; reject a late/reordered event
+            # instead of letting it erase newer window state.
+            history = self._history.get(src, [])
+            if history and now < max(ts for ts, _ in history):
+                return None
+            history = [(ts, host) for ts, host in history
+                       if 0 <= now - ts <= self.window and host != dst]
+            history.append((now, dst))
+            self._history.pop(src, None)
+            if len(self._history) >= self.max_sources:
+                self._history.pop(next(iter(self._history)))
+            self._history[src] = history
+            targets = sorted({host for _, host in history})
+            if len(targets) < self.threshold:
+                return None
+            window_start = min(ts for ts, _ in history)
+            self._history.pop(src, None)  # one alert per completed burst
+
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src,
+            "dst_ip": dst,
+            "src_port": None,
+            "dst_port": None,
+            "protocol": protocol,
+            "severity": "medium",
+            "confidence": "heuristic",
+            "detail": (
+                f"{src} sent ICMP echo requests to {len(targets)} distinct hosts "
+                f"in {self.window}s — possible host-discovery sweep"
+            ),
+            "evidence": {
+                "icmp_type": expected_type,
+                "icmp_code": 0,
+                "distinct_targets": len(targets),
+                "targets": targets[:50],
+                "window_s": self.window,
+                "threshold": self.threshold,
+            },
+            "window_start": window_start,
+            "window_end": now,
+        }
+
+
+# Rule 5: ARP Spoofing Detection
+# =============================================================================
 class ArpSpoofRule:
     name = "ARP_SPOOF"
-    rule_version = "1.2"
+    rule_version = "1.3"
 
     # Per-IP cooldown: once an alert fires for a given IP, suppress repeats
     # for this many seconds to avoid alert storms. Set to 0 to disable.
     ALERT_COOLDOWN_S: float = 120.0
 
-    def __init__(self, table_path: str):
+    def __init__(self, table_path: str, max_entries: int = 65_536,
+                 max_cooldowns: int = 10_000):
         self.table_path = table_path
+        self.max_entries = max(1, int(max_entries))
+        self.max_cooldowns = max(1, int(max_cooldowns))
         self._lock = threading.RLock()
         self._table: dict[str, str] = {}    # ip → mac
         self._cooldown: dict[str, float] = {}  # ip → last_alert_time
@@ -478,12 +823,51 @@ class ArpSpoofRule:
     def _load(self):
         try:
             with open(self.table_path) as f:
-                with self._lock:
-                    self._table = json.load(f)
+                loaded = json.load(f)
+            if not isinstance(loaded, dict):
+                raise ValueError("ARP table must be a JSON object")
+            cleaned = {}
+            for ip, mac in loaded.items():
+                normalized = self._normalize_observation(ip, mac)
+                if normalized:
+                    cleaned[normalized[0]] = normalized[1]
+            if len(cleaned) > self.max_entries:
+                cleaned = dict(list(cleaned.items())[-self.max_entries:])
+            with self._lock:
+                self._table = cleaned
+                self._dirty = cleaned != loaded
             logger.info(f"ARP table loaded: {len(self._table)} entries")
         except FileNotFoundError:
             logger.info("No ARP table found — starting fresh")
             self._table = {}
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning(f"Could not read ARP table '{self.table_path}': {exc}")
+            self._table = {}
+
+    @staticmethod
+    def _normalize_observation(ip: str, mac: str) -> tuple[str, str] | None:
+        """Accept only usable IPv4-to-unicast-MAC ARP identity claims."""
+        try:
+            address = ipaddress.ip_address(ip)
+        except (TypeError, ValueError):
+            return None
+        if (address.version != 4 or address.is_unspecified
+                or address.is_multicast or int(address) == 0xFFFFFFFF):
+            return None
+        if not isinstance(mac, str):
+            return None
+        parts = mac.replace("-", ":").split(":")
+        if (len(parts) != 6
+                or any(re.fullmatch(r"[0-9a-fA-F]{2}", part) is None for part in parts)):
+            return None
+        try:
+            raw_mac = bytes(int(part, 16) for part in parts)
+        except ValueError:
+            return None
+        if raw_mac[0] & 1 or not any(raw_mac):
+            return None  # multicast/broadcast and all-zero source MACs are invalid
+        canonical_mac = ":".join(f"{octet:02x}" for octet in raw_mac)
+        return str(address), canonical_mac
 
     def _save(self):
         # os.path.dirname returns '' for bare filenames (e.g. 'arp_table.json');
@@ -499,14 +883,18 @@ class ArpSpoofRule:
         if record.get("type") != "ARP":
             return None
 
-        ip = record.get("src_ip")
-        mac = record.get("src_mac")
-        if not ip or not mac:
+        normalized = self._normalize_observation(
+            record.get("src_ip"), record.get("src_mac")
+        )
+        if normalized is None:
             return None
+        ip, mac = normalized
 
         with self._lock:
             known_mac = self._table.get(ip)
             if known_mac is None:
+                if len(self._table) >= self.max_entries:
+                    return None  # preserve learned mappings instead of evicting them
                 self._table[ip] = mac
                 self._dirty = True
                 return None
@@ -516,6 +904,13 @@ class ArpSpoofRule:
                 if ip in self._cooldown:
                     if now_t - self._cooldown[ip] < self.ALERT_COOLDOWN_S:
                         return None  # suppress — already alerted recently
+                if len(self._cooldown) >= self.max_cooldowns:
+                    cutoff = now_t - self.ALERT_COOLDOWN_S
+                    self._cooldown = {
+                        key: ts for key, ts in self._cooldown.items() if ts > cutoff
+                    }
+                    if len(self._cooldown) >= self.max_cooldowns:
+                        self._cooldown.pop(next(iter(self._cooldown)))
                 self._cooldown[ip] = now_t
 
                 logger.debug(f"ARP_SPOOF fired: {ip} was {known_mac}, now {mac}")
@@ -636,11 +1031,113 @@ _DPI_PORTS: set[int] = {
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.2"
+    rule_version = "1.4"
 
-    def __init__(self, max_bytes: int = 512, enabled: bool = True):
-        self.max_bytes = max_bytes
+    def __init__(self, max_bytes: int = 512, enabled: bool = True,
+                 stream_timeout: int = 30, max_streams: int = 2048):
+        self.max_bytes = max(1, int(max_bytes))
         self.enabled   = enabled
+        self.stream_timeout = max(1, int(stream_timeout))
+        self.max_streams = max(1, int(max_streams))
+        self._stream_lock = threading.RLock()
+        # Directional 4-tuples keep client requests and server responses apart.
+        # Each value is (next expected sequence, bounded bytes, last event time,
+        # a small bounded set of out-of-order segments).
+        self._streams: dict[tuple, tuple[int, bytes, float, dict[int, bytes]]] = {}
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.stream_timeout
+        with self._stream_lock:
+            for key in list(self._streams):
+                if self._streams[key][2] < cutoff or self._streams[key][2] > now:
+                    del self._streams[key]
+
+    def _update_stream(self, record: dict, payload: bytes) -> bytes | None:
+        """Return a bounded contiguous TCP sample, resetting across sequence gaps."""
+        if record.get("protocol") != "TCP":
+            return None
+        seq = record.get("tcp_payload_seq")
+        if seq is None:
+            return None
+        src, dst = record.get("src_ip"), record.get("dst_ip")
+        sport, dport = record.get("src_port"), record.get("dst_port")
+        if not src or not dst or sport is None or dport is None:
+            return None
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        key = (src, sport, dst, dport)
+        seq = int(seq) & 0xFFFFFFFF
+
+        with self._stream_lock:
+            state = self._streams.get(key)
+            if state is None or now - state[2] > self.stream_timeout:
+                if key not in self._streams and len(self._streams) >= self.max_streams:
+                    self._streams.pop(next(iter(self._streams)))
+                next_seq = (seq + len(payload)) & 0xFFFFFFFF
+                sample = payload[-self.max_bytes:]
+                pending: dict[int, bytes] = {}
+            else:
+                expected, previous, last_seen, pending = state
+                if now < last_seen:
+                    return None  # late segments cannot alter the contiguous stream
+                # Signed modular distance handles ordinary 32-bit sequence wrap.
+                delta = ((seq - expected + (1 << 31)) % (1 << 32)) - (1 << 31)
+                if delta == 0:
+                    sample = (previous + payload)[-self.max_bytes:]
+                    next_seq = (expected + len(payload)) & 0xFFFFFFFF
+                elif delta > 0:
+                    # Hold a modest amount of reordering without joining across
+                    # a gap. Bound both the ahead distance and queued bytes.
+                    queued = sum(len(part) for part in pending.values())
+                    if (delta <= self.max_bytes and len(pending) < 8
+                            and queued + len(payload) <= self.max_bytes):
+                        pending.setdefault(seq, payload)
+                    sample = previous
+                    next_seq = expected
+                else:
+                    overlap = -delta
+                    if overlap >= len(payload):
+                        sample = previous  # retransmission of bytes already inspected
+                        next_seq = expected
+                    else:
+                        sample = (previous + payload[overlap:])[-self.max_bytes:]
+                        next_seq = (expected + len(payload) - overlap) & 0xFFFFFFFF
+
+                # A previously queued segment can now extend the contiguous
+                # stream. Prefer the closest extending segment and discard
+                # fully covered retransmissions.
+                while pending:
+                    candidates = []
+                    covered = []
+                    for pending_seq, part in pending.items():
+                        distance = ((pending_seq - next_seq + (1 << 31)) % (1 << 32)) - (1 << 31)
+                        if distance <= 0:
+                            overlap = -distance
+                            if overlap >= len(part):
+                                covered.append(pending_seq)
+                            else:
+                                candidates.append((distance, pending_seq, part))
+                    # A longer in-order segment may cover a segment that was
+                    # previously queued out of order. Drop it now so stale
+                    # bytes do not consume the bounded reordering budget.
+                    for pending_seq in covered:
+                        pending.pop(pending_seq, None)
+                    if not candidates:
+                        if covered:
+                            continue
+                        break
+                    distance, pending_seq, part = max(candidates, key=lambda item: item[0])
+                    pending.pop(pending_seq, None)
+                    overlap = -distance
+                    sample = (sample + part[overlap:])[-self.max_bytes:]
+                    next_seq = (next_seq + len(part) - overlap) & 0xFFFFFFFF
+            # Refresh insertion order so capacity eviction removes the least
+            # recently active flow, not merely the oldest-created one.
+            self._streams.pop(key, None)
+            self._streams[key] = (next_seq, sample, now, pending)
+            flags = int(record.get("tcp_flags") or 0)
+            if flags & 0x05:  # FIN or RST closes this directional flow
+                self._streams.pop(key, None)
+            return sample
 
     def check(self, record: dict) -> dict | None:
         """
@@ -672,20 +1169,44 @@ class PayloadRule:
             # Server responding to a client — skip inspection
             return None
 
-        sample = payload[: self.max_bytes]
+        packet_sample = payload[: self.max_bytes]
+        stream_sample = self._update_stream(record, payload)
+        samples: list[tuple[bytes, str]] = [(packet_sample, "packet")]
+        if stream_sample and stream_sample != packet_sample:
+            samples.append((stream_sample, "tcp_stream"))
+        # Inspect common single-encoded URL payloads as well as the raw bytes.
+        # '+' is a space in form-encoded values; retain the raw view too.
+        for sample, source in list(samples):
+            decoded = unquote_to_bytes(sample) if b"%" in sample else sample
+            if b"%" in sample:
+                if decoded != sample:
+                    samples.append((decoded, "percent_decoded"))
+            if b"+" in sample:
+                # Decode raw form '+' as space before percent escapes so an
+                # encoded literal %2B remains a plus sign.
+                form_decoded = unquote_to_bytes(sample.replace(b"+", b" "))
+                if form_decoded != decoded:
+                    samples.append((form_decoded, "form_decoded"))
 
         # Collect ALL matching signatures (§3.4 — do not return on first match)
         hits: list[dict] = []
         for label, pattern, confidence in _PAYLOAD_SIGNATURES:
-            m = pattern.search(sample)
-            if m:
+            match = None
+            for sample, source in samples:
+                found = pattern.search(sample)
+                if found is not None:
+                    match = (found, source)
+                    break
+            if match:
+                m, representation = match
                 matched_bytes = m.group(0)[:80]
                 try:
                     matched_str = matched_bytes.decode("utf-8", errors="replace")
                 except Exception:
                     matched_str = repr(matched_bytes)
                 hits.append({"signature": label, "matched": matched_str,
-                             "confidence": confidence})
+                             "confidence": confidence,
+                             "representation": representation})
 
         if not hits:
             return None
@@ -699,6 +1220,14 @@ class PayloadRule:
         # Severity: high if any hit is high-confidence (e.g. LOG4SHELL)
         severity = "high" if any(h["confidence"] == "high" for h in hits) else "medium"
         overall_confidence = "high" if severity == "high" else "heuristic"
+
+        # Don't repeatedly fire on the same signature retained in a stream tail.
+        if stream_sample:
+            key = (record.get("src_ip"), src_port, record.get("dst_ip"), dst_port)
+            with self._stream_lock:
+                state = self._streams.get(key)
+                if state:
+                    self._streams[key] = (state[0], b"", state[2], state[3])
 
         return {
             "rule_name": self.name,
@@ -716,9 +1245,12 @@ class PayloadRule:
             ),
             "evidence": {
                 "hits": hits,
-                "inspected_bytes": len(sample),
+                "inspected_bytes": max(len(sample) for sample, _ in samples),
                 "cap_bytes": self.max_bytes,
-                "note": "Packet-level inspection only; no stream reassembly",
+                "inspection": "packet_and_bounded_tcp_stream",
+                "stream_timeout_s": self.stream_timeout,
+                "stream_buffer_bytes": self.max_bytes,
+                "note": "Only contiguous TCP bytes are inspected; small gaps may be buffered, and TLS is not decrypted.",
             },
             "window_start": None,
             "window_end": None,
@@ -756,7 +1288,7 @@ def _shannon_entropy(s: str) -> float:
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.3"
+    rule_version = "1.6"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -767,18 +1299,22 @@ class DnsRule:
         max_query_len: int = 60,
         freq_threshold: int = 20,
         freq_window: int = 60,
+        max_frequency_keys: int = 10_000,
+        max_seen_keys: int = 10_000,
     ):
         self.entropy_threshold = entropy_threshold
         self.max_query_len     = max_query_len
         # Frequency detection parameters — wired from config via RuleEngine (P1)
         self._freq_threshold   = freq_threshold
         self._freq_window      = freq_window
+        self._max_frequency_keys = max(1, int(max_frequency_keys))
+        self._max_seen_keys = max(1, int(max_seen_keys))
         self._lock = threading.RLock()
 
-        # (src_ip, domain) → last_alert_time  (alert dedup)
+        # (src_ip, parent_domain, anomaly_type) → last_alert_time (dedup)
         self._seen: dict[tuple, float] = {}
 
-        # (src_ip, parent_domain) → [timestamps]  (query frequency)
+        # (src_ip, parent_domain) → bounded [timestamps] (query frequency)
         self._freq: dict[tuple, list] = defaultdict(list)
 
     def _parent_domain(self, domain: str) -> str:
@@ -812,13 +1348,12 @@ class DnsRule:
     def prune_stale(self, now: float):
         cutoff = now - self._freq_window
         with self._lock:
-            stale = [k for k, v in self._freq.items()
-                     if not [t for t in v if t > cutoff]]
-            for k in stale:
-                del self._freq[k]
-            for k in list(self._freq):
-                if k in self._freq:
-                    self._freq[k] = [t for t in self._freq[k] if t > cutoff]
+            for key in list(self._freq):
+                active = [t for t in self._freq[key] if cutoff <= t <= now]
+                if active:
+                    self._freq[key] = active
+                else:
+                    del self._freq[key]
             if len(self._seen) > 5000:
                 self._prune_seen(now)
 
@@ -832,7 +1367,9 @@ class DnsRule:
         if not domain:
             return None
 
-        domain = domain.rstrip(".")
+        # DNS labels are case-insensitive; canonicalize before deriving the
+        # frequency and dedup keys so mixed-case queries still aggregate.
+        domain = domain.rstrip(".").lower()
         src = record.get("src_ip", "unknown")
         now = record.get("timestamp", time.time())
 
@@ -846,46 +1383,83 @@ class DnsRule:
         labels = domain.split(".")
         subdomain = labels[0] if labels else domain
         parent = self._parent_domain(domain)
-
-        entropy  = _shannon_entropy(subdomain)
+        parent_label_count = len(parent.split(".")) if parent else 0
+        registrable_index = max(0, len(labels) - parent_label_count)
+        # Include every label through the registrable domain. This catches
+        # randomized nested labels and DGA-like second-level domains without
+        # measuring public-suffix labels such as "co" or "uk".
+        entropy_labels = labels[:registrable_index + 1]
+        entropy_candidates = [
+            (label, _shannon_entropy(label))
+            for label in entropy_labels if len(label) >= 8
+        ]
+        entropy_label, entropy = max(
+            entropy_candidates, key=lambda item: item[1],
+            default=(subdomain, _shannon_entropy(subdomain)),
+        )
         too_long = len(domain) > self.max_query_len
-        # Require label length >= 8 to avoid FPs on short words.
-        # Also skip entropy check when domain is on the CDN allowlist.
+        # Require at least one relevant label of length >= 8 to limit FPs.
+        # Also skip entropy checks for explicitly allowlisted CDN suffixes.
         high_ent = (
             not entropy_exempt
-            and len(subdomain) >= 8
+            and bool(entropy_candidates)
             and entropy >= self.entropy_threshold
         )
 
         # ── Query frequency: count repeated queries to same parent domain ──
-        # freq_threshold=0 disables frequency detection entirely
-        with self._lock:
-            fkey = (src, parent)
-            self._freq[fkey] = [
-                t for t in self._freq[fkey] if now - t <= self._freq_window
-            ]
-            self._freq[fkey].append(now)
-            query_count = len(self._freq[fkey])
+        # Keep only the threshold-sized rolling tail: once the threshold is
+        # reached, larger exact counts do not change the detection decision.
+        # This bounds a single hot domain even when queries arrive at line rate.
+        # A disabled frequency rule must not allocate or retain per-domain state.
+        query_count = 0
+        freq_window_start = None
+        query_count_saturated = False
+        if self._freq_threshold > 0:
+            with self._lock:
+                fkey = (src, parent)
+                if fkey not in self._freq and len(self._freq) >= self._max_frequency_keys:
+                    self._freq.pop(next(iter(self._freq)))
+                history = self._freq.get(fkey, [])
+                if history and now < history[-1]:
+                    return None  # ignore late observations instead of corrupting the window
+                history = [
+                    t for t in history if 0 <= now - t <= self._freq_window
+                ]
+                if len(history) >= self._freq_threshold:
+                    query_count_saturated = True
+                    history = history[-(self._freq_threshold - 1):] if self._freq_threshold > 1 else []
+                history.append(now)
+                self._freq.pop(fkey, None)
+                self._freq[fkey] = history
+                query_count = len(history)
+                freq_window_start = history[0]
 
-        high_freq = (
-            self._freq_threshold > 0
-            and query_count >= self._freq_threshold
-        )
+        high_freq = query_count >= self._freq_threshold > 0
 
         if not (high_ent or too_long or high_freq):
             return None
 
-        # Alert dedup — suppress re-alerting on same (src, domain) within cooldown
-        alert_key = (src, domain)
+        sub_type = "DNS_FREQ" if high_freq and not (high_ent or too_long) \
+                   else ("DNS_DGA" if high_ent else "DNS_TUNNEL")
+
+        # Deduplicate by parent and anomaly class. Randomized query labels under
+        # one domain otherwise evade per-QNAME cooldowns and can flood alerts.
+        alert_key = (src, parent, sub_type)
         with self._lock:
-            last_alert = self._seen.get(alert_key, 0)
-            if now - last_alert < self.ALERT_COOLDOWN_S:
+            last_alert = self._seen.get(alert_key)
+            if last_alert is not None and now - last_alert < self.ALERT_COOLDOWN_S:
                 return None
+            if alert_key not in self._seen and len(self._seen) >= self._max_seen_keys:
+                self._seen.pop(next(iter(self._seen)))
+            self._seen.pop(alert_key, None)
             self._seen[alert_key] = now
 
         reason = []
         if high_ent:
-            reason.append(f"entropy={entropy:.2f} (≥{self.entropy_threshold})")
+            reason.append(
+                f"entropy={entropy:.2f} for label '{entropy_label}' "
+                f"(≥{self.entropy_threshold})"
+            )
         if too_long:
             reason.append(f"length={len(domain)} chars (>{self.max_query_len})")
         if high_freq:
@@ -893,9 +1467,6 @@ class DnsRule:
                 f"query_count={query_count} to '{parent}' "
                 f"in {self._freq_window}s (≥{self._freq_threshold})"
             )
-
-        sub_type = "DNS_FREQ" if high_freq and not (high_ent or too_long) \
-                   else ("DNS_DGA" if high_ent else "DNS_TUNNEL")
 
         logger.debug(f"{sub_type} fired: {src} queried '{domain}' [{', '.join(reason)}]")
         return {
@@ -905,7 +1476,7 @@ class DnsRule:
             "dst_ip": record.get("dst_ip"),
             "src_port": record.get("src_port"),
             "dst_port": 53,
-            "protocol": "UDP",
+            "protocol": record.get("protocol", "UDP"),
             "severity": "medium" if high_freq and not (high_ent or too_long) else "high",
             "confidence": "heuristic",
             "detail": (
@@ -915,14 +1486,16 @@ class DnsRule:
             "evidence": {
                 "domain": domain,
                 "subdomain": subdomain,
+                "entropy_label": entropy_label,
                 "parent_domain": parent,
                 "entropy": round(entropy, 3),
                 "sub_type": sub_type,
                 "query_count_in_window": query_count,
+                "query_count_saturated": query_count_saturated,
                 "freq_window_s": self._freq_window,
                 "freq_threshold": self._freq_threshold,
             },
-            "window_start": now - self._freq_window if high_freq else None,
+            "window_start": freq_window_start if high_freq else None,
             "window_end": now if high_freq else None,
         }
 
@@ -1107,7 +1680,21 @@ class RuleEngine:
         self.rules = [
             BlocklistRule(blocklist),
             PortScanRule(cfg.PORT_SCAN_THRESHOLD, cfg.TIME_WINDOW),
+            UdpScanRule(
+                getattr(cfg, "UDP_SCAN_THRESHOLD", 15), cfg.TIME_WINDOW
+            ),
+            TcpStealthScanRule(
+                getattr(cfg, "TCP_STEALTH_SCAN_THRESHOLD", 15), cfg.TIME_WINDOW
+            ),
             SynFloodRule(cfg.SYN_FLOOD_THRESHOLD, cfg.TIME_WINDOW),
+            DistributedSynFloodRule(
+                getattr(cfg, "DISTRIBUTED_SYN_FLOOD_THRESHOLD", 500),
+                getattr(cfg, "DISTRIBUTED_SYN_FLOOD_MIN_SOURCES", 20),
+                cfg.TIME_WINDOW,
+            ),
+            IcmpSweepRule(
+                getattr(cfg, "ICMP_SWEEP_THRESHOLD", 12), cfg.TIME_WINDOW
+            ),
             ArpSpoofRule(cfg.ARP_TABLE_PATH),
             PayloadRule(
                 max_bytes=getattr(cfg, "PAYLOAD_MAX_BYTES", 512),
@@ -1141,6 +1728,8 @@ class RuleEngine:
         self._device_refresh_s: float = DEVICE_REFRESH_INTERVAL
         self._device_queue: queue.Queue = queue.Queue(maxsize=1000)
         self._seen_devices: dict = {}
+        self._seen_device_lock = threading.Lock()
+        self._seen_device_max_keys = 65_536
 
         self._stats = {
             "alert_writes": 0,
@@ -1470,15 +2059,23 @@ class RuleEngine:
         if mac and ip:
             dev_key = (mac, ip)
             now_wall = time.time()
-            last_write = self._seen_devices.get(dev_key, 0.0)
-            if now_wall - last_write >= self._device_refresh_s:
-                self._seen_devices[dev_key] = now_wall
-                import queue as _queue
-                try:
-                    self._device_queue.put_nowait(("device", {"mac": mac, "ip": ip}))
-                except _queue.Full:
-                    self._stats["devices_dropped"] += 1
-                    logger.warning(f"Device queue full — dropped ({mac}, {ip})")
+            import queue as _queue
+            with self._seen_device_lock:
+                last_write = self._seen_devices.get(dev_key, 0.0)
+                if now_wall - last_write >= self._device_refresh_s:
+                    try:
+                        self._device_queue.put_nowait(("device", {"mac": mac, "ip": ip}))
+                    except _queue.Full:
+                        self._stats["devices_dropped"] += 1
+                        logger.warning(f"Device queue full — dropped ({mac}, {ip})")
+                    else:
+                        # Record only successful enqueue so queue pressure does
+                        # not suppress retries for the full refresh interval.
+                        if (dev_key not in self._seen_devices
+                                and len(self._seen_devices) >= self._seen_device_max_keys):
+                            self._seen_devices.pop(next(iter(self._seen_devices)))
+                        self._seen_devices.pop(dev_key, None)
+                        self._seen_devices[dev_key] = now_wall
 
         # Run ALL rules — no early exit
         for rule in self.rules:

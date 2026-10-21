@@ -32,10 +32,15 @@ ARP_TABLE_PATH = "data/arp_table.json"
 # After each change, replay a known-benign PCAP and verify FP rate stays low.
 # Then replay a known-attack PCAP and verify TPs still fire.
 PORT_SCAN_THRESHOLD = int(os.getenv("PORT_SCAN_THRESHOLD", 15))   # distinct ports OR hosts in window
+TCP_STEALTH_SCAN_THRESHOLD = int(os.getenv("TCP_STEALTH_SCAN_THRESHOLD", 15))  # FIN/NULL/Xmas destination ports
+UDP_SCAN_THRESHOLD = int(os.getenv("UDP_SCAN_THRESHOLD", 15))     # distinct UDP ports OR hosts in window
 SYN_FLOOD_THRESHOLD = int(os.getenv("SYN_FLOOD_THRESHOLD", 100))  # SYN packets in window
+DISTRIBUTED_SYN_FLOOD_THRESHOLD = int(os.getenv("DISTRIBUTED_SYN_FLOOD_THRESHOLD", 500))
+DISTRIBUTED_SYN_FLOOD_MIN_SOURCES = int(os.getenv("DISTRIBUTED_SYN_FLOOD_MIN_SOURCES", 20))
 TIME_WINDOW = int(os.getenv("TIME_WINDOW", 10))                    # seconds
+ICMP_SWEEP_THRESHOLD = int(os.getenv("ICMP_SWEEP_THRESHOLD", 12))  # distinct echo targets in window
 
-# --- Trusted Hosts (never flagged by PortScan / SYNFlood) ---
+# --- Trusted Hosts (exempt from scan, SYN-flood, and ICMP sweep rules) ---
 # Add your gateway, local DNS server, CDN ranges, or CIDR blocks.
 # Accepts: individual IPs, hostnames (as they appear in tcpdump), CIDR ranges.
 # Configurable via GATEWAY_IP and IDS_TRUSTED in .env
@@ -54,13 +59,13 @@ if _extra_trusted:
 # File where analyst feedback (TP/FP classifications) is stored as JSONL
 FEEDBACK_PATH = os.getenv("FEEDBACK_PATH", "data/feedback.jsonl")
 
-# --- Deep Packet Inspection (PayloadRule 1.1) ---
+# --- Deep Packet Inspection (bounded packet and TCP stream inspection) ---
 PAYLOAD_INSPECTION  = os.getenv("PAYLOAD_INSPECTION", "true").lower() == "true"
-PAYLOAD_MAX_BYTES   = int(os.getenv("PAYLOAD_MAX_BYTES", 512))   # cap per-packet bytes scanned
+PAYLOAD_MAX_BYTES   = int(os.getenv("PAYLOAD_MAX_BYTES", 512))   # per-packet and per-flow TCP buffer cap
 
 # --- DNS / DGA Detection (DnsRule) ---
 # entropy_threshold: raise if too many FPs on random-looking but legit names.
-# Typical DGA entropy >= 3.8; short human-readable labels are ~2.5–3.2.
+# DGA-like labels often reach 3.8; short human-readable labels are ~2.5–3.2.
 DNS_ENTROPY_THRESHOLD = float(os.getenv("DNS_ENTROPY_THRESHOLD", 3.8))  # bits/char
 DNS_QUERY_MAX_LEN     = int(os.getenv("DNS_QUERY_MAX_LEN", 60))         # chars; legit domains <60
 # Query-frequency detection: alert if src queries same parent domain >= N times in T seconds.

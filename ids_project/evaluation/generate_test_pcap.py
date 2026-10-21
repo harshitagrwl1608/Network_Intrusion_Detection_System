@@ -1,7 +1,7 @@
 """
 evaluation/generate_test_pcap.py
 ---------------------------------
-Generates labelled synthetic test fixtures for all six current detection rules.
+Generates labelled synthetic test fixtures for all ten current detection rules.
 
 Each scenario is documented with:
   - scenario_id
@@ -31,7 +31,10 @@ import sys
 import csv
 import time
 
-from scapy.all import Ether, IP, TCP, UDP, ARP, DNS, DNSQR, Raw, wrpcap
+from scapy.all import (
+    Ether, IP, IPv6, TCP, UDP, ARP, ICMP, ICMPv6EchoRequest,
+    DNS, DNSQR, Raw, wrpcap,
+)
 
 # ---------------------------------------------------------------------------
 # Paths — all isolated from production data
@@ -275,6 +278,155 @@ def gen_dns_long(base: float) -> list:
     return [pkt]
 
 
+def gen_icmp_sweep(base: float) -> list:
+    """S12: One source sends echo requests to many hosts → ICMP_SWEEP."""
+    scenario(
+        "S12", "ICMP_SWEEP",
+        "ICMP host discovery: one source probes 16 distinct hosts",
+        src_ip="192.168.1.90", protocol="ICMP",
+    )
+    pkts = []
+    for i in range(16):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.90", dst=f"10.10.0.{i + 1}") /
+               ICMP(type=8, code=0, id=90, seq=i))
+        pkt.time = base + 80.0 + i * 0.1
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_udp_port_scan(base: float) -> list:
+    """S13: One source probes many UDP ports on one host → UDP_SCAN."""
+    scenario(
+        "S13", "UDP_SCAN",
+        "UDP port scan: one source probes 16 ports on one target",
+        src_ip="192.168.1.91", dst_ip="10.20.0.20", protocol="UDP",
+    )
+    pkts = []
+    for i, port in enumerate(range(10000, 10016)):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.91", dst="10.20.0.20") /
+               UDP(sport=52000 + i, dport=port))
+        pkt.time = base + 90.0 + i * 0.1
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_ipv6_udp_port_scan(base: float) -> list:
+    """S14: IPv6 host probes many UDP ports → UDP_SCAN through full replay."""
+    scenario(
+        "S14", "UDP_SCAN", "IPv6 UDP vertical port scan",
+        src_ip="2001:db8::91", dst_ip="2001:db8::20", protocol="UDP",
+    )
+    pkts = []
+    for i, port in enumerate(range(12000, 12016)):
+        pkt = (_make_eth() /
+               IPv6(src="2001:db8::91", dst="2001:db8::20") /
+               UDP(sport=53000 + i, dport=port))
+        pkt.time = base + 100.0 + i * 0.1
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_tcp_stealth_scan(base: float) -> list:
+    """S20: FIN, NULL, and Xmas probes across ports → TCP_STEALTH_SCAN."""
+    scenario(
+        "S20", "TCP_STEALTH_SCAN", "Vertical TCP FIN/NULL/Xmas stealth scan",
+        src_ip="192.0.2.20", dst_ip="192.0.2.80", protocol="TCP",
+    )
+    flags = ("F", 0, "FPU")
+    packets = []
+    for i, port in enumerate(range(13000, 13015)):
+        pkt = (_make_eth() /
+               IP(src="192.0.2.20", dst="192.0.2.80") /
+               TCP(sport=45000 + i, dport=port, flags=flags[i % len(flags)]))
+        pkt.time = base + 124.0 + i * 0.05
+        packets.append(pkt)
+    return packets
+
+
+def gen_distributed_syn_flood(base: float) -> list:
+    """S15: At least 500 SYNs from 20 sources to one service."""
+    scenario(
+        "S15", "DISTRIBUTED_SYN_FLOOD", "Distributed SYN flood across 20 sources",
+        dst_ip="192.0.2.80", dst_port="80", protocol="TCP",
+    )
+    pkts = []
+    for i in range(500):
+        source = f"198.51.100.{i % 20 + 1}"
+        pkt = (_make_eth() /
+               IP(src=source, dst="192.0.2.80") /
+               TCP(sport=40000 + i % 20000, dport=80, flags="S"))
+        pkt.time = base + 110.0 + i * 0.001
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_fragmented_sqli(base: float) -> list:
+    """S16: SQL injection signature split across adjacent TCP segments."""
+    scenario(
+        "S16", "PAYLOAD_HIT", "SQL injection signature split across TCP segments",
+        src_ip="192.0.2.16", dst_ip="192.0.2.80", dst_port="80", protocol="TCP",
+    )
+    first = b"POST /search?q=UNION SEL"
+    second = b"ECT password FROM users HTTP/1.1\r\nHost: target\r\n\r\n"
+    seq = 10000
+    packets = []
+    for i, (part, segment_seq) in enumerate(((first, seq), (second, seq + len(first)))):
+        pkt = (_make_eth() /
+               IP(src="192.0.2.16", dst="192.0.2.80") /
+               TCP(sport=44016, dport=80, seq=segment_seq, flags="PA") /
+               Raw(load=part))
+        pkt.time = base + 120.0 + i * 0.01
+        packets.append(pkt)
+    return packets
+
+
+def gen_url_encoded_sqli(base: float) -> list:
+    """S17: URL-encoded SQLi marker should be detected after one decode."""
+    scenario(
+        "S17", "PAYLOAD_HIT", "Single URL-encoded SQL injection signature",
+        src_ip="192.0.2.17", dst_ip="192.0.2.80", dst_port="80", protocol="TCP",
+    )
+    pkt = (_make_eth() /
+           IP(src="192.0.2.17", dst="192.0.2.80") /
+           TCP(sport=44017, dport=80, seq=20000, flags="PA") /
+           Raw(load=b"GET /search?q=%55NION%20SELECT HTTP/1.1\r\nHost: target\r\n\r\n"))
+    pkt.time = base + 121.0
+    return [pkt]
+
+
+def gen_nested_label_dga(base: float) -> list:
+    """S18: Randomized non-leading DNS label should still be analyzed."""
+    scenario(
+        "S18", "DNS_ANOMALY", "High-entropy nested DNS label",
+        src_ip="192.168.1.92", dst_ip="8.8.8.8", dst_port="53", protocol="UDP",
+    )
+    pkt = (_make_eth() /
+           IP(src="192.168.1.92", dst="8.8.8.8") /
+           UDP(sport=54323, dport=53) /
+           DNS(rd=1, qd=DNSQR(qname="api.xvqrztmplwbsnfhk.example.com")))
+    pkt.time = base + 122.0
+    return [pkt]
+
+
+def gen_dns_frequency_burst(base: float) -> list:
+    """S19: A source makes 20 distinct low-entropy queries to one parent."""
+    scenario(
+        "S19", "DNS_ANOMALY", "Burst of 20 distinct DNS names under one parent",
+        src_ip="192.168.1.93", dst_ip="8.8.8.8", dst_port="53", protocol="UDP",
+    )
+    packets = []
+    for i in range(20):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.93", dst="8.8.8.8") /
+               UDP(sport=54400 + i, dport=53) /
+               DNS(rd=1, qd=DNSQR(qname=f"q{i}.rate-test.example.com")))
+        pkt.time = base + 123.0 + i * 0.02
+        packets.append(pkt)
+    return packets
+
+
 # ---------------------------------------------------------------------------
 # Benign negative packet generators  (should NOT fire any rule)
 # ---------------------------------------------------------------------------
@@ -296,7 +448,9 @@ def gen_benign_http(base: float) -> list:
 def gen_benign_dns(base: float) -> list:
     """B02: Normal short, low-entropy DNS queries — should NOT fire DnsRule."""
     pkts = []
-    for i, name in enumerate(["google.com", "example.com", "github.com"]):
+    for i, name in enumerate([
+        "google.com", "example.com", "github.com", "api.services.example.com",
+    ]):
         pkt = (_make_eth() /
                IP(src="192.168.1.10", dst="8.8.8.8") /
                UDP(sport=50000 + i, dport=53) /
@@ -304,6 +458,19 @@ def gen_benign_dns(base: float) -> list:
         pkt.time = base + 0.5 + i * 0.1
         pkts.append(pkt)
     return pkts
+
+
+def gen_benign_dns_below_frequency(base: float) -> list:
+    """Nineteen ordinary lookups stay below the configured frequency boundary."""
+    packets = []
+    for i in range(19):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.11", dst="8.8.8.8") /
+               UDP(sport=51000 + i, dport=53) /
+               DNS(rd=1, qd=DNSQR(qname=f"h{i}.healthy.example.net")))
+        pkt.time = base + 2.5 + i * 0.02
+        packets.append(pkt)
+    return packets
 
 
 def gen_benign_dns_server_reply(base: float) -> list:
@@ -364,6 +531,67 @@ def gen_benign_syn_below_threshold(base: float) -> list:
     return pkts
 
 
+def gen_benign_stealth_below_threshold(base: float) -> list:
+    """Fourteen FIN probes stay below the stealth scan threshold."""
+    packets = []
+    for i, port in enumerate(range(14000, 14014)):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.32", dst="192.168.1.1") /
+               TCP(sport=52000 + i, dport=port, flags="F"))
+        pkt.time = base + 9.0 + i * 0.1
+        packets.append(pkt)
+    return packets
+
+
+def gen_benign_icmp_repeated_target(base: float) -> list:
+    """B07: Repeated echo requests to one host are not a host sweep."""
+    pkts = []
+    for i in range(20):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.30", dst="192.168.1.1") /
+               ICMP(type=8, code=0, id=30, seq=i))
+        pkt.time = base + 5.0 + i * 0.25
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_benign_udp_repeated_target(base: float) -> list:
+    """B08: Repeated UDP requests to one destination/port are not a sweep."""
+    pkts = []
+    for i in range(25):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.31", dst="8.8.8.8") /
+               UDP(sport=52000 + i, dport=53))
+        pkt.time = base + 6.0 + i * 0.2
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_benign_ipv6_icmp_repeated_target(base: float) -> list:
+    """IPv6 echo requests to one host should not trigger ICMP_SWEEP."""
+    pkts = []
+    for i in range(20):
+        pkt = (_make_eth() /
+               IPv6(src="2001:db8::30", dst="2001:db8::1") /
+               ICMPv6EchoRequest(id=30, seq=i))
+        pkt.time = base + 7.0 + i * 0.2
+        pkts.append(pkt)
+    return pkts
+
+
+def gen_benign_distributed_syn_below_source_threshold(base: float) -> list:
+    """High aggregate rate from 19 hosts must not meet the 20-source guard."""
+    pkts = []
+    for source_index in range(19):
+        for i in range(30):
+            pkt = (_make_eth() /
+                   IP(src=f"198.51.100.{source_index + 1}", dst="192.0.2.81") /
+                   TCP(sport=41000 + i, dport=80, flags="S"))
+            pkt.time = base + 8.0 + (source_index * 30 + i) * 0.001
+            pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -387,6 +615,15 @@ def generate_all():
     attack_pkts += gen_credential_leak(base)
     attack_pkts += gen_dns_dga(base)
     attack_pkts += gen_dns_long(base)
+    attack_pkts += gen_icmp_sweep(base)
+    attack_pkts += gen_udp_port_scan(base)
+    attack_pkts += gen_ipv6_udp_port_scan(base)
+    attack_pkts += gen_distributed_syn_flood(base)
+    attack_pkts += gen_fragmented_sqli(base)
+    attack_pkts += gen_url_encoded_sqli(base)
+    attack_pkts += gen_nested_label_dga(base)
+    attack_pkts += gen_dns_frequency_burst(base)
+    attack_pkts += gen_tcp_stealth_scan(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)
@@ -396,10 +633,16 @@ def generate_all():
     benign_pkts = []
     benign_pkts += gen_benign_http(base)
     benign_pkts += gen_benign_dns(base)
+    benign_pkts += gen_benign_dns_below_frequency(base)
     benign_pkts += gen_benign_dns_server_reply(base)
     benign_pkts += gen_benign_cdn_dns(base)
     benign_pkts += gen_benign_normal_arp(base)
     benign_pkts += gen_benign_syn_below_threshold(base)
+    benign_pkts += gen_benign_stealth_below_threshold(base)
+    benign_pkts += gen_benign_icmp_repeated_target(base)
+    benign_pkts += gen_benign_udp_repeated_target(base)
+    benign_pkts += gen_benign_ipv6_icmp_repeated_target(base)
+    benign_pkts += gen_benign_distributed_syn_below_source_threshold(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")
@@ -420,6 +663,7 @@ def generate_all():
                 "src_ip", "dst_ip", "dst_port", "protocol",
                 "description",
             ],
+            lineterminator="\n",
         )
         writer.writeheader()
         writer.writerows(SCENARIOS)

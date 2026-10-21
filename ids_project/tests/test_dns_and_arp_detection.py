@@ -45,6 +45,113 @@ class TestDnsAndArpDetection(unittest.TestCase):
         }
         alert = dns_rule.check(record)
         self.assertIsNone(alert, "freq_threshold=0 should disable frequency alerts, but an alert was returned")
+        self.assertEqual(dns_rule._freq, {}, "disabled frequency detection should retain no query history")
+
+    def test_dns_over_tcp_preserves_transport_in_alert(self):
+        dns_rule = DnsRule(
+            entropy_threshold=3.5,
+            max_query_len=100,
+            freq_threshold=0,
+            freq_window=60,
+        )
+        alert = dns_rule.check({
+            "type": "IP", "src_ip": "192.0.2.4", "dst_ip": "192.0.2.53",
+            "src_port": 42000, "dst_port": 53, "protocol": "TCP",
+            "dns_query": "xvqrztmplwbsnfhk.badactor.example", "timestamp": 1000.0,
+        })
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["protocol"], "TCP")
+
+    def test_late_dns_observation_does_not_corrupt_frequency_window(self):
+        rule = DnsRule(entropy_threshold=5.0, max_query_len=60,
+                       freq_threshold=3, freq_window=10)
+        def query(label, ts):
+            return {
+                "type": "IP", "protocol": "UDP", "src_ip": "203.0.113.40",
+                "dst_ip": "192.0.2.53", "src_port": 40000, "dst_port": 53,
+                "dns_query": f"{label}.example.com", "timestamp": ts,
+            }
+        self.assertIsNone(rule.check(query("one", 20)))
+        self.assertIsNone(rule.check(query("two", 21)))
+        self.assertIsNone(rule.check(query("late", 19)))
+        alert = rule.check(query("three", 22))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["query_count_in_window"], 3)
+
+    def test_dns_frequency_groups_case_insensitive_names(self):
+        rule = DnsRule(entropy_threshold=9.0, max_query_len=200,
+                       freq_threshold=3, freq_window=10)
+        alert = None
+        for domain, ts in (("one.Example.COM.", 100),
+                           ("two.example.com.", 101),
+                           ("THREE.EXAMPLE.com.", 102)):
+            alert = rule.check({
+                "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.20",
+                "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+                "dns_query": domain, "timestamp": ts,
+            })
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["parent_domain"], "example.com")
+        self.assertEqual(alert["evidence"]["query_count_in_window"], 3)
+
+    def test_dns_frequency_cooldown_groups_randomized_names_by_parent(self):
+        rule = DnsRule(entropy_threshold=9.0, max_query_len=200,
+                       freq_threshold=3, freq_window=10)
+        def query(domain, ts):
+            return {
+                "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.30",
+                "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+                "dns_query": domain, "timestamp": ts,
+            }
+        self.assertIsNone(rule.check(query("one.example.com", 100)))
+        self.assertIsNone(rule.check(query("two.example.com", 101)))
+        self.assertIsNotNone(rule.check(query("three.example.com", 102)))
+        self.assertIsNone(rule.check(query("four.example.com", 103)))
+        self.assertEqual(len(rule._seen), 1)
+
+    def test_dns_frequency_state_is_bounded_and_reports_saturation(self):
+        rule = DnsRule(entropy_threshold=9.0, max_query_len=200,
+                       freq_threshold=3, freq_window=10, max_frequency_keys=2)
+        rule.ALERT_COOLDOWN_S = 0
+        def query(domain, ts):
+            return {
+                "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.31",
+                "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+                "dns_query": domain, "timestamp": ts,
+            }
+        self.assertIsNone(rule.check(query("one.example.com", 100)))
+        self.assertIsNone(rule.check(query("two.example.com", 101)))
+        alert = rule.check(query("three.example.com", 102))
+        self.assertIsNotNone(alert)
+        self.assertFalse(alert["evidence"]["query_count_saturated"])
+        saturated = rule.check(query("four.example.com", 103))
+        self.assertIsNotNone(saturated)
+        self.assertTrue(saturated["evidence"]["query_count_saturated"])
+        rule.check(query("one.other.com", 104))
+        rule.check(query("one.third.com", 105))
+        self.assertLessEqual(len(rule._freq), 2)
+
+    def test_dns_entropy_checks_nested_and_registered_domain_labels(self):
+        rule = DnsRule(entropy_threshold=3.8, max_query_len=100,
+                       freq_threshold=0, freq_window=10)
+        alert = rule.check({
+            "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.21",
+            "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+            "dns_query": "api.xvqrztmplwbsnfhk.example.com", "timestamp": 100,
+        })
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["subdomain"], "api")
+        self.assertEqual(alert["evidence"]["entropy_label"], "xvqrztmplwbsnfhk")
+
+    def test_dns_entropy_does_not_flag_nested_human_readable_names(self):
+        rule = DnsRule(entropy_threshold=3.8, max_query_len=100,
+                       freq_threshold=0, freq_window=10)
+        alert = rule.check({
+            "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.22",
+            "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+            "dns_query": "api.services.example.com", "timestamp": 100,
+        })
+        self.assertIsNone(alert)
 
     def test_dga_whitelist_does_not_suppress_dns_tunneling(self):
         """
@@ -116,6 +223,36 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "timestamp": 103.0,
         })
         self.assertIsNone(alert2, "Rapid repeat ARP spoof for same IP should be suppressed by cooldown")
+
+    def test_arp_rule_ignores_invalid_identity_claims(self):
+        rule = ArpSpoofRule(self.arp_table_path)
+        for ip, mac in (
+            ("0.0.0.0", "00:11:22:33:44:01"),
+            ("224.0.0.1", "00:11:22:33:44:01"),
+            ("192.0.2.1", "01:11:22:33:44:01"),  # multicast MAC
+            ("192.0.2.2", "ff:ff:ff:ff:ff:ff"),  # broadcast MAC
+            ("not-an-ip", "00:11:22:33:44:01"),
+            ("192.0.2.3", "bad-mac"),
+            ("192.0.2.4", "+1:11:22:33:44:55"),
+            ("192.0.2.5", " 1:11:22:33:44:55"),
+        ):
+            self.assertIsNone(rule.check({"type": "ARP", "src_ip": ip, "src_mac": mac}))
+        self.assertEqual(rule._table, {})
+
+    def test_arp_mapping_and_cooldown_capacity_preserve_known_entries(self):
+        rule = ArpSpoofRule(self.arp_table_path, max_entries=2, max_cooldowns=1)
+        def claim(ip, mac, ts):
+            return rule.check({"type": "ARP", "src_ip": ip,
+                               "src_mac": mac, "timestamp": ts})
+
+        claim("192.0.2.1", "00:11:22:33:44:01", 100)
+        claim("192.0.2.2", "00:11:22:33:44:02", 100)
+        # Capacity preserves the first two learned mappings instead of evicting.
+        claim("192.0.2.3", "00:11:22:33:44:03", 100)
+        self.assertEqual(len(rule._table), 2)
+        self.assertIsNotNone(claim("192.0.2.1", "00:11:22:33:44:99", 101))
+        self.assertIsNotNone(claim("192.0.2.2", "00:11:22:33:44:98", 102))
+        self.assertLessEqual(len(rule._cooldown), 1)
 
 
 if __name__ == "__main__":

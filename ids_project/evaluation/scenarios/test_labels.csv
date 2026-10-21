@@ -10,3 +10,12 @@ S08,PAYLOAD_HIT,192.168.1.79,192.168.1.1,8080,TCP,Log4Shell JNDI injection in Us
 S09,PAYLOAD_HIT,192.168.1.80,192.168.1.1,80,TCP,Plaintext password= in HTTP POST body
 S10,DNS_ANOMALY,192.168.1.88,8.8.8.8,53,UDP,High-entropy DGA-like DNS query
 S11,DNS_ANOMALY,192.168.1.89,8.8.8.8,53,UDP,Unusually long DNS query (>60 chars)
+S12,ICMP_SWEEP,192.168.1.90,,,ICMP,ICMP host discovery: one source probes 16 distinct hosts
+S13,UDP_SCAN,192.168.1.91,10.20.0.20,,UDP,UDP port scan: one source probes 16 ports on one target
+S14,UDP_SCAN,2001:db8::91,2001:db8::20,,UDP,IPv6 UDP vertical port scan
+S15,DISTRIBUTED_SYN_FLOOD,,192.0.2.80,80,TCP,Distributed SYN flood across 20 sources
+S16,PAYLOAD_HIT,192.0.2.16,192.0.2.80,80,TCP,SQL injection signature split across TCP segments
+S17,PAYLOAD_HIT,192.0.2.17,192.0.2.80,80,TCP,Single URL-encoded SQL injection signature
+S18,DNS_ANOMALY,192.168.1.92,8.8.8.8,53,UDP,High-entropy nested DNS label
+S19,DNS_ANOMALY,192.168.1.93,8.8.8.8,53,UDP,Burst of 20 distinct DNS names under one parent
+S20,TCP_STEALTH_SCAN,192.0.2.20,192.0.2.80,,TCP,Vertical TCP FIN/NULL/Xmas stealth scan

@@ -9,8 +9,10 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from capture.sniffer import _replay_text_log
-from engine.rules import RuleEngine, PortScanRule
+from capture.sniffer import _extract
+from engine.rules import RuleEngine, PortScanRule, TcpStealthScanRule
 import config
+from scapy.all import Ether, IP, IPv6, TCP, UDP, ICMPv6EchoRequest, DNS, DNSQR
 
 
 class DummyEngine:
@@ -22,6 +24,88 @@ class DummyEngine:
 
 
 class TestPcapReplayAndParsing(unittest.TestCase):
+    def test_tcpdump_text_replay_preserves_tcp_probe_flags(self):
+        lines = (
+            "14:30:15.100000 IP 203.0.113.44.50000 > 203.0.113.80.1000: Flags [F], seq 1\n"
+            "14:30:15.200000 IP 203.0.113.44.50001 > 203.0.113.80.1001: Flags [none], win 0\n"
+            "14:30:15.300000 IP 203.0.113.44.50002 > 203.0.113.80.1002: Flags [FPU], seq 2\n"
+            "14:30:15.400000 IP 203.0.113.44.50003 > 203.0.113.80.1003: Flags [F.], seq 3, ack 4\n"
+        )
+        with tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False) as f:
+            f.write(lines)
+            f.flush()
+            tmp_path = f.name
+        try:
+            dummy = DummyEngine()
+            _replay_text_log(tmp_path, dummy)
+            self.assertEqual([record["tcp_flags"] for record in dummy.records],
+                             [0x01, 0x00, 0x29, 0x11])
+            self.assertEqual([record["initial_syn"] for record in dummy.records],
+                             [False, False, False, False])
+        finally:
+            os.unlink(tmp_path)
+
+    def test_text_replay_detects_a_tcp_stealth_scan_end_to_end(self):
+        flags = ("F", "none", "FPU")
+        lines = "".join(
+            f"14:30:15.100000 IP 203.0.113.44.{50000 + i} > "
+            f"203.0.113.80.{8000 + i}: Flags [{flags[i % 3]}], seq {i}\n"
+            for i in range(15)
+        )
+        with tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False) as f:
+            f.write(lines)
+            f.flush()
+            tmp_path = f.name
+        try:
+            rule = TcpStealthScanRule(threshold=15, window=10)
+            alerts = []
+
+            class RuleAdapter:
+                def check(self, record):
+                    alert = rule.check(record)
+                    if alert:
+                        alerts.append(alert)
+
+            _replay_text_log(tmp_path, RuleAdapter())
+            self.assertEqual(len(alerts), 1)
+            self.assertEqual(alerts[0]["evidence"]["distinct_ports"], 15)
+            self.assertEqual(alerts[0]["evidence"]["probe_types"],
+                             ["FIN", "NULL", "XMAS"])
+        finally:
+            os.unlink(tmp_path)
+
+    def test_extract_dns_over_tcp_query(self):
+        pkt = (Ether() / IP(src="192.0.2.4", dst="192.0.2.53") /
+               TCP(sport=42000, dport=53, flags="PA") /
+               DNS(id=12, qr=0, rd=1, qd=DNSQR(qname="xvqrztmplwbsnfhk.badactor.example")))
+        record = _extract(pkt, capture_ts=1000.0)
+        self.assertEqual(record["protocol"], "TCP")
+        self.assertEqual(record["dns_query"], "xvqrztmplwbsnfhk.badactor.example.")
+        self.assertIsNone(record["src_mac"], "Missing Ethernet source must not be inferred from the host interface")
+
+    def test_extract_ipv6_transport_headers(self):
+        tcp = _extract(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") /
+                       TCP(sport=44000, dport=443, flags="S"), capture_ts=1001)
+        udp = _extract(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::53") /
+                       UDP(sport=44000, dport=53), capture_ts=1002)
+        self.assertEqual((tcp["src_ip"], tcp["dst_ip"], tcp["protocol"]),
+                         ("2001:db8::1", "2001:db8::2", "TCP"))
+        self.assertTrue(tcp["initial_syn"])
+        self.assertEqual(tcp["tcp_seq"], 0)
+        self.assertEqual(tcp["tcp_payload_seq"], 1)
+        self.assertEqual(tcp["tcp_flags"] & 0x02, 0x02)
+        self.assertEqual((udp["protocol"], udp["src_port"], udp["dst_port"]),
+                         ("UDP", 44000, 53))
+
+    def test_extract_ipv6_echo_request(self):
+        record = _extract(
+            Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") / ICMPv6EchoRequest(),
+            capture_ts=1003,
+        )
+        self.assertEqual(record["protocol"], "ICMPV6")
+        self.assertEqual(record["icmp_type"], 128)
+        self.assertEqual(record["icmp_code"], 0)
+
     def test_tcpdump_full_date_format_parsing(self):
         """
         README documents: tcpdump -tttt -nn -r file.pcap > file.log.
@@ -56,6 +140,83 @@ class TestPcapReplayAndParsing(unittest.TestCase):
             r1 = dummy.records[1]
             self.assertTrue(r1.get("syn_flag"))
             self.assertFalse(r1.get("initial_syn"), "Flags [S.] must have initial_syn=False")
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_time_only_tcpdump_log_advances_date_at_midnight(self):
+        content = (
+            "23:59:59.900000 IP 192.0.2.1.40000 > 192.0.2.2.80: Flags [S], seq 1\n"
+            "00:00:00.100000 IP 192.0.2.1.40001 > 192.0.2.2.80: Flags [S], seq 2\n"
+        )
+        with tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False) as f:
+            f.write(content)
+            f.flush()
+            tmp_path = f.name
+        try:
+            dummy = DummyEngine()
+            _replay_text_log(tmp_path, dummy)
+            self.assertEqual(len(dummy.records), 2)
+            elapsed = (
+                dummy.records[1]["event_timestamp"]
+                - dummy.records[0]["event_timestamp"]
+            )
+            self.assertAlmostEqual(elapsed, 0.2, places=4)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_tcpdump_text_log_parses_ipv6_endpoints(self):
+        content = (
+            "2026-10-21 12:00:00.000000 IP6 2001:db8::1.40000 > "
+            "2001:db8::2.80: Flags [S], seq 1\n"
+            "2026-10-21 12:00:00.100000 IP6 2001:db8::1.53000 > "
+            "2001:db8::53.53: UDP, length 20\n"
+        )
+        with tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False) as f:
+            f.write(content)
+            f.flush()
+            tmp_path = f.name
+        try:
+            dummy = DummyEngine()
+            _replay_text_log(tmp_path, dummy)
+            self.assertEqual(len(dummy.records), 2)
+            tcp, udp = dummy.records
+            self.assertEqual(
+                (tcp["src_ip"], tcp["dst_ip"], tcp["src_port"], tcp["dst_port"]),
+                ("2001:db8::1", "2001:db8::2", 40000, 80),
+            )
+            self.assertTrue(tcp["initial_syn"])
+            self.assertEqual(
+                (udp["src_ip"], udp["dst_ip"], udp["src_port"], udp["dst_port"], udp["protocol"]),
+                ("2001:db8::1", "2001:db8::53", 53000, 53, "UDP"),
+            )
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_tcpdump_text_log_parses_arp_requests_without_inventing_mac(self):
+        content = (
+            "12:00:00.000000 ARP, Request who-has 192.0.2.20 "
+            "(28:56:5a:45:5d:63 (oui Unknown)) "
+            "tell 192.0.2.10, length 28\n"
+            "12:00:00.100000 ARP, Request who-has 192.0.2.30 (Broadcast) "
+            "tell 192.0.2.10, length 28\n"
+        )
+        with tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False) as f:
+            f.write(content)
+            f.flush()
+            tmp_path = f.name
+        try:
+            dummy = DummyEngine()
+            _replay_text_log(tmp_path, dummy)
+            self.assertEqual(len(dummy.records), 2)
+            record = dummy.records[0]
+            self.assertEqual(record["type"], "ARP")
+            self.assertEqual(record["arp_operation"], "request")
+            self.assertEqual(record["src_ip"], "192.0.2.10")
+            self.assertEqual(record["dst_ip"], "192.0.2.20")
+            self.assertIsNone(record["src_mac"])
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)

@@ -15,7 +15,7 @@
 > [!NOTE]
 > ### 🚧 Ongoing Project Notice
 > **NetGuard IDS is currently under active development.**  
-> The core packet-sniffing engine, 6-tier signature/heuristic detection suite, deep packet inspection (DPI), DNS entropy analyzer, and real-time Flask SOC dashboard are functional. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
+> The core packet-sniffing engine, 9-rule signature and heuristic detection suite, deep packet inspection (DPI), DNS entropy analyzer, and real-time Flask SOC dashboard are functional. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
 
 ---
 
@@ -98,16 +98,19 @@ Home and small-office networks generate continuous connection traffic, yet small
 
 ## 🔍 Core Detection Rules
 
-NetGuard implements 6 distinct detection rules spanning stateless lookups, stateful sliding windows, payload pattern matching, and algorithmic information theory:
+NetGuard implements 9 detection rules spanning stateless lookups, stateful sliding windows, payload pattern matching, and algorithmic information theory:
 
 | Rule ID | Detection Mechanism | Methodology | Tunable Defaults |
 |---|---|---|---|
 | **`BLOCKLIST`** | Known C2 Botnets & Ransomware IPs | Stateless $O(1)$ set lookup against synced feeds (abuse.ch Feodo Tracker, CINS Army). | Auto-updated every 24h |
-| **`PORT_SCAN`** | Network Reconnaissance & Port Sweeps | Stateful sliding window tracking distinct destination ports probed per source IP. Excludes legitimate server response traffic. | $> 15$ ports in $10\text{s}$ |
-| **`SYN_FLOOD`** | Denial-of-Service (DoS) Attacks | Stateful sliding window tracking rapid bursts of TCP SYN packets directed toward service ports ($< 49152$). | $> 100$ SYNs in $10\text{s}$ |
-| **`ARP_SPOOF`** | Man-in-the-Middle (MITM) & Cache Poisoning | Stateful persistent table tracking IP $\leftrightarrow$ MAC pairings. Alerts if a recognized IP suddenly claims a new hardware identity. | Thread-safe auto-persist |
-| **`PAYLOAD_HIT`** | Deep Packet Inspection (DPI) | Regex inspection of packet data payload for SQL Injection (`UNION SELECT`, `' OR 1=1`), XSS (`<script>`), and plaintext credentials (`password=`, `Authorization: Basic`). | First 512 bytes scanned |
-| **`DNS_ANOMALY`** | Domain Generation Algorithms (DGA) & DNS Tunneling | Computes Shannon Entropy ($H = -\sum p(x) \log_2 p(x)$) on DNS queries. Flags high-randomness domains ($> 3.8\text{ bits/char}$) and oversized FQDNs ($> 50\text{ chars}$). | Entropy $> 3.8$, Length $> 50$ |
+| **`PORT_SCAN`** | Network Reconnaissance & Port Sweeps | Stateful sliding window tracking distinct destination ports probed per source IP. Stores only the latest observation per unique target and excludes legitimate server response traffic. | $\ge 15$ ports in $10\text{s}$ |
+| **`UDP_SCAN`** | UDP Port and Host Sweeps | Tracks distinct UDP destination ports or hosts per source in a sliding window; stores only latest observations per unique target and excludes replies from known service ports. | $\ge 15$ ports or hosts in $10\text{s}$ |
+| **`SYN_FLOOD`** | Denial-of-Service (DoS) Attacks | Stateful sliding window tracking rapid bursts of TCP SYN packets directed toward service ports ($< 49152$); per-flow histories and active flow keys are bounded. | $\ge 100$ SYNs in $10\text{s}$ |
+| **`DISTRIBUTED_SYN_FLOOD`** | Distributed Denial-of-Service (DDoS) | Counts initial TCP SYNs to one service across source IPs; requires both a high packet volume and a minimum number of distinct sources. Per-target packet/source state and active targets are bounded; alert counts are reported as threshold-capped lower bounds. | $\ge 500$ SYNs from $\ge 20$ sources in $10\text{s}$ |
+| **`ICMP_SWEEP`** | Host Discovery | Counts distinct IPv4/IPv6 destinations of ICMP echo requests per source in a sliding window; ignores replies and duplicate probes to the same host, and bounds per-source and source-key state. | $\ge 12$ hosts in $10\text{s}$ |
+| **`ARP_SPOOF`** | Man-in-the-Middle (MITM) & Cache Poisoning | Stateful persistent table tracking valid IPv4-to-unicast-MAC pairings with bounded identity/cooldown state. Alerts if a recognized IP suddenly claims a new hardware identity. | Thread-safe auto-persist; 120s alert cooldown |
+| **`PAYLOAD_HIT`** | Deep Packet Inspection (DPI) | Regex inspection of packet payloads and bounded, ordered TCP data (with single-pass URL/form decoding) for SQL Injection, XSS, command injection, SSRF, Log4Shell, and plaintext credentials. | 512-byte packet and TCP stream buffers |
+| **`DNS_ANOMALY`** | Domain Generation Algorithms (DGA) & DNS Tunneling | Maximum Shannon entropy across labels through the registrable domain, query length, and repeated parent-domain queries; supports DNS over UDP and TCP. Frequency state is threshold-capped, disabled cleanly at zero, and alerts are deduplicated by source, parent, and anomaly type. | Entropy $\ge 3.8$, length $> 60$, freq $\ge 20$ in 60s |
 
 ### 🛡️ False-Positive Mitigations
 - **Source Service Port Exemption:** Packets originating *from* well-known service ports (e.g., `53/DNS`, `80/HTTP`, `443/HTTPS`, `123/NTP`) are exempted from scanner rules to prevent high-volume DNS/Web servers from being flagged as attackers.
@@ -167,7 +170,7 @@ python ids_project/evaluation/replay.py --pcap ids_project/data/test_attacks.pca
 **How NetGuard processes `log.pcap`:**
 * **Dual Format Auto-Detection:** Automatically detects whether `log.pcap` is a binary libpcap capture or an ASCII `tcpdump` text dump.
 * **Protocol & Field Extraction:** Decodes IP endpoints, ports, protocol flags, ARP mappings, raw payloads (DPI), and DNS queries.
-* **Rule Engine Execution:** Evaluates all 6 detection rules against every packet.
+* **Rule Engine Execution:** Evaluates all 9 detection rules against every packet.
 * **Database Storage:** Inserts all detected security incidents directly into `storage/alerts.db`.
 
 ### 3. Visualizing Replayed Alerts
@@ -205,7 +208,7 @@ Networking_Project/
 │   ├── capture/
 │   │   └── sniffer.py           # Scapy packet capture, field extraction & protocol decoding
 │   ├── engine/
-│   │   ├── rules.py             # 6 detection rules + RuleEngine orchestrator
+│   │   ├── rules.py             # 9 detection rules + RuleEngine orchestrator
 │   │   └── blocklist.py         # abuse.ch Feodo Tracker feed loader & auto-downloader
 │   ├── storage/
 │   │   └── db.py                # Database abstraction layer (SQLite + PostgreSQL)
@@ -310,12 +313,18 @@ All parameters in `config.py` can be tuned via `.env`:
 | `SQLITE_PATH` | `storage/alerts.db` | Local SQLite database file location |
 | `POSTGRES_URL` | `""` | PostgreSQL connection string (`postgresql://user:pass@host:5432/db`) |
 | `PORT_SCAN_THRESHOLD` | `15` | Distinct destination ports probed in window to trigger alert |
-| `SYN_FLOOD_THRESHOLD` | `100` | SYN packets received in window to trigger alert |
+| `UDP_SCAN_THRESHOLD` | `15` | Distinct UDP destination ports or hosts in `TIME_WINDOW` to trigger alert |
+| `SYN_FLOOD_THRESHOLD` | `100` | Per-source SYN packets in window to trigger alert |
+| `DISTRIBUTED_SYN_FLOOD_THRESHOLD` | `500` | Aggregate SYN packets to one service in window |
+| `DISTRIBUTED_SYN_FLOOD_MIN_SOURCES` | `20` | Distinct source IPs required for distributed SYN alert |
 | `TIME_WINDOW` | `10` | Sliding window duration in seconds for stateful rules |
 | `PAYLOAD_INSPECTION` | `true` | Enable regex Deep Packet Inspection (DPI) |
-| `PAYLOAD_MAX_BYTES` | `512` | Maximum payload bytes scanned per packet |
-| `DNS_ENTROPY_THRESHOLD` | `3.8` | Shannon entropy threshold for suspicious domain names |
-| `DNS_QUERY_MAX_LEN` | `50` | Maximum character length for legitimate domains |
+| `PAYLOAD_MAX_BYTES` | `512` | Maximum packet payload bytes and per-flow TCP stream buffer |
+| `DNS_ENTROPY_THRESHOLD` | `3.8` | Shannon entropy threshold for relevant DNS labels |
+| `ICMP_SWEEP_THRESHOLD` | `12` | Distinct echo-request targets in `TIME_WINDOW` to trigger alert |
+| `DNS_QUERY_MAX_LEN` | `60` | Maximum character length for legitimate domains |
+| `DNS_FREQ_THRESHOLD` | `20` | Minimum queries to one parent domain from one source inside `DNS_FREQ_WINDOW`; `0` disables this detector |
+| `DNS_FREQ_WINDOW` | `60` | DNS frequency sliding-window duration in seconds |
 | `ANALYSIS_INTERVAL` | `30` | Seconds between background aggregation and retention checks |
 | `DASHBOARD_HOST` | `127.0.0.1` | Host/IP for the Flask dashboard. Default is loopback-only. Set to `0.0.0.0` only with a firewall/reverse-proxy in place. |
 | `DASHBOARD_PORT` | `5000` | Port for Flask dashboard |

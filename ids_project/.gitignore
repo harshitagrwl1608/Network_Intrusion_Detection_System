@@ -62,6 +62,8 @@ data/blocklist_update.log
 *.cap
 # Whitelist synthetic unit test attack PCAP (safe, non-private sample):
 !data/test_attacks.pcap
+# Whitelist the deterministic synthetic benign fixture used by run_eval.py:
+!data/test_benign.pcap
 
 # --- Benchmark & Suricata Outputs ---
 eve.json

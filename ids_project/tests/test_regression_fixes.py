@@ -257,49 +257,20 @@ class TestReplayEventClockE2E(unittest.TestCase):
         self.assertEqual(len(history_after), 0,
                          "Stale state must be pruned after replay window expires")
 
-    def test_replay_into_passes_event_clock_to_engine(self):
-        """
-        _replay_into() must create a RuleEngine with event_clock != None.
-        We verify this by inspecting the engine's _event_clock attribute
-        via a monkey-patch of RuleEngine.__init__.
-        """
-        captured = {}
+    def test_replay_engine_factory_wires_event_clock(self):
+        """The evaluation replay factory must give RuleEngine its replay clock."""
+        from storage.db import get_connection, init_db
+        from evaluation.replay import create_replay_engine, ReplayClock
 
-        original_init = __import__("engine.rules", fromlist=["RuleEngine"]).RuleEngine.__init__
-
-        def _capturing_init(self_e, db_conn, blocklist, cfg, event_clock=None):
-            captured["event_clock"] = event_clock
-            original_init(self_e, db_conn, blocklist, cfg, event_clock=event_clock)
-
-        import evaluation.run_eval as run_eval_mod
-        import engine.rules as rules_mod
-
-        with patch.object(rules_mod.RuleEngine, "__init__", _capturing_init):
-            # Create a minimal text-format PCAP (1 line)
-            pcap_path = os.path.join(self.tmp_dir, "mini.log")
-            with open(pcap_path, "w") as f:
-                f.write(
-                    "2026-01-01 12:00:00.000000 IP 10.0.0.1.1234 > 10.0.0.2.80:"
-                    " Flags [S], seq 1\n"
-                )
-            try:
-                run_eval_mod._replay_into(
-                    pcap_path,
-                    config.SQLITE_PATH,
-                    config.ARP_TABLE_PATH,
-                    os.path.join(self.tmp_dir, "bl.txt"),
-                )
-            except Exception:
-                pass  # We only care that event_clock was passed
-
-        self.assertIsNotNone(
-            captured.get("event_clock"),
-            "_replay_into must pass a non-None event_clock to RuleEngine",
-        )
-        self.assertTrue(
-            callable(captured.get("event_clock")),
-            "event_clock must be callable",
-        )
+        conn = get_connection()
+        init_db(conn)
+        tracking_engine = create_replay_engine(conn, set(), config)
+        try:
+            self.assertIsNotNone(tracking_engine.engine._event_clock)
+            self.assertIsInstance(tracking_engine.engine._event_clock, ReplayClock)
+            self.assertIs(tracking_engine.clock, tracking_engine.engine._event_clock)
+        finally:
+            tracking_engine.flush()
 
     def test_standalone_replay_missing_blocklist_uses_replay_clock(self):
         """Path 1: Missing blocklist path in standalone replay must use a ReplayClock."""
@@ -702,6 +673,45 @@ class TestDeviceLastSeenRefresh(unittest.TestCase):
         finally:
             engine.flush()
 
+    def test_device_queue_failure_does_not_suppress_retry(self):
+        from queue import Full
+        from storage.db import get_connection
+        from engine.rules import RuleEngine
+
+        engine = RuleEngine(get_connection(), set(), config)
+        packet = {
+            "src_mac": "aa:bb:cc:dd:ee:10", "src_ip": "10.9.0.10",
+            "dst_ip": "10.9.0.1", "type": "IP", "protocol": "UDP",
+        }
+        key = (packet["src_mac"], packet["src_ip"])
+        try:
+            with patch.object(engine._device_queue, "put_nowait", side_effect=Full):
+                engine.check(packet)
+            self.assertNotIn(key, engine._seen_devices)
+            engine.check(packet)
+            self.assertIn(key, engine._seen_devices)
+            engine.flush()
+            self.assertEqual(engine._stats["devices_dropped"], 1)
+        finally:
+            engine.flush()
+
+    def test_device_dedup_key_cache_has_a_hard_capacity(self):
+        from storage.db import get_connection
+        from engine.rules import RuleEngine
+
+        engine = RuleEngine(get_connection(), set(), config)
+        engine._seen_device_max_keys = 2
+        try:
+            for i in range(5):
+                engine.check({
+                    "src_mac": f"aa:bb:cc:dd:ee:{i:02x}",
+                    "src_ip": f"10.9.1.{i+1}", "dst_ip": "10.9.1.254",
+                    "type": "IP", "protocol": "UDP",
+                })
+            self.assertLessEqual(len(engine._seen_devices), 2)
+        finally:
+            engine.flush()
+
 
 # =============================================================================
 # 5. Dashboard binding default consistency
@@ -718,13 +728,14 @@ class TestDashboardBindingDefault(unittest.TestCase):
         import importlib
         old_env = os.environ.pop("DASHBOARD_HOST", None)
         try:
-            # Reload config with env var unset
+            # Isolate the code default from the user's real .env file.
             import config as cfg
-            importlib.reload(cfg)
-            self.assertEqual(
-                cfg.DASHBOARD_HOST, "127.0.0.1",
-                "Default DASHBOARD_HOST must be 127.0.0.1 (loopback)",
-            )
+            with patch("dotenv.load_dotenv", return_value=False):
+                importlib.reload(cfg)
+                self.assertEqual(
+                    cfg.DASHBOARD_HOST, "127.0.0.1",
+                    "Default DASHBOARD_HOST must be 127.0.0.1 (loopback)",
+                )
         finally:
             if old_env is not None:
                 os.environ["DASHBOARD_HOST"] = old_env

@@ -15,9 +15,10 @@ Extracted fields per packet (normalized event schema):
   protocol           -- "TCP" | "UDP" | "ICMP" | "ARP" | str(proto_num)
   syn_flag           -- bool, True only for TCP SYN packets
   icmp_type, icmp_code -- int, present only for ICMP packets
+  tcp_seq, tcp_flags, tcp_payload_seq -- TCP sequence/flag metadata for bounded DPI stream tracking
   ip_len             -- total IP packet length in bytes (for volume tracking)
   payload            -- bytes, capped at PAYLOAD_MAX_BYTES (for DPI rule)
-  dns_query          -- str FQDN (for DNS anomaly rule, UDP port 53 queries only)
+  dns_query          -- str FQDN (for DNS anomaly rule, UDP or TCP port 53 queries)
 
 For ARP packets: type=ARP, src_ip, src_mac, dst_ip are set; port/flag fields are None/False.
 
@@ -37,7 +38,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 logger = logging.getLogger(__name__)
 
 try:
-    from scapy.all import sniff, IP, TCP, UDP, ARP, Ether, ICMP, DNS, DNSQR, Raw
+    from scapy.all import (
+        sniff, IP, IPv6, TCP, UDP, ARP, Ether, ICMP, ICMPv6EchoRequest,
+        DNS, DNSQR, Raw,
+    )
     SCAPY_AVAILABLE = True
 except ImportError:
     SCAPY_AVAILABLE = False
@@ -100,35 +104,53 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
         })
         return record
 
-    # --- IP packet ---
-    if IP in pkt:
-        proto_num = pkt[IP].proto
-        proto_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
+    # --- IPv4 or IPv6 packet ---
+    if IP in pkt or IPv6 in pkt:
+        ip_layer = pkt[IP] if IP in pkt else pkt[IPv6]
+        is_ipv6 = IPv6 in pkt and IP not in pkt
+        proto_num = ip_layer.nh if is_ipv6 else ip_layer.proto
+        proto_map = {6: "TCP", 17: "UDP", 1: "ICMP", 58: "ICMPV6"}
         proto = proto_map.get(proto_num, str(proto_num))
 
         dst_port    = None
         src_port    = None
         syn_flag    = False
         initial_syn = False
+        tcp_seq     = None
+        tcp_flags   = None
+        tcp_payload_seq = None
         payload     = b""
         dns_query   = None
         icmp_type   = None
         icmp_code   = None
-        ip_len      = pkt[IP].len  # total IP packet length in bytes
+        ip_len      = pkt[IP].len if not is_ipv6 else (
+            int(pkt[IPv6].plen) + 40 if pkt[IPv6].plen is not None else None
+        )
 
         if TCP in pkt:
+            proto = "TCP"
             dst_port = pkt[TCP].dport
             src_port = pkt[TCP].sport
             flags = pkt[TCP].flags
+            tcp_seq = int(pkt[TCP].seq)
+            tcp_flags = int(flags)
             syn_flag = bool(flags & 0x02)  # SYN bit
             initial_syn = bool(flags & 0x02) and not bool(flags & 0x10)  # SYN set, ACK clear
+            tcp_payload_seq = (tcp_seq + int(bool(flags & 0x02))) & 0xFFFFFFFF
             if Raw in pkt:
                 payload = bytes(pkt[Raw].load)[: _PAYLOAD_MAX_BYTES]
+            if DNS in pkt and (dst_port == 53 or src_port == 53) and pkt[DNS].qr == 0:
+                try:
+                    if pkt[DNS].qd is not None:
+                        dns_query = pkt[DNS].qd.qname.decode("utf-8", errors="replace")
+                except Exception:
+                    dns_query = None
         elif UDP in pkt:
+            proto = "UDP"
             dst_port = pkt[UDP].dport
             src_port = pkt[UDP].sport
             # --- DNS query extraction (for DnsRule) ---
-            if DNS in pkt and pkt[DNS].qr == 0:  # qr=0 means query
+            if DNS in pkt and (dst_port == 53 or src_port == 53) and pkt[DNS].qr == 0:
                 try:
                     if pkt[DNS].qd is not None:
                         dns_query = pkt[DNS].qd.qname.decode("utf-8", errors="replace")
@@ -139,17 +161,27 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             icmp_code = pkt[ICMP].code
             if Raw in pkt:
                 payload = bytes(pkt[Raw].load)[: _PAYLOAD_MAX_BYTES]
+        elif ICMPv6EchoRequest in pkt:
+            proto = "ICMPV6"
+            icmp_type = 128
+            icmp_code = pkt[ICMPv6EchoRequest].code
 
         record.update({
             "type": "IP",
-            "src_ip": pkt[IP].src,
-            "dst_ip": pkt[IP].dst,
-            "src_mac": pkt[Ether].src if Ether in pkt else None,
+            "src_ip": ip_layer.src,
+            "dst_ip": ip_layer.dst,
+            # Read the captured field directly.  Scapy's ``Ether.src`` may
+            # synthesize a default from conf.iface when the field is absent,
+            # which performs host interface lookup during offline replay.
+            "src_mac": pkt[Ether].fields.get("src") if Ether in pkt else None,
             "dst_port": dst_port,
             "src_port": src_port,
             "protocol": proto,
             "syn_flag": syn_flag,
             "initial_syn": initial_syn,
+            "tcp_seq": tcp_seq,
+            "tcp_flags": tcp_flags,
+            "tcp_payload_seq": tcp_payload_seq,
             "icmp_type": icmp_type,
             "icmp_code": icmp_code,
             "ip_len": ip_len,
@@ -161,7 +193,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
     return None  # ignore non-IP, non-ARP packets
 
 
-def start_sniff(interface: str, rule_engine, packet_filter: str = "ip or arp"):
+def start_sniff(interface: str, rule_engine, packet_filter: str = "ip or ip6 or arp"):
     """
     Start live packet capture on `interface`.
     Hands each packet to rule_engine.check() after extraction.
@@ -172,7 +204,7 @@ def start_sniff(interface: str, rule_engine, packet_filter: str = "ip or arp"):
     Args:
         interface:     Network interface name (e.g. "eth0", "wlan0")
         rule_engine:   RuleEngine instance with a .check(record) method
-        packet_filter: BPF filter string (default captures IP and ARP)
+        packet_filter: BPF filter string (default captures IPv4, IPv6, and ARP)
     """
     if not SCAPY_AVAILABLE:
         raise RuntimeError("Scapy is not installed")
@@ -222,12 +254,14 @@ def _replay_text_log(log_path: str, rule_engine):
     Reports skipped lines and warns if zero records parsed.
     """
     import re
-    from datetime import datetime, date
+    from datetime import datetime, date, timedelta
 
     logger.info(f"Detected ASCII tcpdump text log: {log_path}")
     processed  = 0
     skipped    = 0
     today      = date.today()
+    time_only_day = today
+    last_time_only_seconds = None
 
     # Regex that matches both full-date and time-only prefixes
     TS_RE = re.compile(
@@ -238,6 +272,7 @@ def _replay_text_log(log_path: str, rule_engine):
 
     def _parse_ts(ts_str: str) -> float:
         """Return a POSIX timestamp from the matched timestamp string."""
+        nonlocal time_only_day, last_time_only_seconds
         ts_str = ts_str.strip()
         for fmt in (
             "%Y-%m-%d %H:%M:%S.%f",
@@ -247,7 +282,24 @@ def _replay_text_log(log_path: str, rule_engine):
         ):
             try:
                 if fmt.startswith("%H"):
-                    dt = datetime.strptime(f"{today} {ts_str}", f"%Y-%m-%d {fmt}")
+                    time_value = datetime.strptime(ts_str, fmt)
+                    seconds = (
+                        time_value.hour * 3600 + time_value.minute * 60
+                        + time_value.second + time_value.microsecond / 1_000_000
+                    )
+                    # tcpdump's time-only format omits the date. Advance the
+                    # replay day when sequential records cross midnight, but
+                    # leave small out-of-order timestamps on the same day.
+                    if (last_time_only_seconds is not None
+                            and last_time_only_seconds - seconds > 12 * 3600):
+                        time_only_day += timedelta(days=1)
+                    if (last_time_only_seconds is None
+                            or seconds >= last_time_only_seconds
+                            or last_time_only_seconds - seconds > 12 * 3600):
+                        last_time_only_seconds = seconds
+                    dt = datetime.strptime(
+                        f"{time_only_day} {ts_str}", f"%Y-%m-%d {fmt}"
+                    )
                 else:
                     dt = datetime.strptime(ts_str, fmt)
                 return dt.timestamp()
@@ -283,6 +335,7 @@ def _replay_text_log(log_path: str, rule_engine):
                         "src_ip":  ip,
                         "src_mac": mac,
                         "dst_ip":  None,
+                        "arp_operation": "reply",
                         "dst_port": None,
                         "protocol": "ARP",
                         "syn_flag": False,
@@ -294,12 +347,39 @@ def _replay_text_log(log_path: str, rule_engine):
                     rule_engine.check(record)
                     processed += 1
                 else:
-                    skipped += 1
+                    m_request = re.search(
+                        r'Request\s+who-has\s+([^\s,]+)'
+                        r'(?:\s+\(.*\))?\s+tell\s+([^\s,]+)',
+                        rest_of_line,
+                    )
+                    if m_request:
+                        target_ip, sender_ip = m_request.groups()
+                        record = {
+                            "type": "ARP",
+                            "src_ip": sender_ip,
+                            "src_mac": None,  # tcpdump without -e omits link-layer identity
+                            "dst_ip": target_ip,
+                            "arp_operation": "request",
+                            "dst_port": None,
+                            "protocol": "ARP",
+                            "syn_flag": False,
+                            "initial_syn": False,
+                            "timestamp": ts,
+                            "event_timestamp": ts,
+                            "processing_timestamp": time.time(),
+                        }
+                        rule_engine.check(record)
+                        processed += 1
+                    else:
+                        skipped += 1
                 continue
 
             # --- IP / IP6 lines ---
             m = re.match(
-                r'(IP[6]?)\s+([^>]+)\s+>\s+([^:]+):\s*(.*)',
+                # The endpoint separator is a colon followed by whitespace.
+                # IPv6 address literals contain colons, so splitting at the
+                # first colon truncates the destination before its port.
+                r'(IP[6]?)\s+([^>]+)\s+>\s+(.+?):\s+(.*)',
                 rest_of_line,
             )
             if not m:
@@ -310,11 +390,28 @@ def _replay_text_log(log_path: str, rule_engine):
             src_host, src_port = _parse_tcpdump_endpoint(src_ep.strip())
             dst_host, dst_port = _parse_tcpdump_endpoint(dst_ep.strip())
 
-            # SYN-only flag: [S] is initial SYN; [S.] is SYN-ACK (server response)
-            is_syn_ack  = bool(re.search(r'Flags\s+\[S\.', detail))
-            is_any_syn  = bool(re.search(r'Flags\s+\[S',  detail))
-            initial_syn = is_any_syn and not is_syn_ack
-            syn_flag    = is_any_syn
+            # Preserve all tcpdump TCP flag bits so rules that detect FIN/NULL/
+            # Xmas scans work on text replays as well as binary PCAPs.
+            tcp_flags = None
+            flags_match = re.search(r'Flags\s+\[([^]]*)\]', detail)
+            if flags_match:
+                flag_text = flags_match.group(1).strip()
+                if flag_text.lower() in ("", "none"):
+                    tcp_flags = 0
+                else:
+                    flag_bits = {
+                        "F": 0x01, "S": 0x02, "R": 0x04, "P": 0x08,
+                        ".": 0x10, "A": 0x10, "U": 0x20, "E": 0x40,
+                        "W": 0x80,
+                    }
+                    if all(char in flag_bits for char in flag_text):
+                        tcp_flags = 0
+                        for char in flag_text:
+                            tcp_flags |= flag_bits[char]
+
+            is_any_syn = bool(tcp_flags is not None and tcp_flags & 0x02)
+            initial_syn = is_any_syn and not bool(tcp_flags & 0x10)
+            syn_flag = is_any_syn
 
             protocol = "TCP" if "Flags" in detail else (
                 "UDP" if "UDP" in rest_of_line else proto_name
@@ -330,6 +427,7 @@ def _replay_text_log(log_path: str, rule_engine):
                 "protocol":    protocol,
                 "syn_flag":    syn_flag,
                 "initial_syn": initial_syn,
+                "tcp_flags": tcp_flags,
                 "timestamp":   ts,
                 "event_timestamp": ts,
                 "processing_timestamp": time.time(),

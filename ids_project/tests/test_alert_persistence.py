@@ -265,20 +265,36 @@ class TestAlertPersistence(unittest.TestCase):
         try:
             spool_count_before = engine._spool.count()
             # Deterministically model a full queue without racing the writer thread.
-            with patch.object(engine._alert_queue, "put_nowait", side_effect=queue.Full):
-                engine.check({
-                    "type": "IP",
-                    "src_ip": "198.51.100.42",
-                    "dst_ip": "10.0.0.1",
-                    "protocol": "TCP",
-                    "timestamp": time.time(),
-                })
+            with patch.object(engine._spool, "append", wraps=engine._spool.append) as spool_append:
+                with patch.object(engine._alert_queue, "put_nowait", side_effect=queue.Full):
+                    engine.check({
+                        "type": "IP",
+                        "src_ip": "198.51.100.42",
+                        "dst_ip": "10.0.0.1",
+                        "protocol": "TCP",
+                        "timestamp": time.time(),
+                    })
 
-            self.assertEqual(engine._spool.count(), spool_count_before + 1)
+            # The async writer can recover the just-spooled alert immediately
+            # when SQLite is available. Assert the backpressure path attempted
+            # a durable append, then verify the alert survived as either spool
+            # data or a database row after shutdown.
+            self.assertTrue(spool_append.called)
             self.assertEqual(engine._stats["alerts_dropped"], 0)
-            with open(engine._spool.spool_path, encoding="utf-8") as f:
-                alerts = [json.loads(line) for line in f if line.strip()]
-            self.assertTrue(any(a.get("rule_name") == "BLOCKLIST" for a in alerts))
+            engine.flush()
+            persisted = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE rule_name = 'BLOCKLIST'"
+            ).fetchone()[0]
+            self.assertGreaterEqual(engine._spool.count(), spool_count_before)
+            self.assertGreaterEqual(persisted + engine._spool.count(), 1)
+            alerts = []
+            if os.path.exists(engine._spool.spool_path):
+                with open(engine._spool.spool_path, encoding="utf-8") as f:
+                    alerts = [json.loads(line) for line in f if line.strip()]
+            self.assertTrue(
+                any(a.get("rule_name") == "BLOCKLIST" for a in alerts)
+                or persisted > 0
+            )
         finally:
             engine.flush()
 

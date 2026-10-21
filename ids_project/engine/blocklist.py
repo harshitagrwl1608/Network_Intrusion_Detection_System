@@ -16,6 +16,8 @@ import ipaddress
 import os
 import time
 import logging
+import stat
+import tempfile
 from collections import namedtuple
 
 logger = logging.getLogger(__name__)
@@ -26,6 +28,32 @@ BLOCKLIST_MAX_AGE_HOURS = 24
 BlocklistData = namedtuple("BlocklistData", ["exact", "networks"])
 
 
+def atomic_write_text(path: str, content: str):
+    """Replace a text file atomically using a unique temporary file beside it."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        mode = 0o644  # threat feed data is shared by the updater and IDS process
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=directory
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except OSError:
+            logger.warning("Could not remove blocklist temp file %s", tmp_path)
+
+
 def download_blocklist(url: str, path: str) -> bool:
     """Download blocklist from URL, save to path atomically. Returns True on success."""
     try:
@@ -33,12 +61,7 @@ def download_blocklist(url: str, path: str) -> bool:
         logger.info(f"Downloading blocklist from {url} ...")
         r = requests.get(url, timeout=15)
         r.raise_for_status()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        # Write to a temp file first, then rename for atomicity
-        tmp_path = path + ".tmp"
-        with open(tmp_path, "w") as f:
-            f.write(r.text)
-        os.replace(tmp_path, path)
+        atomic_write_text(path, r.text)
         logger.info(f"Blocklist saved to {path} ({len(r.text)} bytes)")
         return True
     except Exception as e:
@@ -83,7 +106,12 @@ def load_blocklist(path: str, url: str = None) -> BlocklistData:
             if not line or line.startswith("#"):
                 continue
             # Some feeds include extra columns — take first token
-            token = line.split(",")[0].split()[0]
+            first_field = line.split(",", 1)[0].strip()
+            fields = first_field.split()
+            if not fields:
+                skipped += 1
+                continue
+            token = fields[0]
             if not token:
                 continue
             if "/" in token:

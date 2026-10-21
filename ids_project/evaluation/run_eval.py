@@ -39,13 +39,18 @@ Exit codes:
 
 import argparse
 import csv
+import io
+import ipaddress
 import json
 import logging
 import os
+import platform
 import sqlite3
 import sys
 import tempfile
 import time
+import uuid
+from datetime import datetime, timezone
 
 _HERE     = os.path.dirname(os.path.abspath(__file__))
 _IDS_ROOT = os.path.dirname(_HERE)
@@ -109,7 +114,188 @@ def _load_labels(path: str) -> list:
     if missing:
         logger.error(f"Labels CSV missing required columns: {missing}")
         sys.exit(2)
+    from engine.rules import (
+        ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
+        IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
+        TcpStealthScanRule, UdpScanRule,
+    )
+    known_rules = {
+        rule.name for rule in (
+            ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
+            IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
+            TcpStealthScanRule, UdpScanRule,
+        )
+    }
+    protocols = {"TCP", "UDP", "ICMP", "ICMPV6", "ARP"}
+    seen_ids = set()
+    for line_number, row in enumerate(rows, start=2):
+        scenario_id = (row.get("scenario_id") or "").strip()
+        expected_rule = (row.get("expected_rule") or "").strip()
+        if not scenario_id or scenario_id in seen_ids:
+            logger.error("Labels CSV row %d has an empty or duplicate scenario_id", line_number)
+            sys.exit(2)
+        seen_ids.add(scenario_id)
+        if expected_rule not in known_rules:
+            logger.error("Labels CSV row %d references unknown rule %r", line_number, expected_rule)
+            sys.exit(2)
+        for endpoint in ("src_ip", "dst_ip"):
+            value = (row.get(endpoint) or "").strip()
+            if value:
+                try:
+                    ipaddress.ip_address(value)
+                except ValueError:
+                    logger.error("Labels CSV row %d has invalid %s %r", line_number, endpoint, value)
+                    sys.exit(2)
+        port = (row.get("dst_port") or "").strip()
+        if port and (not port.isdigit() or not 1 <= int(port) <= 65535):
+            logger.error("Labels CSV row %d has invalid dst_port %r", line_number, port)
+            sys.exit(2)
+        protocol = (row.get("protocol") or "").strip().upper()
+        if protocol and protocol not in protocols:
+            logger.error("Labels CSV row %d has unsupported protocol %r", line_number, protocol)
+            sys.exit(2)
     return rows
+
+
+def _run_metadata() -> dict:
+    """Return reproducibility metadata without serializing secrets or host IPs."""
+    import config
+    from engine.rules import (
+        ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
+        IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
+        TcpStealthScanRule, UdpScanRule,
+    )
+
+    rules = (
+        ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
+        IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
+        TcpStealthScanRule, UdpScanRule,
+    )
+    setting_names = (
+        "PORT_SCAN_THRESHOLD", "UDP_SCAN_THRESHOLD", "TCP_STEALTH_SCAN_THRESHOLD",
+        "SYN_FLOOD_THRESHOLD",
+        "DISTRIBUTED_SYN_FLOOD_THRESHOLD", "DISTRIBUTED_SYN_FLOOD_MIN_SOURCES",
+        "ICMP_SWEEP_THRESHOLD", "TIME_WINDOW", "DNS_ENTROPY_THRESHOLD",
+        "DNS_QUERY_MAX_LEN", "DNS_FREQ_THRESHOLD", "DNS_FREQ_WINDOW",
+        "PAYLOAD_INSPECTION", "PAYLOAD_MAX_BYTES",
+    )
+    return {
+        "schema_version": 1,
+        "run_id": uuid.uuid4().hex,
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "python_version": platform.python_version(),
+        "rule_versions": {rule.name: rule.rule_version for rule in rules},
+        "settings": {name: getattr(config, name) for name in setting_names},
+        "trusted_host_count": len(getattr(config, "TRUSTED_HOSTS", ())),
+        "bounded_rule_state": {
+            "device_dedup_keys": 65_536,
+            "arp_identity_mappings": 65_536,
+            "arp_alert_cooldowns": 10_000,
+            "scan_keys_per_dimension": 10_000,
+            "tcp_stealth_scan_keys": 10_000,
+            "syn_flood_flow_keys": 8_192,
+            "icmp_sweep_sources": 4_096,
+            "dns_frequency_keys": 10_000,
+            "dns_alert_dedup_keys": 10_000,
+            "distributed_syn_targets": 2048,
+            "distributed_syn_packet_timestamps_per_target": getattr(
+                config, "DISTRIBUTED_SYN_FLOOD_THRESHOLD", 500
+            ),
+            "distributed_syn_sources_per_target": getattr(
+                config, "DISTRIBUTED_SYN_FLOOD_MIN_SOURCES", 20
+            ),
+        },
+        "payload_stream_limits": {
+            "timeout_s": 30,
+            "max_flows": 2048,
+            "max_buffer_bytes_per_flow": getattr(config, "PAYLOAD_MAX_BYTES", 512),
+            "max_reordered_segments": 8,
+        },
+    }
+
+
+def _alert_summary(alert: dict) -> dict:
+    keys = (
+        "rule_name", "src_ip", "dst_ip", "src_port", "dst_port",
+        "protocol", "severity", "confidence", "detail", "timestamp",
+    )
+    return {key: alert.get(key) for key in keys}
+
+
+def _scenario_results(scenarios: list, tp: list, fn: list) -> list[dict]:
+    matched = {sc.get("scenario_id"): alert for sc, alert in tp}
+    missed = {sc.get("scenario_id") for sc in fn}
+    results = []
+    for scenario in scenarios:
+        scenario_id = scenario.get("scenario_id")
+        alert = matched.get(scenario_id)
+        results.append({
+            "scenario_id": scenario_id,
+            "expected_rule": scenario.get("expected_rule"),
+            "description": scenario.get("description", ""),
+            "expected": {
+                "src_ip": scenario.get("src_ip") or None,
+                "dst_ip": scenario.get("dst_ip") or None,
+                "dst_port": scenario.get("dst_port") or None,
+                "protocol": scenario.get("protocol") or None,
+            },
+            "result": "TP" if alert else ("FN" if scenario_id in missed else "UNASSESSED"),
+            "matched_alert": _alert_summary(alert) if alert else None,
+        })
+    return results
+
+
+def _write_json(path: str, result: dict):
+    from engine.blocklist import atomic_write_text
+    atomic_write_text(path, json.dumps(result, indent=2) + "\n")
+
+
+def _write_csv(path: str, result: dict):
+    """Write per-scenario outcomes and every unmatched/benign alert as flat CSV rows."""
+    fields = [
+        "record_type", "result", "scenario_id", "expected_rule", "description",
+        "expected_src_ip", "expected_dst_ip", "expected_dst_port", "expected_protocol",
+        "alert_rule", "alert_src_ip", "alert_dst_ip", "alert_src_port",
+        "alert_dst_port", "alert_protocol", "severity", "confidence", "detail",
+    ]
+    rows = []
+    for scenario in result.get("scenario_results", []):
+        expected = scenario.get("expected", {})
+        alert = scenario.get("matched_alert") or {}
+        rows.append({
+            "record_type": "scenario", "result": scenario.get("result"),
+            "scenario_id": scenario.get("scenario_id"),
+            "expected_rule": scenario.get("expected_rule"),
+            "description": scenario.get("description"),
+            "expected_src_ip": expected.get("src_ip"),
+            "expected_dst_ip": expected.get("dst_ip"),
+            "expected_dst_port": expected.get("dst_port"),
+            "expected_protocol": expected.get("protocol"),
+            "alert_rule": alert.get("rule_name"),
+            "alert_src_ip": alert.get("src_ip"), "alert_dst_ip": alert.get("dst_ip"),
+            "alert_src_port": alert.get("src_port"), "alert_dst_port": alert.get("dst_port"),
+            "alert_protocol": alert.get("protocol"), "severity": alert.get("severity"),
+            "confidence": alert.get("confidence"), "detail": alert.get("detail"),
+        })
+    for record_type, alerts in (
+        ("FP_attack", result.get("unmatched_attack_alerts", [])),
+        ("FP_benign", result.get("benign_alerts", [])),
+    ):
+        for alert in alerts:
+            rows.append({
+                "record_type": record_type, "result": record_type,
+                "alert_rule": alert.get("rule_name"),
+                "alert_src_ip": alert.get("src_ip"), "alert_dst_ip": alert.get("dst_ip"),
+                "alert_src_port": alert.get("src_port"), "alert_dst_port": alert.get("dst_port"),
+                "alert_protocol": alert.get("protocol"), "severity": alert.get("severity"),
+                "confidence": alert.get("confidence"), "detail": alert.get("detail"),
+            })
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=fields, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    from engine.blocklist import atomic_write_text
+    atomic_write_text(path, output.getvalue())
 
 
 def _replay_into(pcap: str, db_path: str, arp_path: str, bl_path: str):
@@ -139,7 +325,9 @@ def _replay_into(pcap: str, db_path: str, arp_path: str, bl_path: str):
     logger.info(f"Replaying: {pcap}")
     replay_pcap(pcap, tracking_engine)
     tracking_engine.flush()
-    logger.info(f"Stats: {tracking_engine.engine._stats}")
+    stats = tracking_engine.engine._stats.copy()
+    logger.info(f"Stats: {stats}")
+    return stats
 
 
 def _match(scenarios: list, alerts: list) -> tuple:
@@ -305,6 +493,8 @@ def main():
     parser.add_argument("--labels",      default=DEFAULT_LABELS)
     parser.add_argument("--blocklist",   default=DEFAULT_BLOCKLIST)
     parser.add_argument("--out-json",    default=None)
+    parser.add_argument("--out-csv",     default=None,
+                        help="Optional flat CSV of scenario outcomes and FP alerts")
     parser.add_argument("--no-generate", action="store_true",
                         help="Skip generating test fixtures")
     args = parser.parse_args()
@@ -338,10 +528,10 @@ def main():
 
     try:
         logger.info("Phase 1/2: replaying attack PCAP ...")
-        _replay_into(args.attack, attack_db, attack_arp, args.blocklist)
+        attack_stats = _replay_into(args.attack, attack_db, attack_arp, args.blocklist)
 
         logger.info("Phase 2/2: replaying benign PCAP ...")
-        _replay_into(args.benign, benign_db, benign_arp, args.blocklist)
+        benign_stats = _replay_into(args.benign, benign_db, benign_arp, args.blocklist)
 
         attack_alerts = _read_alerts(attack_db)
         benign_alerts = _read_alerts(benign_db)
@@ -352,11 +542,34 @@ def main():
             args.attack, args.benign, args.labels,
             scenarios, tp, fn, fp_attack, benign_alerts,
         )
+        result["metadata"] = _run_metadata()
+        result["scenario_results"] = _scenario_results(scenarios, tp, fn)
+        result["unmatched_attack_alerts"] = [_alert_summary(a) for a in fp_attack]
+        result["benign_alerts"] = [_alert_summary(a) for a in benign_alerts]
+        result["replay_stats"] = {"attack": attack_stats, "benign": benign_stats}
 
         if args.out_json:
-            with open(args.out_json, "w") as f:
-                json.dump(result, f, indent=2)
+            _write_json(args.out_json, result)
             logger.info(f"JSON results → {args.out_json}")
+        if args.out_csv:
+            _write_csv(args.out_csv, result)
+            logger.info(f"CSV results → {args.out_csv}")
+
+        persistence_failed = False
+        for capture_name, stats, alerts in (
+            ("attack", attack_stats, attack_alerts),
+            ("benign", benign_stats, benign_alerts),
+        ):
+            if (stats.get("alerts_dropped", 0) or stats.get("alerts_spooled", 0)
+                    or stats.get("shutdown_timeout")
+                    or stats.get("alert_writes", 0) != len(alerts)):
+                logger.error(
+                    "%s replay persistence incomplete: stats=%s, persisted_alerts=%d",
+                    capture_name, stats, len(alerts),
+                )
+                persistence_failed = True
+        if persistence_failed:
+            sys.exit(2)
 
         # Exit 0 only when ALL three conditions are satisfied:
         #   no missed scenarios, no unmatched attack alerts, no benign FPs.

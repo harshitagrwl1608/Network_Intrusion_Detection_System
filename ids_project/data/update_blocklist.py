@@ -28,6 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger("blocklist-updater")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from engine.blocklist import atomic_write_text
 
 BLOCKLIST_SOURCES = [
     {
@@ -81,13 +82,13 @@ def load_existing(path: str) -> set:
 
 
 def write_blocklist(path: str, ips: set):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write(f"# IDS Blocklist — auto-updated {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"# Sources: {', '.join(s['name'] for s in BLOCKLIST_SOURCES)}\n")
-        f.write(f"# Total IPs: {len(ips)}\n\n")
-        for ip in sorted(ips):
-            f.write(ip + "\n")
+    lines = [
+        f"# IDS Blocklist — auto-updated {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
+        f"# Sources: {', '.join(s['name'] for s in BLOCKLIST_SOURCES)}\n",
+        f"# Total IPs: {len(ips)}\n\n",
+    ]
+    lines.extend(ip + "\n" for ip in sorted(ips))
+    atomic_write_text(path, "".join(lines))
     logger.info(f"Blocklist written: {len(ips)} IPs -> {path}")
 
 

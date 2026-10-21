@@ -37,7 +37,6 @@ import config
 from storage.db import get_connection, init_db
 from engine.blocklist import load_blocklist, BlocklistData
 from engine.rules import RuleEngine
-from capture.sniffer import replay_pcap
 
 
 class ReplayClock:
@@ -141,6 +140,9 @@ def run_standalone_replay(pcap_path: str, blocklist_path: str = None,
 
     tracking_engine = create_replay_engine(conn, blocklist, c)
     logging.info(f"Replaying: {pcap_path}")
+    # Keep Scapy (and its host-interface discovery) out of engine-factory
+    # imports. This module's clock/factory is also used by isolated tests.
+    from capture.sniffer import replay_pcap
     replay_pcap(pcap_path, tracking_engine)
     tracking_engine.flush()
     logging.info("Replay complete. Alerts written to database.")
