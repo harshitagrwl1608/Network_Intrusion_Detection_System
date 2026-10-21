@@ -1360,7 +1360,7 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
         "PATH_TRAVERSAL",
         re.compile(
             rb"(?i)(\.\.[\\/]\.\.[\\/]|\.\.%2[fF]|%2[eE]%2[eE]%2[fF]"
-            rb"|/etc/passwd|/etc/shadow|/proc/self)"
+            rb"|/etc/passwd|/etc/shadow|/proc/self|win\.ini|boot\.ini)"
         ),
         "heuristic",
     ),
@@ -1445,9 +1445,25 @@ _DPI_PORTS: set[int] = {
 }
 
 
+def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
+    """Iteratively percent-decode *data* up to *max_passes* times or until fixed point."""
+    current = data
+    for _ in range(max_passes):
+        if b"%" not in current:
+            break
+        try:
+            next_decoded = unquote_to_bytes(current)
+        except Exception:
+            break
+        if next_decoded == current:
+            break
+        current = next_decoded
+    return current
+
+
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.4"
+    rule_version = "1.5"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048):
@@ -1587,22 +1603,58 @@ class PayloadRule:
 
         packet_sample = payload[: self.max_bytes]
         stream_sample = self._update_stream(record, payload)
-        samples: list[tuple[bytes, str]] = [(packet_sample, "packet")]
+        base_samples: list[tuple[bytes, str]] = [(packet_sample, "packet")]
         if stream_sample and stream_sample != packet_sample:
-            samples.append((stream_sample, "tcp_stream"))
-        # Inspect common single-encoded URL payloads as well as the raw bytes.
-        # '+' is a space in form-encoded values; retain the raw view too.
-        for sample, source in list(samples):
-            decoded = unquote_to_bytes(sample) if b"%" in sample else sample
+            base_samples.append((stream_sample, "tcp_stream"))
+
+        samples: list[tuple[bytes, str]] = list(base_samples)
+        seen_representations: set[bytes] = {s[0] for s in samples}
+
+        # Inspect single- and multi-pass URL-decoded views as well as form-encoded views.
+        for sample, source in base_samples:
             if b"%" in sample:
-                if decoded != sample:
+                decoded = unquote_to_bytes(sample)
+                if decoded not in seen_representations:
                     samples.append((decoded, "percent_decoded"))
+                    seen_representations.add(decoded)
+
+                multi_dec = _multi_unquote(sample, max_passes=3)
+                if multi_dec not in seen_representations:
+                    samples.append((multi_dec, "multi_pass_decoded"))
+                    seen_representations.add(multi_dec)
+
             if b"+" in sample:
                 # Decode raw form '+' as space before percent escapes so an
                 # encoded literal %2B remains a plus sign.
                 form_decoded = unquote_to_bytes(sample.replace(b"+", b" "))
-                if form_decoded != decoded:
+                if form_decoded not in seen_representations:
                     samples.append((form_decoded, "form_decoded"))
+                    seen_representations.add(form_decoded)
+
+                multi_form = _multi_unquote(sample.replace(b"+", b" "), max_passes=3)
+                if multi_form not in seen_representations:
+                    samples.append((multi_form, "multi_pass_decoded"))
+                    seen_representations.add(multi_form)
+
+        # Deobfuscation and evasion normalization passes:
+        # - Stripping and normalizing null bytes (%00 or \x00)
+        # - Collapsing inline SQL comments (/*...*/) to spaces
+        for sample, source in list(samples):
+            if b"\x00" in sample:
+                null_stripped = sample.replace(b"\x00", b"")
+                if null_stripped not in seen_representations:
+                    samples.append((null_stripped, "null_byte_stripped"))
+                    seen_representations.add(null_stripped)
+                null_spaced = sample.replace(b"\x00", b" ")
+                if null_spaced not in seen_representations:
+                    samples.append((null_spaced, "null_byte_normalized"))
+                    seen_representations.add(null_spaced)
+
+            if b"/*" in sample and b"*/" in sample:
+                comment_normalized = re.sub(rb"/\*.*?\*/", b" ", sample)
+                if comment_normalized not in seen_representations:
+                    samples.append((comment_normalized, "comment_normalized"))
+                    seen_representations.add(comment_normalized)
 
         # Collect ALL matching signatures (§3.4 — do not return on first match)
         hits: list[dict] = []

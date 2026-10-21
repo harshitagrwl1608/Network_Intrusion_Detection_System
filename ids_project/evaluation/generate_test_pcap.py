@@ -585,6 +585,25 @@ def gen_icmp_flood(base: float) -> list:
     return pkts
 
 
+def gen_double_encoded_traversal(base: float) -> list:
+    """S30: Double URL-encoded path traversal evasion attempt → PAYLOAD_HIT."""
+    scenario(
+        "S30", "PAYLOAD_HIT",
+        "Double URL-encoded directory traversal and file retrieval evasion",
+        src_ip="192.168.1.84", dst_ip="192.168.1.1",
+        dst_port="80", protocol="TCP",
+    )
+    # %252e%252e/%252e%252e/ -> %2e%2e/%2e%2e/ -> ../../
+    # %2565%2574%2563/%2570%2561%2573%2573%2577%2564 -> %65%74%63/%70%61%73%73%77%64 -> etc/passwd
+    payload = b"GET /download?file=%252e%252e/%252e%252e/%2565%2574%2563/%2570%2561%2573%2573%2577%2564 HTTP/1.1\r\nHost: target\r\n\r\n"
+    pkt = (_make_eth() /
+           IP(src="192.168.1.84", dst="192.168.1.1") /
+           TCP(sport=54330, dport=80, flags="PA") /
+           Raw(load=payload))
+    pkt.time = base + 245.0
+    return [pkt]
+
+
 # ---------------------------------------------------------------------------
 # Benign negative packet generators  (should NOT fire any rule)
 # ---------------------------------------------------------------------------
@@ -811,6 +830,23 @@ def gen_benign_icmp_flood_below_threshold(base: float) -> list:
     return pkts
 
 
+def gen_benign_encoded_urls(base: float) -> list:
+    """Benign percent-encoded queries (search for C++ and email) should NOT fire PayloadRule."""
+    pkts = []
+    payloads = [
+        b"GET /search?q=C%2B%2B%20programming HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        b"GET /profile?email=user%40example.com&tag=100%25 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+    ]
+    for i, payload in enumerate(payloads):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.38", dst="93.184.216.34") /
+               TCP(sport=50100 + i, dport=80, flags="PA") /
+               Raw(load=payload))
+        pkt.time = base + 15.0 + i * 1.0
+        pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -852,6 +888,7 @@ def generate_all():
     attack_pkts += gen_deserialization(base)
     attack_pkts += gen_tcp_flag_anomaly(base)
     attack_pkts += gen_icmp_flood(base)
+    attack_pkts += gen_double_encoded_traversal(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)
@@ -876,6 +913,7 @@ def generate_all():
     benign_pkts += gen_benign_dns_few_subdomains(base)
     benign_pkts += gen_benign_rst_handshakes(base)
     benign_pkts += gen_benign_icmp_flood_below_threshold(base)
+    benign_pkts += gen_benign_encoded_urls(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")

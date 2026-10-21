@@ -353,9 +353,46 @@ Under the initial architecture (`5d22fba`):
 - `python3 ids_project/evaluation/run_eval.py`: OK (29/29 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
 - `git diff --check`: Exit code 0.
 
+## Cycle 11: Multi-Pass URL Decoding & Evasion Hardening in `PayloadRule`
+
+### 1. Root Cause Hypothesis & Goal
+- **Multi-Pass / Double URL Encoding Evasion:** Single-pass URL decoding (`unquote_to_bytes()`) only decodes the outer percent-encoding wrapper. Attackers evade DPI filters by double-encoding attack vectors (e.g. `%252e%252e%252f` -> `%2e%2e%2f` -> `../`, or `%2555NION%2520SELECT` -> `%55NION%20SELECT` -> `UNION SELECT`).
+- **Null-Byte Poisoning:** Attackers use null-bytes (`%00` or raw `\x00`) to split words (`/bin/s\x00h`) or terminate string checks while bypassing keyword filters. Normalizing payloads via null-byte stripping (`null_byte_stripped`) and token space-normalization (`null_byte_normalized`) closes these evasion paths.
+- **Inline SQL Comment Obfuscation:** In SQL injection, inline comments (`/**/` or `/*comment*/`) act as whitespace in database engines but fail basic `\s+` regex boundaries (e.g. `UNION/**/SELECT`). Collapsing SQL comments to spaces (`comment_normalized`) allows canonical keyword matching without ReDoS vulnerabilities.
+
+### 2. Implementation
+- In `ids_project/engine/rules.py`:
+  - Implemented `_multi_unquote(data, max_passes=3)` for iterative decoding until a fixed-point is reached.
+  - Bumped `PayloadRule.rule_version` to `"1.5"`.
+  - Added Windows path traversal indicators (`win.ini`, `boot.ini`) to `PATH_TRAVERSAL` signature.
+  - In `PayloadRule.check()`:
+    - Generated multi-pass URL-decoded views (`"multi_pass_decoded"`) for standard and form-encoded data.
+    - Generated null-byte stripped (`"null_byte_stripped"`) and null-byte space-normalized (`"null_byte_normalized"`) views.
+    - Generated inline SQL comment-collapsed views (`"comment_normalized"`).
+    - Preserved first-match precedence so raw and single-decoded views maintain their canonical representations.
+- In `ids_project/tests/test_payload_detection.py`:
+  - Added 7 unit tests verifying double URL-encoded SQLi, double URL-encoded path traversal, triple URL-encoded command injection, null-byte word splitting, null-byte token separation, and SQL inline comment evasion.
+- In `ids_project/evaluation/generate_test_pcap.py`:
+  - Added attack scenario S30: `PAYLOAD_HIT` via double URL-encoded path traversal (`%252e%252e/%252e%252e/%2565%2574%2563/%2570%2561%2573%2573%2577%2564`).
+  - Added benign negative scenario: `gen_benign_encoded_urls` with benign percent-encoded search queries and email tags.
+
+### 3. Files Changed
+- `ids_project/engine/rules.py`
+- `ids_project/tests/test_payload_detection.py`
+- `ids_project/evaluation/generate_test_pcap.py`
+- `ids_project/evaluation/scenarios/test_labels.csv`
+- `ids_project/data/test_attacks.pcap`
+- `ids_project/data/test_benign.pcap`
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_payload_detection.py`: OK (19 tests passed).
+- `python3 -m unittest discover ids_project/tests`: OK (181 tests passed in 48.5s).
+- `python3 ids_project/evaluation/run_eval.py`: OK (30/30 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
+- `git diff --check`: Exit code 0.
+
 ---
 
 ## Final Session Summary & Checklist
-- **Session Stop Condition:** Completed Cycles 8, 9, and 10 enhancements, comprehensive tests, and clean evaluation.
-- **Total Cycles Completed:** 10
-- **All Applicable Regression Tests:** 174 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (29/29 scenarios).
+- **Session Stop Condition:** Completed Cycles 8, 9, 10, and 11 enhancements, comprehensive tests, and clean evaluation.
+- **Total Cycles Completed:** 11
+- **All Applicable Regression Tests:** 181 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (30/30 scenarios).

@@ -120,6 +120,63 @@ class TestPayloadRule(unittest.TestCase):
         self.rule.check(self.packet(b"ordinary", 1000, tcp_flags=0x04))
         self.assertEqual(self.rule._streams, {})
 
+    def test_double_url_encoded_sqli_is_detected(self):
+        # %2555 -> %55 -> U; %2520 -> %20 -> space
+        alert = self.rule.check(self.packet(b"GET /?q=%2555NION%2520SELECT", 4000))
+        self.assertIsNotNone(alert)
+        hit = alert["evidence"]["hits"][0]
+        self.assertEqual(hit["signature"], "SQL_INJECTION")
+        self.assertEqual(hit["representation"], "multi_pass_decoded")
+
+    def test_double_url_encoded_path_traversal(self):
+        # Double-encoded ../../ and double-encoded win.ini:
+        # %252e%252e/%252e%252e/ -> %2e%2e/%2e%2e/ -> ../../
+        # %2577%2569%256e%252e%2569%256e%2569 -> %77%69%6e%2e%69%6e%69 -> win.ini
+        alert = self.rule.check(self.packet(b"GET /dl?f=%252e%252e/%252e%252e/%2577%2569%256e%252e%2569%256e%2569", 4100))
+        self.assertIsNotNone(alert)
+        hit = alert["evidence"]["hits"][0]
+        self.assertEqual(hit["signature"], "PATH_TRAVERSAL")
+        self.assertEqual(hit["representation"], "multi_pass_decoded")
+
+    def test_triple_url_encoded_command_injection(self):
+        # %25252fbin%25252fsh -> %252fbin%252fsh -> %2fbin%2fsh -> /bin/sh
+        alert = self.rule.check(self.packet(b"GET /run?c=%25252fbin%25252fsh", 4200))
+        self.assertIsNotNone(alert)
+        hit = alert["evidence"]["hits"][0]
+        self.assertEqual(hit["signature"], "CMD_INJECTION")
+        self.assertEqual(hit["representation"], "multi_pass_decoded")
+
+    def test_null_byte_word_splitting_evasion(self):
+        # /bin/s\x00h -> /bin/sh via null_byte_stripped
+        alert = self.rule.check(self.packet(b"GET /run?c=/bin/s%00h", 4300))
+        self.assertIsNotNone(alert)
+        hit = alert["evidence"]["hits"][0]
+        self.assertEqual(hit["signature"], "CMD_INJECTION")
+        self.assertEqual(hit["representation"], "null_byte_stripped")
+
+    def test_null_byte_token_separation_evasion(self):
+        # UNION\x00SELECT -> UNION SELECT via null_byte_normalized
+        alert = self.rule.check(self.packet(b"GET /?q=UNION%00SELECT", 4400))
+        self.assertIsNotNone(alert)
+        hit = alert["evidence"]["hits"][0]
+        self.assertEqual(hit["signature"], "SQL_INJECTION")
+        self.assertEqual(hit["representation"], "null_byte_normalized")
+
+    def test_inline_sql_comment_evasion(self):
+        # UNION/**/SELECT -> UNION SELECT via comment_normalized
+        alert = self.rule.check(self.packet(b"GET /search?id=1'/**/UNION/**/SELECT/**/1,2", 4500))
+        self.assertIsNotNone(alert)
+        hit = alert["evidence"]["hits"][0]
+        self.assertEqual(hit["signature"], "SQL_INJECTION")
+        self.assertEqual(hit["representation"], "comment_normalized")
+
+    def test_or_1_equals_1_inline_comment_evasion(self):
+        alert = self.rule.check(self.packet(b"GET /login?user=admin'/*comment*/OR/*comment*/1=1", 4600))
+        self.assertIsNotNone(alert)
+        hit = alert["evidence"]["hits"][0]
+        self.assertEqual(hit["signature"], "SQL_INJECTION")
+        self.assertEqual(hit["representation"], "comment_normalized")
+
 
 if __name__ == "__main__":
     unittest.main()
