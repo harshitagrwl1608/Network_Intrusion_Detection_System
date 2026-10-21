@@ -425,6 +425,117 @@ class UdpScanRule(PortScanRule):
         super().__init__(threshold, window, protocol="UDP", max_states=max_states)
 
 
+class UdpFloodRule:
+    """
+    Detect high-rate UDP packet bursts directed at a single destination host.
+
+    Differentiates between multi-port UDP port scans (tracked by UdpScanRule)
+    and single-target UDP volumetric floods.
+
+    Exemptions:
+    - DNS responses from servers (src_port == 53).
+    - DHCP responses (src_port in (67, 68)).
+    - NTP server responses (src_port == 123).
+    - Configured TRUSTED_HOSTS.
+    """
+
+    name = "UDP_FLOOD"
+    rule_version = "1.0"
+    ALERT_COOLDOWN_S: float = 60.0
+    _EXEMPT_SRC_PORTS: set[int] = {53, 67, 68, 123}
+
+    def __init__(self, threshold: int = 50, window: int = 5,
+                 max_flows: int = 4096, cooldown: float = 60.0):
+        self.threshold = max(1, int(threshold))
+        self.window = max(1, int(window))
+        self.max_flows = max(1, int(max_flows))
+        self.cooldown = float(cooldown)
+        self._lock = threading.RLock()
+        # (src_ip, dst_ip) → list of timestamps
+        self._history: dict[tuple, list[float]] = {}
+        # (src_ip, dst_ip) → last_alert_time
+        self._cooldown: dict[tuple, float] = {}
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.window
+        cutoff_cd = now - self.cooldown
+        with self._lock:
+            for key in list(self._history):
+                active = [t for t in self._history[key] if cutoff <= t <= now]
+                if active:
+                    self._history[key] = active
+                else:
+                    del self._history[key]
+            for key in list(self._cooldown):
+                if self._cooldown[key] < cutoff_cd:
+                    del self._cooldown[key]
+
+    def check(self, record: dict) -> dict | None:
+        if record.get("type") != "IP" or record.get("protocol") != "UDP":
+            return None
+
+        src = record.get("src_ip", "")
+        dst = record.get("dst_ip", "")
+        if not src or not dst or _is_trusted(src):
+            return None
+
+        src_port = record.get("src_port")
+        if src_port in self._EXEMPT_SRC_PORTS:
+            return None
+
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        key = (src, dst)
+
+        with self._lock:
+            last_alert = self._cooldown.get(key)
+            if last_alert is not None and now - last_alert < self.cooldown:
+                return None
+
+            if key not in self._history and len(self._history) >= self.max_flows:
+                self._history.pop(next(iter(self._history)))
+
+            history = self._history.get(key, [])
+            if history and now < history[-1]:
+                return None
+            history = [t for t in history if 0 <= now - t <= self.window]
+            history.append(now)
+            self._history[key] = history
+
+            if len(history) < self.threshold:
+                return None
+
+            self._cooldown[key] = now
+            window_start = history[0]
+            count = len(history)
+            self._history.pop(key, None)
+
+            logger.debug(f"{self.name} fired: {src} -> {dst} ({count} pkts in {self.window}s)")
+            return {
+                "rule_name": self.name,
+                "rule_version": self.rule_version,
+                "src_ip": src,
+                "dst_ip": dst,
+                "src_port": src_port,
+                "dst_port": record.get("dst_port"),
+                "protocol": "UDP",
+                "severity": "high",
+                "confidence": "heuristic",
+                "detail": (
+                    f"{src} sent {count} UDP packets to {dst} in {self.window}s "
+                    f"— possible targeted UDP flood"
+                ),
+                "evidence": {
+                    "packet_count": count,
+                    "target_host": dst,
+                    "target_port": record.get("dst_port"),
+                    "window_s": self.window,
+                    "threshold": self.threshold,
+                },
+                "window_start": window_start,
+                "window_end": now,
+            }
+
+
 class TcpStealthScanRule:
     """Detect vertical FIN, NULL, and Xmas TCP probes."""
 
@@ -2742,6 +2853,10 @@ class RuleEngine:
             PortScanRule(cfg.PORT_SCAN_THRESHOLD, cfg.TIME_WINDOW),
             UdpScanRule(
                 getattr(cfg, "UDP_SCAN_THRESHOLD", 15), cfg.TIME_WINDOW
+            ),
+            UdpFloodRule(
+                threshold=getattr(cfg, "UDP_FLOOD_THRESHOLD", 50),
+                window=getattr(cfg, "UDP_FLOOD_WINDOW", 5),
             ),
             TcpStealthScanRule(
                 getattr(cfg, "TCP_STEALTH_SCAN_THRESHOLD", 15), cfg.TIME_WINDOW

@@ -624,6 +624,25 @@ def gen_data_exfil(base: float) -> list:
     return pkts
 
 
+def gen_udp_flood(base: float) -> list:
+    """S32: 60 UDP packets targeting a single port on a single host in 2s → UDP_FLOOD."""
+    scenario(
+        "S32", "UDP_FLOOD",
+        "Targeted UDP flood: 60 packets sent to single destination port in <2s",
+        src_ip="192.168.1.99", dst_ip="192.168.1.1",
+        dst_port="5060", protocol="UDP",
+    )
+    pkts = []
+    for i in range(60):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.99", dst="192.168.1.1") /
+               UDP(sport=40000 + (i % 100), dport=5060) /
+               Raw(load=b"FLOOD" * 10))
+        pkt.time = base + 260.0 + i * 0.03
+        pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Benign negative packet generators  (should NOT fire any rule)
 # ---------------------------------------------------------------------------
@@ -881,6 +900,19 @@ def gen_benign_small_outbound_transfers(base: float) -> list:
     return pkts
 
 
+def gen_benign_udp_flood_below_threshold(base: float) -> list:
+    """Fifteen UDP packets to a single port over 5s stay below the 50-packet UDP flood threshold."""
+    pkts = []
+    for i in range(15):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.40", dst="192.168.1.1") /
+               UDP(sport=41000 + i, dport=5060) /
+               Raw(load=b"PING"))
+        pkt.time = base + 17.0 + i * 0.3
+        pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -924,6 +956,7 @@ def generate_all():
     attack_pkts += gen_icmp_flood(base)
     attack_pkts += gen_double_encoded_traversal(base)
     attack_pkts += gen_data_exfil(base)
+    attack_pkts += gen_udp_flood(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)
@@ -950,6 +983,7 @@ def generate_all():
     benign_pkts += gen_benign_icmp_flood_below_threshold(base)
     benign_pkts += gen_benign_encoded_urls(base)
     benign_pkts += gen_benign_small_outbound_transfers(base)
+    benign_pkts += gen_benign_udp_flood_below_threshold(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")

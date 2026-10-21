@@ -432,9 +432,53 @@ Under the initial architecture (`5d22fba`):
 - `python3 ids_project/evaluation/run_eval.py`: OK (31/31 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
 - `git diff --check`: Exit code 0.
 
+## Cycle 13: Targeted UDP Packet Burst Detection (`UdpFloodRule`)
+
+### 1. Root Cause Hypothesis & Goal
+- **UDP Volumetric Floods vs. Multi-Port Scans:** `UdpScanRule` detects port-probing activity across distinct ports (`len(ports) >= threshold`), but fails to alert when an attacker bombards a single UDP service (e.g., DNS port 53, SIP port 5060, gaming port 27015, or random high ports) with dozens or hundreds of UDP packets in a short window.
+- **Flood Differentiation & Exemptions:** Legitimate high-rate UDP traffic includes DNS queries/responses, DHCP lease negotiation, and NTP time sync. To prevent false positives, `UdpFloodRule` must explicitly exempt packets originating from known protocol server ports (DNS: 53, DHCP: 67/68, NTP: 123) and `TRUSTED_HOSTS`, while tracking sliding-window packet counts per `(src_ip, dst_ip)`.
+- **Alert Flood Prevention:** Must enforce an alert cooldown (60 seconds) per host pair to prevent alert storms during sustained DDoS bursts.
+
+### 2. Implementation
+- In `ids_project/config.py`:
+  - Added `UDP_FLOOD_THRESHOLD = int(os.getenv("UDP_FLOOD_THRESHOLD", 50))` (50 UDP packets in window).
+  - Added `UDP_FLOOD_WINDOW = int(os.getenv("UDP_FLOOD_WINDOW", 5))` (5-second sliding window).
+- In `ids_project/engine/rules.py`:
+  - Implemented `UdpFloodRule`:
+    - Tracks sliding-window timestamps of UDP packets per `(src_ip, dst_ip)`.
+    - Exempts server response ports 53, 67, 68, 123 and `_is_trusted(src_ip)`.
+    - Triggers `high` severity alert when `len(history) >= threshold` (50 packets in 5s).
+    - Enforces 60-second cooldown per `(src_ip, dst_ip)`.
+    - Bound flow table to 4,096 entries and implemented `prune_stale(now)`.
+    - Registered `UdpFloodRule` in `RuleEngine.rules`.
+- In `ids_project/tests/test_udp_flood.py`:
+  - Created 7 comprehensive unit tests verifying threshold firing, sub-threshold silence, server port exemptions (DNS, NTP, DHCP), cooldown suppression, trusted host exemption, and stale flow pruning.
+- In `ids_project/evaluation/generate_test_pcap.py` & `run_eval.py`:
+  - Registered `UdpFloodRule` and metadata settings in `run_eval.py`.
+  - Added attack scenario S32: 60 UDP packets targeting port 5060 on `192.168.1.1` in 1.8s (`UDP_FLOOD`).
+  - Added benign negative scenario: 15 UDP packets over 5s staying well below the 50-packet threshold.
+  - Regenerated test PCAPs (1,130 attack packets, 774 benign packets) and labels (32 scenarios).
+
+### 3. Files Changed
+- `ids_project/config.py`
+- `ids_project/engine/rules.py`
+- `ids_project/tests/test_udp_flood.py` (New test suite)
+- `ids_project/evaluation/generate_test_pcap.py`
+- `ids_project/evaluation/run_eval.py`
+- `ids_project/evaluation/scenarios/test_labels.csv`
+- `ids_project/data/test_attacks.pcap`
+- `ids_project/data/test_benign.pcap`
+- `OVERNIGHT_STATUS.md`
+
+### 4. Commands Executed & Test Results
+- `python3 -m unittest ids_project/tests/test_udp_flood.py`: OK (7 tests passed).
+- `python3 -m unittest discover ids_project/tests`: OK (198 tests passed in 46.8s).
+- `python3 ids_project/evaluation/run_eval.py`: OK (32/32 scenarios, 0 benign FPs, 0 unmatched attack alerts, 100% Precision, 100% Recall, 100% F1, exit 0).
+- `git diff --check`: Exit code 0.
+
 ---
 
 ## Final Session Summary & Checklist
-- **Session Stop Condition:** Completed Cycles 8, 9, 10, 11, and 12 enhancements, comprehensive tests, and clean evaluation.
-- **Total Cycles Completed:** 12
-- **All Applicable Regression Tests:** 191 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (31/31 scenarios).
+- **Session Stop Condition:** Completed Cycles 8, 9, 10, 11, 12, and 13 enhancements, comprehensive tests, and clean evaluation.
+- **Total Cycles Completed:** 13
+- **All Applicable Regression Tests:** 198 unit tests passing + automated PCAP evaluation passing cleanly with 100% precision & recall (32/32 scenarios).

@@ -30,3 +30,4 @@ S28,TCP_FLAG_ANOMALY,192.168.1.97,192.168.1.1,80,TCP,Malformed TCP packet with c
 S29,ICMP_FLOOD,192.168.1.98,192.168.1.1,,ICMP,Targeted ICMP echo flood: 60 echo requests to single host in <2s
 S30,PAYLOAD_HIT,192.168.1.84,192.168.1.1,80,TCP,Double URL-encoded directory traversal and file retrieval evasion
 S31,DATA_EXFIL,192.168.1.85,203.0.113.85,9001,TCP,Outbound data exfiltration: 60KB transmitted from internal host to external host
+S32,UDP_FLOOD,192.168.1.99,192.168.1.1,5060,UDP,Targeted UDP flood: 60 packets sent to single destination port in <2s

@@ -118,14 +118,14 @@ def _load_labels(path: str) -> list:
         ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
         IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
         TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
-        TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule,
+        TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
     )
     known_rules = {
         rule.name for rule in (
             ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
             IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
             TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
-            TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule,
+            TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
         )
     }
     protocols = {"TCP", "UDP", "ICMP", "ICMPV6", "ARP"}
@@ -166,17 +166,18 @@ def _run_metadata() -> dict:
         ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
         IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
         TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
-        TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule,
+        TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
     )
 
     rules = (
         ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
         IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
         TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
-        TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule,
+        TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
     )
     setting_names = (
-        "PORT_SCAN_THRESHOLD", "UDP_SCAN_THRESHOLD", "TCP_STEALTH_SCAN_THRESHOLD",
+        "PORT_SCAN_THRESHOLD", "UDP_SCAN_THRESHOLD", "UDP_FLOOD_THRESHOLD", "UDP_FLOOD_WINDOW",
+        "TCP_STEALTH_SCAN_THRESHOLD",
         "SYN_FLOOD_THRESHOLD", "RST_FLOOD_THRESHOLD",
         "DISTRIBUTED_SYN_FLOOD_THRESHOLD", "DISTRIBUTED_SYN_FLOOD_MIN_SOURCES",
         "ICMP_SWEEP_THRESHOLD", "ICMP_FLOOD_THRESHOLD", "ICMP_FLOOD_WINDOW",
