@@ -50,6 +50,18 @@ class TestUdpFloodRule(unittest.TestCase):
 
         self.assertIsNone(alert)
 
+    def test_quic_port_uses_higher_web_burst_threshold(self):
+        rule = UdpFloodRule(threshold=50, web_threshold=100, window=5)
+        for i in range(99):
+            self.assertIsNone(rule.check(self._pkt(
+                "192.0.2.10", "198.51.100.20", src_port=52000,
+                dst_port=443, ts=100.0 + i * 0.01)))
+        alert = rule.check(self._pkt(
+            "192.0.2.10", "198.51.100.20", src_port=52000,
+            dst_port=443, ts=101.0))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["threshold"], 100)
+
     def test_dns_server_reply_is_exempt(self):
         # src_port == 53 is a DNS reply from a resolver, not a flood attack from the client
         for i in range(60):

@@ -113,7 +113,14 @@ def _events_match(a: dict, b: dict, tolerance: float = TIMESTAMP_TOLERANCE) -> b
         return False
     if a.get("dst_ip") != b.get("dst_ip"):
         return False
-    if a.get("dst_port") != b.get("dst_port"):
+    # Threshold rules aggregate packets across multiple destination ports, so
+    # the final packet that crosses the threshold can differ between engines.
+    # Compare those known scan families at host-pair scope; keep exact 5-tuples
+    # for every other alert type.
+    family_a = _scan_family(a)
+    family_b = _scan_family(b)
+    semantic_scan_match = family_a is not None and family_a == family_b
+    if not semantic_scan_match and a.get("dst_port") != b.get("dst_port"):
         return False
     # Protocol check only when both sides have a non-empty value
     proto_a = (a.get("protocol") or "").upper()
@@ -121,7 +128,19 @@ def _events_match(a: dict, b: dict, tolerance: float = TIMESTAMP_TOLERANCE) -> b
     if proto_a and proto_b and proto_a != proto_b:
         return False
     time_diff = abs((a.get("timestamp") or 0) - (b.get("timestamp") or 0))
-    return time_diff <= tolerance
+    allowed_time = max(tolerance, 120.0 if family_a == "slow_tcp_scan" else 10.0) if semantic_scan_match else tolerance
+    return time_diff <= allowed_time
+
+
+def _scan_family(event: dict) -> str | None:
+    """Normalize the paired TCP scan rules used by NetGuard and local Suricata."""
+    rule = str(event.get("rule_name") or "").upper()
+    signature = str(event.get("signature") or "").lower()
+    if rule == "SLOW_PORT_SCAN" or "local slow tcp syn burst" in signature:
+        return "slow_tcp_scan"
+    if rule == "PORT_SCAN" or "local tcp syn scan-like burst" in signature:
+        return "tcp_scan"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +204,7 @@ def print_agreement_report(results: dict):
     print(f"  Suricata-only:               {sur_only:4d}")
     print(f"  Agreement rate:              {agreement_pct:.1f}%")
     print("-" * 65)
-    print(f"  Match key: src_ip, dst_ip, dst_port, protocol, Δt≤{TIMESTAMP_TOLERANCE}s")
+    print("  Match key: exact events Δt≤5s; recognized TCP scan families use host pair and rule window")
     print("=" * 65)
 
     if results["netguard_only"]:

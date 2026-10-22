@@ -36,8 +36,10 @@ TCP_STEALTH_SCAN_THRESHOLD = int(os.getenv("TCP_STEALTH_SCAN_THRESHOLD", 15))  #
 UDP_SCAN_THRESHOLD = int(os.getenv("UDP_SCAN_THRESHOLD", 15))     # distinct UDP ports OR hosts in window
 UDP_FLOOD_THRESHOLD = int(os.getenv("UDP_FLOOD_THRESHOLD", 50))   # UDP packets to single target
 UDP_FLOOD_WINDOW = int(os.getenv("UDP_FLOOD_WINDOW", 5))         # seconds in flood window
+UDP_FLOOD_WEB_THRESHOLD = int(os.getenv("UDP_FLOOD_WEB_THRESHOLD", 500))  # QUIC/UDP 443 burst threshold
 SYN_FLOOD_THRESHOLD = int(os.getenv("SYN_FLOOD_THRESHOLD", 100))  # SYN packets in window
 RST_FLOOD_THRESHOLD = int(os.getenv("RST_FLOOD_THRESHOLD", 100))  # RST packets in window
+RST_RESPONSE_GRACE_SECONDS = float(os.getenv("RST_RESPONSE_GRACE_SECONDS", 5.0))  # Match SYN → closed-port RST
 DISTRIBUTED_SYN_FLOOD_THRESHOLD = int(os.getenv("DISTRIBUTED_SYN_FLOOD_THRESHOLD", 500))
 DISTRIBUTED_SYN_FLOOD_MIN_SOURCES = int(os.getenv("DISTRIBUTED_SYN_FLOOD_MIN_SOURCES", 20))
 TIME_WINDOW = int(os.getenv("TIME_WINDOW", 10))                    # seconds
@@ -84,6 +86,9 @@ DNS_SUBDOMAIN_WINDOW    = int(os.getenv("DNS_SUBDOMAIN_WINDOW", 60))     # secon
 # --- TLS Inspection (TlsAnomalyRule) ---
 TLS_INSPECTION = os.getenv("TLS_INSPECTION", "true").lower() in ("true", "1")
 TLS_COOLDOWN_S = float(os.getenv("TLS_COOLDOWN_S", 60.0))
+CLEAR_HTTP_TLS_COOLDOWN_S = float(os.getenv("CLEAR_HTTP_TLS_COOLDOWN_S", 600.0))
+CLEAR_HTTP_TLS_WINDOW_S = float(os.getenv("CLEAR_HTTP_TLS_WINDOW_S", 600.0))
+CLEAR_HTTP_TLS_MIN_REQUESTS = int(os.getenv("CLEAR_HTTP_TLS_MIN_REQUESTS", 2))
 
 # --- Analysis ---
 ANALYSIS_INTERVAL = int(os.getenv("ANALYSIS_INTERVAL", 30))       # seconds between runs
@@ -108,20 +113,29 @@ HISTORY_DAYS = int(os.getenv("HISTORY_DAYS", 7))
 # Raise threshold or increase window to reduce FPs on legitimate retry-heavy services.
 BRUTE_FORCE_THRESHOLD = int(os.getenv("BRUTE_FORCE_THRESHOLD", 20))  # SYN attempts in window
 BRUTE_FORCE_WINDOW    = int(os.getenv("BRUTE_FORCE_WINDOW", 60))     # seconds
+# Optional nonstandard auth/admin ports. Avoid generic web ports by default;
+# add deployment-specific admin endpoints explicitly, e.g. 8443,9443.
+BRUTE_FORCE_EXTRA_PORTS = tuple(
+    int(port.strip()) for port in os.getenv("BRUTE_FORCE_EXTRA_PORTS", "").split(",")
+    if port.strip().isdigit() and 1 <= int(port.strip()) <= 65535
+)
 
 # --- Slow (Low-and-Slow) Port Scan Detection (SlowPortScanRule) ---
 # Catches scanners that evade the 10s PortScanRule by spreading probes over a longer window.
 # Higher threshold than PortScanRule because the long window accumulates more incidental traffic.
 SLOW_SCAN_THRESHOLD = int(os.getenv("SLOW_SCAN_THRESHOLD", 30))  # distinct ports/hosts in window
 SLOW_SCAN_WINDOW    = int(os.getenv("SLOW_SCAN_WINDOW", 120))    # seconds (default: 2 minutes)
+SLOW_SCAN_COOLDOWN_S = float(os.getenv("SLOW_SCAN_COOLDOWN_S", 120.0))
 
 # --- Outbound Data Exfiltration Detection (DataExfiltrationRule) ---
 # Detects high-volume outbound data transfers or raw database/archive dumps to external IPs.
 DATA_EXFIL_BYTE_THRESHOLD = int(os.getenv("DATA_EXFIL_BYTE_THRESHOLD", 50000))  # bytes in window
 DATA_EXFIL_WINDOW         = int(os.getenv("DATA_EXFIL_WINDOW", 30))              # seconds in window
+DATA_EXFIL_WEB_BYTE_THRESHOLD = int(os.getenv("DATA_EXFIL_WEB_BYTE_THRESHOLD", 1000000))
 
 # --- TCP Zero-Window / Sockstress DoS Detection (TcpZeroWindowRule) ---
 # Detects persistent zero-window advertisements aimed at exhausting socket buffers / memory.
 TCP_ZERO_WINDOW_THRESHOLD = int(os.getenv("TCP_ZERO_WINDOW_THRESHOLD", 20))  # zero-window pkts in window
 TCP_ZERO_WINDOW_WINDOW    = int(os.getenv("TCP_ZERO_WINDOW_WINDOW", 10))     # seconds
 TCP_ZERO_WINDOW_COOLDOWN  = float(os.getenv("TCP_ZERO_WINDOW_COOLDOWN", 60.0))  # per-pair cooldown seconds
+PAYLOAD_ALERT_COOLDOWN_S = float(os.getenv("PAYLOAD_ALERT_COOLDOWN_S", 60.0))

@@ -189,6 +189,60 @@ class TestRstFloodDetection(unittest.TestCase):
             r = self._rst("192.168.1.11", "192.168.1.21", timestamp=base + i * 0.1)
             self.assertIsNone(rule.check(r))
 
+    def test_identical_rst_retransmissions_count_once_but_distinct_segments_count(self):
+        rule = SynFloodRule(rst_threshold=10, rst_window=5)
+        base = time.time()
+        duplicate = self._rst("192.168.1.12", "192.168.1.22", timestamp=base)
+        duplicate.update(src_port=49428, dst_port=443, tcp_seq=2686, tcp_ack=980515059)
+        self.assertIsNone(rule.check(duplicate))
+        for i in range(20):
+            repeated = dict(duplicate, timestamp=base + (i + 1) * 0.01)
+            self.assertIsNone(rule.check(repeated))
+        alert = None
+        for i in range(9):
+            distinct = dict(duplicate, timestamp=base + 0.3 + i * 0.01,
+                            tcp_seq=2687 + i)
+            alert = rule.check(distinct)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["flood_type"], "RST")
+
+    def test_closed_port_scan_rst_replies_do_not_count_as_rst_flood(self):
+        rule = SynFloodRule(threshold=1000, rst_threshold=10, rst_window=5,
+                            rst_response_grace=2)
+        base = time.time()
+        syn = _ip_record(src="10.0.0.1", dst="10.0.0.2", src_port=54000,
+                         dst_port=22, timestamp=base, initial_syn=True,
+                         tcp_flags=0x02)
+        self.assertIsNone(rule.check(syn))
+
+        # A closed-port target replies immediately with RST|ACK in the
+        # opposite direction. This is normal scan feedback, not a reset flood.
+        for i in range(10):
+            rst = self._rst("10.0.0.2", "10.0.0.1", dst_port=54000,
+                            timestamp=base + 0.1 + i * 0.05)
+            rst.update(src_port=22, tcp_flags=0x14)
+            self.assertIsNone(rule.check(rst))
+        self.assertEqual(rule._rst_history, {})
+
+    def test_reverse_rst_after_syn_ack_still_counts(self):
+        rule = SynFloodRule(threshold=1000, rst_threshold=1, rst_window=5,
+                            rst_response_grace=2)
+        base = time.time()
+        self.assertIsNone(rule.check(_ip_record(
+            src="10.0.0.1", dst="10.0.0.2", src_port=54000, dst_port=80,
+            timestamp=base, initial_syn=True, tcp_flags=0x02,
+        )))
+        self.assertIsNone(rule.check(_ip_record(
+            src="10.0.0.2", dst="10.0.0.1", src_port=80, dst_port=54000,
+            timestamp=base + 0.05, initial_syn=False, tcp_flags=0x12,
+        )))
+        rst = self._rst("10.0.0.2", "10.0.0.1", dst_port=54000,
+                        timestamp=base + 0.1)
+        rst.update(src_port=80, tcp_flags=0x14)
+        alert = rule.check(rst)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["flood_type"], "RST")
+
     def test_syn_flood_still_fires(self):
         rule = SynFloodRule(threshold=10, window=10, rst_threshold=1000)
         base = time.time()
@@ -440,6 +494,26 @@ class TestBruteForceRule(unittest.TestCase):
                           timestamp=base + i * 0.1)
             self.assertIsNone(rule.check(r))
 
+    def test_generic_web_admin_port_is_not_assumed_to_be_authentication(self):
+        rule = BruteForceRule(threshold=5, window=60)
+        base = time.time()
+        for port in (8080, 8443):
+            for i in range(20):
+                self.assertIsNone(rule.check(self._syn(
+                    "10.0.0.3", "10.0.0.4", dst_port=port,
+                    timestamp=base + i * 0.1)))
+
+    def test_custom_auth_port_can_be_enabled_explicitly(self):
+        rule = BruteForceRule(threshold=3, window=60, extra_ports=(8443,))
+        base = time.time()
+        alert = None
+        for i in range(3):
+            alert = rule.check(self._syn(
+                "10.0.0.3", "10.0.0.4", dst_port=8443,
+                timestamp=base + i * 0.1))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["auth_port"], 8443)
+
     def test_below_threshold_no_alert(self):
         rule = BruteForceRule(threshold=10, window=60)
         base = time.time()
@@ -563,6 +637,19 @@ class TestSlowPortScanRule(unittest.TestCase):
                 break
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["scan_type"], "slow_horizontal")
+
+    def test_source_wide_cooldown_suppresses_new_vertical_target_bursts(self):
+        rule = SlowPortScanRule(threshold=3, window=120, cooldown=30)
+        base = time.time()
+        for i in range(3):
+            first = rule.check(self._syn("10.0.0.8", "10.0.0.2", 1000 + i, base + i))
+        self.assertIsNotNone(first)
+        for i in range(3):
+            later = rule.check(self._syn("10.0.0.8", "10.0.0.3", 2000 + i, base + 5 + i))
+        self.assertIsNone(later)
+        for i in range(3):
+            after = rule.check(self._syn("10.0.0.8", "10.0.0.4", 3000 + i, base + 40 + i))
+        self.assertIsNotNone(after)
 
     def test_below_threshold_no_alert(self):
         rule = SlowPortScanRule(threshold=10, window=120)

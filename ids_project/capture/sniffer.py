@@ -19,6 +19,7 @@ Extracted fields per packet (normalized event schema):
   ip_len             -- total IP packet length in bytes (for volume tracking)
   payload            -- bytes, capped at PAYLOAD_MAX_BYTES (for DPI rule)
   dns_query          -- str FQDN (for DNS anomaly rule, UDP or TCP port 53 queries)
+  dns_qtype          -- numeric DNS question type when present
 
 For ARP packets: type=ARP, src_ip, src_mac, dst_ip are set; port/flag fields are None/False.
 
@@ -117,11 +118,13 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
         syn_flag    = False
         initial_syn = False
         tcp_seq     = None
+        tcp_ack     = None
         tcp_flags   = None
         tcp_window  = None
         tcp_payload_seq = None
         payload     = b""
         dns_query   = None
+        dns_qtype   = None
         icmp_type   = None
         icmp_code   = None
         ip_len      = pkt[IP].len if not is_ipv6 else (
@@ -134,6 +137,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             src_port = pkt[TCP].sport
             flags = pkt[TCP].flags
             tcp_seq = int(pkt[TCP].seq)
+            tcp_ack = int(pkt[TCP].ack)
             tcp_flags = int(flags)
             tcp_window = int(pkt[TCP].window) if hasattr(pkt[TCP], "window") else None
             syn_flag = bool(flags & 0x02)  # SYN bit
@@ -143,8 +147,12 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
                 payload = bytes(pkt[Raw].load)[: _PAYLOAD_MAX_BYTES]
             if DNS in pkt and (dst_port == 53 or src_port == 53) and pkt[DNS].qr == 0:
                 try:
-                    if pkt[DNS].qd is not None:
-                        dns_query = pkt[DNS].qd.qname.decode("utf-8", errors="replace")
+                    question = pkt[DNS].qd
+                    if isinstance(question, (list, tuple)):
+                        question = question[0] if question else None
+                    if question is not None:
+                        dns_query = question.qname.decode("utf-8", errors="replace")
+                        dns_qtype = int(question.qtype)
                 except Exception:
                     dns_query = None
         elif UDP in pkt:
@@ -154,8 +162,12 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             # --- DNS query extraction (for DnsRule) ---
             if DNS in pkt and (dst_port == 53 or src_port == 53) and pkt[DNS].qr == 0:
                 try:
-                    if pkt[DNS].qd is not None:
-                        dns_query = pkt[DNS].qd.qname.decode("utf-8", errors="replace")
+                    question = pkt[DNS].qd
+                    if isinstance(question, (list, tuple)):
+                        question = question[0] if question else None
+                    if question is not None:
+                        dns_query = question.qname.decode("utf-8", errors="replace")
+                        dns_qtype = int(question.qtype)
                 except Exception:
                     dns_query = None
         elif ICMP in pkt:
@@ -182,6 +194,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             "syn_flag": syn_flag,
             "initial_syn": initial_syn,
             "tcp_seq": tcp_seq,
+            "tcp_ack": tcp_ack,
             "tcp_flags": tcp_flags,
             "tcp_window": tcp_window,
             "tcp_payload_seq": tcp_payload_seq,
@@ -190,6 +203,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             "ip_len": ip_len,
             "payload": payload,
             "dns_query": dns_query,
+            "dns_qtype": dns_qtype,
         })
         return record
 
@@ -440,6 +454,7 @@ def _replay_text_log(log_path: str, rule_engine):
                 "processing_timestamp": time.time(),
                 "payload":     b"",
                 "dns_query":   None,
+                "dns_qtype":   None,
             }
             rule_engine.check(record)
             processed += 1
@@ -476,20 +491,28 @@ def replay_pcap(pcap_path: str, rule_engine):
     if not SCAPY_AVAILABLE:
         raise RuntimeError("Scapy is not installed")
 
-    from scapy.all import rdpcap
+    from scapy.utils import PcapReader
     logger.info(f"Replaying binary pcap: {pcap_path}")
-    packets = rdpcap(pcap_path)
     processed = 0
-    for pkt in packets:
-        # Pass pkt.time explicitly so that sliding-window rules use the
-        # original capture timestamps, making replay deterministic.
-        try:
-            capture_ts = float(pkt.time)
-        except Exception:
-            capture_ts = None
-        record = _extract(pkt, capture_ts=capture_ts)
-        if record:
-            rule_engine.check(record)
-            processed += 1
-    logger.info(f"Replay complete: {processed}/{len(packets)} packets processed")
+    total = 0
+    # PcapReader yields one packet at a time. rdpcap() materializes the entire
+    # capture in memory, which can require several GB for large real-world
+    # traces even when the PCAP itself is only tens of MB.
+    reader = PcapReader(pcap_path)
+    try:
+        for pkt in reader:
+            total += 1
+            # Pass pkt.time explicitly so that sliding-window rules use the
+            # original capture timestamps, making replay deterministic.
+            try:
+                capture_ts = float(pkt.time)
+            except Exception:
+                capture_ts = None
+            record = _extract(pkt, capture_ts=capture_ts)
+            if record:
+                rule_engine.check(record)
+                processed += 1
+    finally:
+        reader.close()
+    logger.info(f"Replay complete: {processed}/{total} packets processed")
 

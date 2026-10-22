@@ -19,7 +19,7 @@ class TestTcpZeroWindowRule(unittest.TestCase):
     def tearDown(self):
         rules_mod.TRUSTED_HOSTS = self.orig_trusted
 
-    def _pkt(self, src="192.168.1.50", dst="192.168.1.1", dport=80, win=0, proto="TCP", ts=100.0):
+    def _pkt(self, src="192.168.1.50", dst="192.168.1.1", dport=80, win=0, proto="TCP", ts=100.0, tcp_flags=0x10):
         return {
             "type": "IP",
             "protocol": proto,
@@ -28,6 +28,7 @@ class TestTcpZeroWindowRule(unittest.TestCase):
             "src_port": 50000,
             "dst_port": dport,
             "tcp_window": win,
+            "tcp_flags": tcp_flags,
             "event_timestamp": ts,
             "timestamp": ts,
         }
@@ -54,6 +55,11 @@ class TestTcpZeroWindowRule(unittest.TestCase):
         for i in range(30):
             alert = self.rule.check(self._pkt(win=65535, ts=100.0 + i * 0.1))
             self.assertIsNone(alert)
+
+    def test_rst_zero_window_is_ignored(self):
+        for i in range(30):
+            self.assertIsNone(self.rule.check(self._pkt(
+                win=0, ts=100.0 + i * 0.1, tcp_flags=0x14)))
 
     def test_non_tcp_traffic_ignored(self):
         for i in range(30):
@@ -96,6 +102,19 @@ class TestTcpZeroWindowRule(unittest.TestCase):
         # Advance past window (ts=115) and prune
         self.rule.prune_stale(115.0)
         self.assertEqual(len(self.rule._history), 0)
+
+    def test_out_of_order_event_cannot_corrupt_window_or_revive_stale_count(self):
+        rule = TcpZeroWindowRule(threshold=3, window=2, cooldown=60.0)
+        self.assertIsNone(rule.check(self._pkt(ts=100.0)))
+        self.assertIsNone(rule.check(self._pkt(ts=102.5)))  # evicts the first event
+        # A delayed packet must not be appended behind the newer event. If it
+        # were, the following current packet could leave a stale count in deque.
+        self.assertIsNone(rule.check(self._pkt(ts=100.5)))
+        self.assertEqual(list(rule._history[("192.168.1.50", "192.168.1.1")]),
+                         [(102.5, 80)])
+        self.assertIsNone(rule.check(self._pkt(ts=103.0)))
+        self.assertEqual(list(rule._history[("192.168.1.50", "192.168.1.1")]),
+                         [(102.5, 80), (103.0, 80)])
 
 
 if __name__ == "__main__":

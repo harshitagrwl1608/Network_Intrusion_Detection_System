@@ -8,11 +8,12 @@ PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
-from capture.sniffer import _replay_text_log
+from capture.sniffer import _replay_text_log, replay_pcap
 from capture.sniffer import _extract
 from engine.rules import RuleEngine, PortScanRule, TcpStealthScanRule
 import config
 from scapy.all import Ether, IP, IPv6, TCP, UDP, ICMPv6EchoRequest, DNS, DNSQR
+from unittest.mock import patch
 
 
 class DummyEngine:
@@ -24,6 +25,49 @@ class DummyEngine:
 
 
 class TestPcapReplayAndParsing(unittest.TestCase):
+    def test_binary_pcap_replay_streams_packets_and_closes_reader(self):
+        packets = [
+            Ether() / IP(src="192.0.2.1", dst="192.0.2.2") / TCP(sport=40000, dport=80, flags="S"),
+            Ether() / IP(src="192.0.2.2", dst="192.0.2.1") / TCP(sport=80, dport=40000, flags="SA"),
+        ]
+        packets[0].time = 100.0
+        packets[1].time = 100.1
+
+        class OnePassReader:
+            def __init__(self):
+                self._packets = iter(packets)
+                self.closed = False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self._packets)
+
+            def close(self):
+                self.closed = True
+
+        reader = OnePassReader()
+        with tempfile.NamedTemporaryFile("wb", suffix=".pcap", delete=False) as f:
+            # The magic number is enough for replay_pcap to select binary mode;
+            # PcapReader itself is replaced with the one-pass fixture below.
+            f.write(b"\xd4\xc3\xb2\xa1")
+            f.flush()
+            path = f.name
+
+        try:
+            dummy = DummyEngine()
+            with patch("scapy.utils.PcapReader", return_value=reader) as factory:
+                replay_pcap(path, dummy)
+
+            factory.assert_called_once_with(path)
+            self.assertTrue(reader.closed)
+            self.assertEqual(len(dummy.records), 2)
+            self.assertEqual([record["event_timestamp"] for record in dummy.records], [100.0, 100.1])
+            self.assertEqual([record["initial_syn"] for record in dummy.records], [True, False])
+        finally:
+            os.unlink(path)
+
     def test_tcpdump_text_replay_preserves_tcp_probe_flags(self):
         lines = (
             "14:30:15.100000 IP 203.0.113.44.50000 > 203.0.113.80.1000: Flags [F], seq 1\n"
@@ -81,6 +125,7 @@ class TestPcapReplayAndParsing(unittest.TestCase):
         record = _extract(pkt, capture_ts=1000.0)
         self.assertEqual(record["protocol"], "TCP")
         self.assertEqual(record["dns_query"], "xvqrztmplwbsnfhk.badactor.example.")
+        self.assertEqual(record["dns_qtype"], 1)
         self.assertIsNone(record["src_mac"], "Missing Ethernet source must not be inferred from the host interface")
 
     def test_extract_ipv6_transport_headers(self):

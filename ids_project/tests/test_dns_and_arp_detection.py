@@ -153,6 +153,25 @@ class TestDnsAndArpDetection(unittest.TestCase):
         })
         self.assertIsNone(alert)
 
+    def test_srv_service_discovery_name_is_not_mislabeled_as_dns_tunnel(self):
+        rule = DnsRule(max_query_len=60, freq_threshold=0, subdomain_threshold=0)
+        alert = rule.check({
+            "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.22",
+            "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+            "dns_query": "_ldap._tcp.default-first-site-name._sites.dc._msdcs.techbros.tech",
+            "dns_qtype": 33, "timestamp": 100,
+        })
+        self.assertIsNone(alert)
+
+    def test_cloudflare_insights_hostname_is_not_flagged_by_entropy_only(self):
+        rule = DnsRule(freq_threshold=0, subdomain_threshold=0)
+        alert = rule.check({
+            "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.23",
+            "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+            "dns_query": "static.cloudflareinsights.com", "timestamp": 100,
+        })
+        self.assertIsNone(alert)
+
     def test_dga_whitelist_does_not_suppress_dns_tunneling(self):
         """
         Domains on the CDN whitelist (e.g. cloudfront.net) should be exempt from entropy checks,

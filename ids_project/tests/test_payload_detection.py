@@ -28,11 +28,36 @@ class TestPayloadRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertIn("SQL_INJECTION", [h["signature"] for h in alert["evidence"]["hits"]])
 
+    def test_normal_cdata_xml_is_not_misclassified_as_xxe(self):
+        alert = self.rule.check(self.packet(
+            b"POST /soap HTTP/1.1\\r\\n\\r\\n<![CDATA[ordinary content]]>", 7000))
+        self.assertIsNone(alert)
+
+    def test_external_entity_xxe_still_fires(self):
+        alert = self.rule.check(self.packet(
+            b'POST /xml HTTP/1.1\\r\\n\\r\\n<!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/passwd">]><x>&e;</x>',
+            8000, src_port=40008))
+        self.assertIsNotNone(alert)
+        self.assertIn("XXE", [hit["signature"] for hit in alert["evidence"]["hits"]])
+
+    def test_repeated_payload_signature_is_cooled_down_per_host_service(self):
+        rule = PayloadRule(alert_cooldown=60)
+        first = rule.check(self.packet(b"GET /?q=UNION SELECT", 9000, src_port=40009))
+        second = rule.check(self.packet(b"GET /?q=UNION SELECT", 9000, ts=101, src_port=40009))
+        other_flow = rule.check(self.packet(b"GET /?q=UNION SELECT", 9000, ts=101, src_port=40010))
+        other_service = rule.check(self.packet(
+            b"GET /?q=UNION SELECT", 9000, ts=101, src_port=40011, dst_port=8080))
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        self.assertIsNone(other_flow)
+        self.assertIsNotNone(other_service)
+
     def test_percent_and_form_encoded_signatures_are_detected(self):
         percent = self.rule.check(self.packet(b"GET /?q=%55NION%20SELECT", 1000))
         self.assertIsNotNone(percent)
         self.assertEqual(percent["evidence"]["hits"][0]["representation"], "percent_decoded")
-        form = self.rule.check(self.packet(b"GET /?q=UNION+SELECT", 2000, src_port=40001))
+        form = self.rule.check(self.packet(
+            b"GET /?q=UNION+SELECT", 2000, src_port=40001, dst_port=8080))
         self.assertIsNotNone(form)
         self.assertEqual(form["evidence"]["hits"][0]["representation"], "form_decoded")
 
