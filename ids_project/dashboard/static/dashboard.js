@@ -55,6 +55,57 @@ function initChart() {
   });
 }
 
+// ── Client-side alerts cache & filter state ──
+let _alertsCache = [];
+
+function matchesFilter(a, query, ruleFilter, sevFilter) {
+  if (ruleFilter !== "ALL" && a.rule_name !== ruleFilter) return false;
+  if (sevFilter !== "ALL" && (a.severity || "medium").toLowerCase() !== sevFilter.toLowerCase()) return false;
+  if (query) {
+    const q = query.toLowerCase();
+    const str = [
+      a.rule_name, a.src_ip, a.dst_ip, a.dst_port,
+      a.country, a.city, a.detail, a.time_str, a.datetime_str
+    ].filter(Boolean).join(" ").toLowerCase();
+    if (!str.includes(q)) return false;
+  }
+  return true;
+}
+
+function onFilterChange() {
+  renderFilteredAlerts();
+}
+
+function renderFilteredAlerts() {
+  const query = (document.getElementById("alert-search-input")?.value || "").trim();
+  const ruleFilter = document.getElementById("alert-rule-filter")?.value || "ALL";
+  const sevFilter = document.getElementById("alert-sev-filter")?.value || "ALL";
+
+  const filtered = _alertsCache.filter(a => matchesFilter(a, query, ruleFilter, sevFilter));
+  const tbody = document.getElementById("alerts-tbody");
+  if (!tbody) return;
+
+  const isHistory = _activeTab === "history";
+  const metaText = document.getElementById("filter-meta-text");
+  if (metaText) {
+    if (query || ruleFilter !== "ALL" || sevFilter !== "ALL") {
+      metaText.textContent = `Showing ${filtered.length} of ${_alertsCache.length} alerts`;
+    } else {
+      metaText.textContent = `Showing all ${_alertsCache.length} alerts`;
+    }
+  }
+
+  if (!filtered.length) {
+    const emptyMsg = _alertsCache.length === 0
+      ? (isHistory ? `No alerts in the last ${_historyDays} day(s).` : "No alerts in the last hour.")
+      : "No alerts match your filter criteria.";
+    tbody.innerHTML = `<tr><td colspan="9" class="empty-state">${emptyMsg}</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(isHistory ? buildHistoryRow : buildAlertRow).join("");
+}
+
 // ── Fetch & render status ──
 async function loadStatus() {
   try {
@@ -72,6 +123,10 @@ async function loadStatus() {
     const scans = (data.rule_breakdown || {})["PORT_SCAN"] ?? 0;
     document.getElementById("scan-count").textContent = scans;
     document.getElementById("server-time").textContent = data.server_time || "";
+    if (data.active_rules_count) {
+      const activeEl = document.getElementById("rules-active-label");
+      if (activeEl) activeEl.textContent = `${data.active_rules_count} Rules Active`;
+    }
   } catch (e) {
     console.error("Status fetch failed:", e);
   }
@@ -124,13 +179,9 @@ function buildAlertRow(a) {
 async function loadAlerts() {
   try {
     const data = await fetch("/api/alerts").then(r => r.json());
-    const tbody = document.getElementById("alerts-tbody");
-    document.getElementById("alerts-badge").textContent = data.length;
-    if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No alerts in the last hour.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = data.map(buildAlertRow).join("");
+    _alertsCache = Array.isArray(data) ? data : [];
+    document.getElementById("alerts-badge").textContent = _alertsCache.length;
+    renderFilteredAlerts();
   } catch (e) {
     console.error("Alerts fetch failed:", e);
   }
@@ -144,10 +195,15 @@ function initSSE() {
   _sseSource.onmessage = (e) => {
     try {
       const alert = JSON.parse(e.data);
-      prependAlertRow(alert);
+      // Prepend to memory cache (keep max 5000 items)
+      _alertsCache.unshift(alert);
+      if (_alertsCache.length > 5000) _alertsCache.pop();
+
+      // Render respecting current active filter
+      renderFilteredAlerts();
       showToast(alert);
       const badge = document.getElementById("alerts-badge");
-      badge.textContent = (parseInt(badge.textContent || "0", 10) + 1).toString();
+      if (badge) badge.textContent = _alertsCache.length.toString();
       loadStatus();
     } catch (err) {
       console.warn("SSE parse error:", err);
@@ -159,22 +215,6 @@ function initSSE() {
     _sseSource.close();
     setTimeout(initSSE, 5000);
   };
-}
-
-// ── Prepend a single live alert row ──
-function prependAlertRow(alert) {
-  const tbody = document.getElementById("alerts-tbody");
-  const placeholder = tbody.querySelector(".empty-state");
-  if (placeholder) placeholder.parentElement.remove();
-
-  const tmpDiv = document.createElement("tbody");
-  tmpDiv.innerHTML = buildAlertRow(alert);
-  const newRow = tmpDiv.firstElementChild;
-  if (newRow) {
-    newRow.classList.add("alert-row-new");
-    tbody.insertBefore(newRow, tbody.firstChild);
-    setTimeout(() => newRow.classList.remove("alert-row-new"), 2000);
-  }
 }
 
 // ── Toast notification ──
@@ -420,13 +460,9 @@ async function loadHistory(days) {
   tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Loading history…</td></tr>';
   try {
     const data = await fetch("/api/alerts/history?days=" + days).then(r => r.json());
-    const alerts = data.alerts || [];
-    document.getElementById("alerts-badge").textContent = data.total ?? alerts.length;
-    if (!alerts.length) {
-      tbody.innerHTML = `<tr><td colspan="9" class="empty-state">No alerts in the last ${days} day(s).</td></tr>`;
-      return;
-    }
-    tbody.innerHTML = alerts.map(buildHistoryRow).join("");
+    _alertsCache = data.alerts || [];
+    document.getElementById("alerts-badge").textContent = data.total ?? _alertsCache.length;
+    renderFilteredAlerts();
   } catch (e) {
     console.error("History fetch failed:", e);
     tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Failed to load history.</td></tr>';

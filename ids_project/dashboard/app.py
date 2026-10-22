@@ -297,14 +297,20 @@ def api_status():
     threat_level = compute_threat_level(alerts)
 
     rule_counts = {}
+    sev_counts = {"high": 0, "medium": 0, "low": 0}
     for a in alerts:
         r = a.get("rule_name", "UNKNOWN")
         rule_counts[r] = rule_counts.get(r, 0) + 1
+        s = (a.get("severity") or "medium").lower()
+        if s in sev_counts:
+            sev_counts[s] += 1
 
     return jsonify({
         "threat_level": threat_level,
         "alert_count_1h": len(alerts),
         "rule_breakdown": rule_counts,
+        "severity_breakdown": sev_counts,
+        "active_rules_count": 19,
         "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "geo_cache_size": len(_GEO_CACHE),
     })
@@ -457,10 +463,25 @@ def api_chart():
     # Collect all rule names present
     rule_names = list({r["rule_name"] for r in rows})
     rule_colors = {
-        "PORT_SCAN": "rgba(255, 165, 0, 0.8)",
-        "SYN_FLOOD": "rgba(239, 68, 68, 0.8)",
-        "ARP_SPOOF": "rgba(168, 85, 247, 0.8)",
         "BLOCKLIST": "rgba(59, 130, 246, 0.8)",
+        "TCP_FLAG_ANOMALY": "rgba(234, 179, 8, 0.8)",
+        "PORT_SCAN": "rgba(245, 158, 11, 0.8)",
+        "UDP_SCAN": "rgba(251, 146, 60, 0.8)",
+        "UDP_FLOOD": "rgba(225, 29, 72, 0.8)",
+        "TCP_STEALTH_SCAN": "rgba(217, 70, 239, 0.8)",
+        "SYN_FLOOD": "rgba(239, 68, 68, 0.8)",
+        "DISTRIBUTED_SYN_FLOOD": "rgba(185, 28, 28, 0.8)",
+        "ICMP_SWEEP": "rgba(14, 165, 233, 0.8)",
+        "ICMP_FLOOD": "rgba(244, 63, 94, 0.8)",
+        "ARP_SPOOF": "rgba(168, 85, 247, 0.8)",
+        "PAYLOAD_HIT": "rgba(236, 72, 153, 0.8)",
+        "DNS_ANOMALY": "rgba(6, 182, 212, 0.8)",
+        "BRUTE_FORCE": "rgba(249, 115, 22, 0.8)",
+        "SLOW_PORT_SCAN": "rgba(217, 119, 6, 0.8)",
+        "DATA_EXFIL": "rgba(192, 38, 211, 0.8)",
+        "TLS_ANOMALY": "rgba(99, 102, 241, 0.8)",
+        "CLEAR_HTTP_ON_TLS_PORT": "rgba(139, 92, 246, 0.8)",
+        "TCP_ZERO_WINDOW": "rgba(220, 38, 38, 0.8)",
     }
 
     datasets = []
@@ -550,37 +571,105 @@ def api_alert_detail(alert_id: int):
 
     # Add rule-specific explanation for the investigation panel
     explanations = {
+        "BLOCKLIST": (
+            "The destination or source IP matched an entry in the threat intelligence blocklist "
+            "(e.g., abuse.ch Feodo Tracker / CINS Army). This indicates contact with a known botnet C2, "
+            "ransomware distribution node, or malicious infrastructure."
+        ),
+        "TCP_FLAG_ANOMALY": (
+            "A TCP packet with an illegal or contradictory flag combination (e.g. SYN+FIN, SYN+RST, "
+            "or all flags set) was observed. Attackers craft illegal flags to probe firewall state tables "
+            "or elicit OS-specific responses for fingerprinting."
+        ),
         "PORT_SCAN": (
             "This alert fired because a single source IP sent initial TCP SYN packets to more than "
             f"{config.PORT_SCAN_THRESHOLD} distinct ports on a target host (vertical scan) or across "
             f"distinct hosts (horizontal sweep) within {config.TIME_WINDOW} seconds. "
             "Check if the source IP is an authorized scanner or an unexpected reconnaissance tool."
         ),
+        "UDP_SCAN": (
+            f"A single source IP sent UDP probes to more than {getattr(config, 'UDP_SCAN_THRESHOLD', 15)} "
+            f"distinct ports or target hosts within {config.TIME_WINDOW} seconds. Because UDP is connectionless, "
+            "scanners send rapid datagrams to identify open UDP services (such as DNS, SNMP, NTP)."
+        ),
+        "UDP_FLOOD": (
+            f"A high volume of UDP packets (≥{getattr(config, 'UDP_FLOOD_THRESHOLD', 50)} pkts in {getattr(config, 'UDP_FLOOD_WINDOW', 5)}s, "
+            f"or ≥{getattr(config, 'UDP_FLOOD_WEB_THRESHOLD', 500)} pkts on web/QUIC ports) was directed at a target. "
+            "High-rate UDP streams can saturate interface bandwidth and exhaust socket buffers in a Denial-of-Service attempt."
+        ),
+        "TCP_STEALTH_SCAN": (
+            f"A source sent FIN, NULL, or Xmas (FIN+PSH+URG) packets to more than {getattr(config, 'TCP_STEALTH_SCAN_THRESHOLD', 15)} "
+            f"distinct ports within {config.TIME_WINDOW} seconds. These stealth scans exploit RFC 793 to identify "
+            "closed ports via RSTs while bypassing simple SYN-logging firewalls."
+        ),
         "SYN_FLOOD": (
             f"This alert fired because more than {config.SYN_FLOOD_THRESHOLD} initial TCP SYN packets "
-            f"were sent to a service port within {config.TIME_WINDOW} seconds without completing handshakes. "
-            "Could be a misconfigured service or a genuine DoS attempt."
+            f"(or {getattr(config, 'RST_FLOOD_THRESHOLD', 100)} RST packets) were sent to a service port "
+            f"within {config.TIME_WINDOW} seconds without completing handshakes. Could be a misconfigured service "
+            "or a genuine DoS attempt."
+        ),
+        "DISTRIBUTED_SYN_FLOOD": (
+            f"A target service received at least {getattr(config, 'DISTRIBUTED_SYN_FLOOD_THRESHOLD', 500)} initial SYNs "
+            f"across at least {getattr(config, 'DISTRIBUTED_SYN_FLOOD_MIN_SOURCES', 20)} distinct source IP addresses "
+            f"within {config.TIME_WINDOW} seconds. This signature indicates a coordinated Distributed Denial-of-Service (DDoS) flood."
+        ),
+        "ICMP_SWEEP": (
+            f"A single host sent ICMP echo requests (pings) to more than {getattr(config, 'ICMP_SWEEP_THRESHOLD', 12)} "
+            f"distinct IP addresses within {config.TIME_WINDOW} seconds. Network scanners use ICMP sweeps for automated "
+            "host-discovery and subnet mapping."
+        ),
+        "ICMP_FLOOD": (
+            f"A target received more than {getattr(config, 'ICMP_FLOOD_THRESHOLD', 50)} ICMP echo requests within "
+            f"{getattr(config, 'ICMP_FLOOD_WINDOW', 5)} seconds. High-frequency ICMP bursts saturate bandwidth and "
+            "consume CPU processing cycles on the target system."
         ),
         "ARP_SPOOF": (
             "An IP address was previously seen claiming one MAC address, but now claims a different one. "
             "This can indicate ARP poisoning (MITM attack) or a legitimate device change "
             "(e.g. router replaced, VM migration, or network reconfiguration)."
         ),
-        "BLOCKLIST": (
-            "The destination IP matched an entry in the threat intelligence blocklist. "
-            "Could be a genuine malware C2 connection, or a false positive if the IP was "
-            "recently delisted. Check the blocklist source and verify if the IP is still malicious."
-        ),
         "PAYLOAD_HIT": (
-            "A suspicious payload pattern (SQL injection, command injection, SSRF, Log4Shell, or plaintext credential) "
-            "was detected in unencrypted traffic on a plain-text protocol. "
-            "HTTPS traffic is not inspected. Verify whether this is a legitimate request or an attack."
+            "A suspicious payload pattern (SQL injection, XSS, credential leakage, command injection, path traversal, "
+            "SSRF, Log4Shell, XXE, SSTI, Shellshock, deserialization, scanner probe, sensitive file probe, reverse shell cradle, "
+            "HTTP method tampering, or webshell) was detected via Deep Packet Inspection (DPI) in unencrypted application traffic. "
+            "Inspect the matched pattern and evidence payload."
         ),
         "DNS_ANOMALY": (
             f"A DNS query had unusually high Shannon entropy (≥{config.DNS_ENTROPY_THRESHOLD:.1f} bits/char), "
-            f"exceeded maximum expected length ({config.DNS_QUERY_MAX_LEN} chars), or exceeded repeated query frequency "
-            f"(≥{config.DNS_FREQ_THRESHOLD} queries in {config.DNS_FREQ_WINDOW}s). "
-            "This indicates possible DGA malware, DNS data exfiltration tunnels, or suspicious query bursts."
+            f"exceeded maximum expected length ({config.DNS_QUERY_MAX_LEN} chars), reached repeated query frequency "
+            f"(≥{config.DNS_FREQ_THRESHOLD} queries in {config.DNS_FREQ_WINDOW}s), exceeded distinct subdomain limits "
+            f"(≥{getattr(config, 'DNS_SUBDOMAIN_THRESHOLD', 20)} subdomains), or contained low-entropy hex-chunk tunnels. "
+            "This indicates possible DGA malware, covert DNS data tunneling, or reconnaissance."
+        ),
+        "BRUTE_FORCE": (
+            f"A single source IP attempted {getattr(config, 'BRUTE_FORCE_THRESHOLD', 20)} or more connections to an authentication "
+            f"or administration service (SSH, RDP, SMB, MySQL, FTP, Telnet) within {getattr(config, 'BRUTE_FORCE_WINDOW', 60)} seconds. "
+            "This rapid retry pattern typically indicates automated password guessing or credential stuffing."
+        ),
+        "SLOW_PORT_SCAN": (
+            f"A source scanned at least {getattr(config, 'SLOW_SCAN_THRESHOLD', 30)} distinct ports or hosts over an extended "
+            f"window of {getattr(config, 'SLOW_SCAN_WINDOW', 120)} seconds. Attackers use low-and-slow scanning intervals "
+            "to fly under the radar of fast sliding-window detectors."
+        ),
+        "DATA_EXFIL": (
+            f"Outbound network transfer from a local device exceeded volume thresholds (≥{getattr(config, 'DATA_EXFIL_BYTE_THRESHOLD', 50000)} bytes "
+            f"to arbitrary ports, or ≥{getattr(config, 'DATA_EXFIL_WEB_BYTE_THRESHOLD', 1000000)} bytes to web ports in {getattr(config, 'DATA_EXFIL_WINDOW', 30)}s) "
+            "or contained database/archive signature dumps. This could indicate sensitive data theft or unauthorized exfiltration."
+        ),
+        "TLS_ANOMALY": (
+            "A TLS Client Hello packet contained an RFC 6066 violation (literal IPv4 or IPv6 address specified as the Server Name "
+            "Indication / SNI) or a suspicious dynamic DNS / reverse-proxy tunneling domain (e.g. ngrok, duckdns, localtunnel). "
+            "Malicious C2 frameworks use direct IP SNI or reverse tunnels to circumvent domain-based inspection."
+        ),
+        "CLEAR_HTTP_ON_TLS_PORT": (
+            f"Cleartext HTTP request lines (e.g. GET/POST/CONNECT) were detected on standard encrypted TLS ports (443 or 8443) "
+            f"with repeated occurrences (≥{getattr(config, 'CLEAR_HTTP_TLS_MIN_REQUESTS', 2)}). This pattern highlights "
+            "unencrypted C2 beaconing disguised on port 443, proxy protocol confusion, or server misconfiguration."
+        ),
+        "TCP_ZERO_WINDOW": (
+            f"A host sent {getattr(config, 'TCP_ZERO_WINDOW_THRESHOLD', 20)} or more TCP zero-window (win=0) advertisements to a server "
+            f"within {getattr(config, 'TCP_ZERO_WINDOW_WINDOW', 10)} seconds. This signature indicates a Sockstress or zero-window "
+            "resource-exhaustion attack, designed to tie up server connection buffers and trigger persist-timer starvation."
         ),
     }
     alert["explanation"] = explanations.get(alert.get("rule_name", ""), "No explanation available.")

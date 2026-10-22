@@ -377,10 +377,25 @@ tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
   font-family: var(--font-mono);
   white-space: nowrap;
 }
-.rule-PORT_SCAN  { background: rgba(245,158,11,0.15); color: #fbbf24; }
-.rule-SYN_FLOOD  { background: rgba(239,68,68,0.15);  color: #f87171; }
-.rule-ARP_SPOOF  { background: rgba(168,85,247,0.15); color: #c084fc; }
-.rule-BLOCKLIST  { background: rgba(59,130,246,0.15); color: #60a5fa; }
+.rule-BLOCKLIST             { background: rgba(59,130,246,0.15);  color: #60a5fa; border: 1px solid rgba(59,130,246,0.25); }
+.rule-TCP_FLAG_ANOMALY      { background: rgba(234,179,8,0.15);   color: #facc15; border: 1px solid rgba(234,179,8,0.25); }
+.rule-PORT_SCAN             { background: rgba(245,158,11,0.15);  color: #fbbf24; border: 1px solid rgba(245,158,11,0.25); }
+.rule-UDP_SCAN              { background: rgba(251,146,60,0.15);  color: #fb923c; border: 1px solid rgba(251,146,60,0.25); }
+.rule-UDP_FLOOD             { background: rgba(225,29,72,0.15);   color: #fb7185; border: 1px solid rgba(225,29,72,0.25); }
+.rule-TCP_STEALTH_SCAN      { background: rgba(217,70,239,0.15);  color: #e879f9; border: 1px solid rgba(217,70,239,0.25); }
+.rule-SYN_FLOOD             { background: rgba(239,68,68,0.15);   color: #f87171; border: 1px solid rgba(239,68,68,0.25); }
+.rule-DISTRIBUTED_SYN_FLOOD { background: rgba(185,28,28,0.2);    color: #fca5a5; border: 1px solid rgba(185,28,28,0.35); }
+.rule-ICMP_SWEEP            { background: rgba(14,165,233,0.15);  color: #38bdf8; border: 1px solid rgba(14,165,233,0.25); }
+.rule-ICMP_FLOOD            { background: rgba(244,63,94,0.15);   color: #fda4af; border: 1px solid rgba(244,63,94,0.25); }
+.rule-ARP_SPOOF             { background: rgba(168,85,247,0.15);  color: #c084fc; border: 1px solid rgba(168,85,247,0.25); }
+.rule-PAYLOAD_HIT           { background: rgba(236,72,153,0.15);  color: #f472b6; border: 1px solid rgba(236,72,153,0.25); }
+.rule-DNS_ANOMALY           { background: rgba(6,182,212,0.15);   color: #22d3ee; border: 1px solid rgba(6,182,212,0.25); }
+.rule-BRUTE_FORCE           { background: rgba(249,115,22,0.15);  color: #fb923c; border: 1px solid rgba(249,115,22,0.25); }
+.rule-SLOW_PORT_SCAN        { background: rgba(217,119,6,0.15);   color: #f59e0b; border: 1px solid rgba(217,119,6,0.25); }
+.rule-DATA_EXFIL            { background: rgba(192,38,211,0.15);  color: #e879f9; border: 1px solid rgba(192,38,211,0.25); }
+.rule-TLS_ANOMALY           { background: rgba(99,102,241,0.15);  color: #818cf8; border: 1px solid rgba(99,102,241,0.25); }
+.rule-CLEAR_HTTP_ON_TLS_PORT{ background: rgba(139,92,246,0.15);  color: #a78bfa; border: 1px solid rgba(139,92,246,0.25); }
+.rule-TCP_ZERO_WINDOW       { background: rgba(220,38,38,0.15);   color: #ef4444; border: 1px solid rgba(220,38,38,0.25); }
 
 .severity-badge {
   display: inline-block;
@@ -1083,4 +1098,95 @@ tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
   color: var(--text-muted);
   flex-shrink: 0;
   margin-top: 1px;
+}
+
+/* ── Active Rules Badge & Table Filter Controls ── */
+.rules-active-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(99, 130, 255, 0.08);
+  border: 1px solid rgba(99, 130, 255, 0.2);
+  color: #a5b4fc;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 0.73rem;
+  font-weight: 500;
+  font-family: var(--font-mono);
+}
+.rules-active-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.7);
+  animation: pulse-dot 2s infinite ease-in-out;
+}
+@keyframes pulse-dot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.25); opacity: 0.7; }
+}
+
+.table-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: rgba(15, 23, 42, 0.4);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.filter-inputs-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 280px;
+}
+.filter-search-box {
+  position: relative;
+  flex: 1;
+  max-width: 280px;
+}
+.filter-search-input {
+  width: 100%;
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 5px 10px 5px 28px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-family: var(--font-sans);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.filter-search-input:focus {
+  border-color: var(--accent);
+}
+.filter-search-icon {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.filter-select {
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.filter-select:focus {
+  border-color: var(--accent);
+}
+.filter-meta {
+  font-size: 0.72rem;
+  color: var(--text-muted);
 }

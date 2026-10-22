@@ -10,12 +10,10 @@
 [![Threat Intel](https://img.shields.io/badge/Threat_Intel-Feodo_Tracker_%2F_abuse.ch-blueviolet.svg?style=flat-square)](https://feodotracker.abuse.ch)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg?style=flat-square)](LICENSE)
 
----
-
 > [!NOTE]
 > ### 🚧 Ongoing Project Notice
 > **NetGuard IDS is currently under active development.**  
-> The core packet-sniffing engine, 9-rule signature and heuristic detection suite, deep packet inspection (DPI), DNS entropy analyzer, and real-time Flask SOC dashboard are functional. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
+> The core packet-sniffing engine, 19-rule signature and heuristic detection suite, 17-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization, Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming are functional and verified across 248 unit tests and 37/37 synthetic evaluation scenarios. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
 
 ---
 
@@ -59,20 +57,25 @@ Home and small-office networks generate continuous connection traffic, yet small
  ┌────────────────────────────────────────────────────────────────────────┐
  │                Capture & Normalization Layer (sniffer.py)              │
  │     • Protocol Decoding (Ethernet / IP / TCP / UDP / ARP / DNS)        │
- │     • Payload Extraction (Capped at 512B)                              │
- │     • FQDN Extraction & Timing Records                                 │
+ │     • Payload Extraction (Bounded Stream Buffer)                       │
+ │     • FQDN Extraction & TCP Window / Timing Records                    │
  └───────────────────────────────────┬────────────────────────────────────┘
                                      │
                                      ▼
  ┌────────────────────────────────────────────────────────────────────────┐
  │                     Rule Engine Orchestrator (rules.py)                │
  │  ┌──────────────────────────────────────────────────────────────────┐  │
- │  │ 1. Blocklist Rule     : O(1) C2 Botnet IP Lookup (abuse.ch)      │  │
- │  │ 2. Port Scan Rule     : Sliding Window Distinct Port Tracking    │  │
- │  │ 3. SYN Flood Rule     : High-Frequency Connection Burst Tracking │  │
- │  │ 4. ARP Spoof Rule     : Persistent IP-to-MAC Binding Monitor     │  │
- │  │ 5. Payload DPI Rule   : Regex Inspection (SQLi, XSS, Cred Leak)  │  │
- │  │ 6. DNS Anomaly Rule   : Shannon Entropy DGA & Tunneling Detector │  │
+ │  │ 1. Threat Intel : BLOCKLIST (abuse.ch Feodo Tracker / CINS Army) │  │
+ │  │ 2. Scanners     : PORT_SCAN, UDP_SCAN, TCP_STEALTH_SCAN,         │  │
+ │  │                   SLOW_PORT_SCAN, ICMP_SWEEP                     │  │
+ │  │ 3. Floods & DoS : SYN_FLOOD, DISTRIBUTED_SYN_FLOOD, UDP_FLOOD,   │  │
+ │  │                   ICMP_FLOOD, TCP_ZERO_WINDOW (Sockstress)       │  │
+ │  │ 4. Protocol/MITM: TCP_FLAG_ANOMALY, ARP_SPOOF (Persistent Table) │  │
+ │  │ 5. App & Payloads: PAYLOAD_HIT (17 DPI Signatures + Multi-Pass), │  │
+ │  │                   DNS_ANOMALY (Entropy + Tunneling + Hex-Chunks),│  │
+ │  │                   BRUTE_FORCE (Auth Services), DATA_EXFIL,       │  │
+ │  │                   TLS_ANOMALY (Direct-IP SNI),                   │  │
+ │  │                   CLEAR_HTTP_ON_TLS_PORT                         │  │
  │  └──────────────────────────────────────────────────────────────────┘  │
  │                   • False-Positive Mitigations Filter                  │
  └───────────────────┬────────────────────────────────┬───────────────────┘
@@ -88,9 +91,9 @@ Home and small-office networks generate continuous connection traffic, yet small
  ┌──────────────────────────────┐ ┌───────────────────────────────────────┐
  │ Analysis Engine (aggregator) │ │ Flask SOC Web Dashboard (dashboard/)  │
  │ • Threat Rating Computation  │ │ • Real-Time SSE Stream (/api/stream)  │
- │ • Attack Pattern Summary     │ │ • GeoIP Origin Flagging (Cached)      │
- │ • Plain-English Narratives   │ │ • Device MAC OUI Fingerprinting       │
- │ • Auto-pruning Retention     │ │ • Analyst TP/FP Feedback Loop         │
+ │ • Attack Pattern Summary     │ │ • Interactive Rule & Severity Filters │
+ │ • Plain-English Narratives   │ │ • GeoIP Origin Flagging (Cached)      │
+ │ • Auto-pruning Retention     │ │ • Device MAC OUI Fingerprinting       │
  └──────────────────────────────┘ └───────────────────────────────────────┘
 ```
 
@@ -98,20 +101,50 @@ Home and small-office networks generate continuous connection traffic, yet small
 
 ## 🔍 Core Detection Rules
 
-NetGuard implements 10 detection rules spanning stateless lookups, stateful sliding windows, payload pattern matching, and algorithmic information theory:
+NetGuard implements **19 detection rules** spanning stateless lookups, stateful sliding windows, deep packet inspection, TLS inspection, and algorithmic information theory:
 
 | Rule ID | Detection Mechanism | Methodology | Tunable Defaults |
 |---|---|---|---|
 | **`BLOCKLIST`** | Known C2 Botnets & Ransomware IPs | Stateless $O(1)$ set lookup against synced feeds (abuse.ch Feodo Tracker, CINS Army). | Auto-updated every 24h |
+| **`TCP_FLAG_ANOMALY`** | Malformed TCP Packets | Stateless inspection of illegal/contradictory TCP flags (SYN+FIN, SYN+RST, flagless probes) used for firewall evasion and OS fingerprinting. | Instant trigger |
 | **`PORT_SCAN`** | Network Reconnaissance & Port Sweeps | Stateful sliding window tracking distinct ports on a single host (vertical) or across distinct hosts (horizontal). Restricts to initial TCP SYN attempts and stores only the latest observation per unique target. | $\ge 15$ ports or hosts in $10\text{s}$ |
 | **`UDP_SCAN`** | UDP Port and Host Sweeps | Tracks distinct UDP destination ports or hosts per source in a sliding window; stores only latest observations per unique target and excludes replies from known service ports. | $\ge 15$ ports or hosts in $10\text{s}$ |
+| **`UDP_FLOOD`** | UDP Packet Flood Denial-of-Service | Stateful sliding window counting UDP packets to single destination with port-differentiated web/QUIC threshold. | $\ge 50$ pkts (or $\ge 500$ on port 443) in $5\text{s}$ |
 | **`TCP_STEALTH_SCAN`** | FIN, NULL, and Xmas Port Scans | Tracks distinct ports receiving FIN-only, flagless, or FIN/PSH/URG probes; ignores ordinary SYN, ACK, RST, and mixed handshake traffic. | $\ge 15$ ports in $10\text{s}$ |
-| **`SYN_FLOOD`** | Denial-of-Service (DoS) Attacks | Stateful sliding window tracking rapid bursts of initial TCP SYN packets directed toward service ports ($< 49152$); per-flow histories and active flow keys are bounded. | $\ge 100$ SYNs in $10\text{s}$ |
-| **`DISTRIBUTED_SYN_FLOOD`** | Distributed Denial-of-Service (DDoS) | Counts initial TCP SYNs to one service across source IPs; requires both a high packet volume and a minimum number of distinct sources. Per-target packet/source state and active targets are bounded; alert counts are reported as threshold-capped lower bounds. | $\ge 500$ SYNs from $\ge 20$ sources in $10\text{s}$ |
-| **`ICMP_SWEEP`** | Host Discovery | Counts distinct IPv4/IPv6 destinations of ICMP echo requests per source in a sliding window; ignores replies and duplicate probes to the same host, and bounds per-source and source-key state. | $\ge 12$ hosts in $10\text{s}$ |
+| **`SYN_FLOOD`** | Denial-of-Service (DoS) Attacks | Stateful sliding window tracking rapid bursts of initial TCP SYN packets directed toward service ports ($< 49152$); also inspects high-rate RST floods with closed-port response grace. | $\ge 100$ SYNs (or RSTs) in $10\text{s}$ |
+| **`DISTRIBUTED_SYN_FLOOD`** | Distributed Denial-of-Service (DDoS) | Counts initial TCP SYNs to one service across source IPs; requires both a high packet volume and a minimum number of distinct sources. Per-target packet/source state and active targets are bounded. | $\ge 500$ SYNs from $\ge 20$ sources in $10\text{s}$ |
+| **`ICMP_SWEEP`** | Host Discovery | Counts distinct IPv4/IPv6 destinations of ICMP echo requests per source in a sliding window; ignores replies and duplicate probes to the same host. | $\ge 12$ hosts in $10\text{s}$ |
+| **`ICMP_FLOOD`** | ICMP Echo Flood Denial-of-Service | Stateful sliding window tracking rapid high-frequency ICMP echo bursts directed at a single target IP. | $\ge 50$ echo requests in $5\text{s}$ |
 | **`ARP_SPOOF`** | Man-in-the-Middle (MITM) & Cache Poisoning | Stateful persistent table tracking valid IPv4-to-unicast-MAC pairings with bounded identity/cooldown state. Alerts if a recognized IP suddenly claims a new hardware identity. | 120s alert cooldown |
-| **`PAYLOAD_HIT`** | Deep Packet Inspection (DPI) | Regex inspection of packet payloads and bounded, ordered TCP data (with single-pass URL/form decoding) for SQL Injection (`UNION SELECT`, `' OR 1=1`), command injection, SSRF, Log4Shell, and plaintext credentials. | 512-byte packet and TCP stream buffers |
-| **`DNS_ANOMALY`** | Domain Generation Algorithms (DGA) & DNS Tunneling | Maximum Shannon entropy across labels through the registrable domain, query length, and repeated parent-domain queries; supports DNS over UDP and TCP. Frequency state is threshold-capped, disabled cleanly at zero, and alerts are deduplicated by source, parent, and anomaly type. | Entropy $\ge 3.8$, length $> 60$, freq $\ge 20$ in 60s |
+| **`PAYLOAD_HIT`** | Deep Packet Inspection (DPI) | Bounded TCP stream & packet DPI matching 17 regex signatures with multi-pass URL decoding, form decoding, null-byte stripping, and comment normalization. | 512-byte buffer cap; 60s alert cooldown |
+| **`DNS_ANOMALY`** | DGA, Length, Frequency & Tunneling | Maximum Shannon entropy across labels through registrable domain, query length, repeated parent frequency, distinct subdomain exfil, and covert hex-chunk tunneling. | Entropy $\ge 3.8$, length $> 60$, freq $\ge 20$, subdomains $\ge 20$ |
+| **`BRUTE_FORCE`** | Credential Brute-Force Attacks | Stateful sliding window tracking repeated connection attempts from a source to credentialed authentication services (SSH, RDP, SMB, MySQL, FTP, Telnet). | $\ge 20$ attempts in $60\text{s}$ |
+| **`SLOW_PORT_SCAN`** | Low-and-Slow Port Reconnaissance | Extended sliding window tracking stealthy horizontal or vertical scans intentionally spaced to evade rapid 10s rate detectors. | $\ge 30$ ports/hosts in $120\text{s}$; 120s cooldown |
+| **`DATA_EXFIL`** | Outbound Data Exfiltration | Sliding window measuring cumulative outbound payload transfer volume to external destinations; includes web port threshold distinction and database dump detection. | $\ge 50\text{KB}$ (or $\ge 1\text{MB}$ web) in $30\text{s}$ |
+| **`TLS_ANOMALY`** | TLS Handshake SNI Anomaly & Tunnels | Binary parsing of TLS 1.0–1.3 Client Hello Server Name Indication (SNI). Flags RFC 6066 literal IP violations and dynamic proxy tunnels (ngrok, duckdns, etc.). | Enabled by default; 60s cooldown |
+| **`CLEAR_HTTP_ON_TLS_PORT`** | Plaintext HTTP on Encrypted Port | Detects repeated cleartext HTTP request verbs (`GET`, `POST`, `CONNECT`) transmitted on TLS ports (`443`, `8443`), indicating C2 bypass or SSL misconfiguration. | $\ge 2$ requests in $600\text{s}$; 600s cooldown |
+| **`TCP_ZERO_WINDOW`** | Sockstress / Zero-Window DoS | Tracks repeated TCP Zero-Window (`win=0`) advertisements per endpoint pair, detecting persist-timer thread exhaustion and socket buffer starvation. | $\ge 20$ packets in $10\text{s}$; 60s cooldown |
+
+### 🔬 Deep Packet Inspection (DPI) Signatures
+`PayloadRule` evaluates raw packet payloads and ordered, bounded TCP streams against 17 categorized threat signatures with automatic multi-pass URL decoding (up to 3 passes), form decoding (`+` to space), null-byte stripping (`%00` and `\x00`), and inline SQL comment collapsing (`/*...*/`):
+
+1. **`SQL_INJECTION`**: `UNION SELECT`, `' OR 1=1`, `HAVING 1=1`, `WAITFOR DELAY`, and stacked queries.
+2. **`XSS`**: `<script>`, `javascript:`, and DOM event handlers (`onload=`, `onerror=`).
+3. **`CREDENTIAL_LEAK`**: Plaintext credentials, passwords, private keys, and authorization headers.
+4. **`CMD_INJECTION`**: Shell command concatenation (`cat /etc/passwd`, `/bin/sh`, `cmd.exe /c`, pipes).
+5. **`PATH_TRAVERSAL`**: Directory traversal attacks (`../`, `..\`, `%2e%2e%2f`).
+6. **`SSRF`**: Server-Side Request Forgery targeting loopback, link-local, and cloud metadata (`169.254.169.254`).
+7. **`LOG4SHELL`**: Log4j JNDI injection expressions (`${jndi:ldap://...}`).
+8. **`XXE`**: XML External Entity injection (`<!ENTITY ... SYSTEM ...>`).
+9. **`SSTI`**: Server-Side Template Injection (`{{...}}`, `${...}`, `#{...}`).
+10. **`SHELLSHOCK`**: Bash function export header exploitation (`() { :; };`).
+11. **`DESERIALIZATION`**: Java serialization (`\xac\xed\x00\x05`, `rO0AB`) and Python pickle execution gadgets.
+12. **`HEADER_INJECTION`**: HTTP Response Splitting and CRLF header injection (`%0d%0a`, `\r\nSet-Cookie:`).
+13. **`SCANNER_PROBE`**: Automated web scanner reconnaissance (`sqlmap`, `nikto`, `nuclei`, `masscan`, `wpscan`).
+14. **`SENSITIVE_FILE_PROBE`**: Access to configuration and credential files (`.env`, `.git/config`, `id_rsa`, `wp-config.php`).
+15. **`REVERSE_SHELL_CRADLE`**: Interactive download cradles (`curl ... | sh`, `powershell IEX`, `/dev/tcp`, `mkfifo`).
+16. **`HTTP_METHOD_TAMPERING`**: Non-standard HTTP methods & WebDAV probing (`TRACE`, `TRACK`, `PROPFIND`, `Translate: f`).
+17. **`WEBSHELL_INJECTION`**: Malicious webshell execution markers (`eval(base64_decode(...))`, `system($_GET[...])`, `Runtime.getRuntime().exec()`).
 
 ### 🛡️ False-Positive Mitigations
 - **Source Service Port Exemption:** Packets originating *from* well-known service ports (e.g., `53/DNS`, `80/HTTP`, `443/HTTPS`, `123/NTP`) are exempted from scanner rules to prevent high-volume DNS/Web servers from being flagged as attackers.
@@ -124,14 +157,17 @@ NetGuard implements 10 detection rules spanning stateless lookups, stateful slid
 
 The web dashboard is designed for both security analysts and non-technical stakeholders:
 
-* **Live Threat Streaming:** Uses **Server-Sent Events (SSE)** at `/api/stream` to push alerts to the browser instantly without polling lag.
-* **Plain-English Narratives:** The analytics aggregator parses low-level network records and outputs clear sentences:
+* **Live Threat Streaming:** Uses **Server-Sent Events (SSE)** at `/api/stream` to push alerts to the browser instantly with sub-second latency and zero polling lag.
+* **Plain-English Narratives:** The analytics aggregator parses low-level network records and outputs clear, actionable sentences covering all 19 detection rules:
   > *"⚠️ A device at 192.168.1.105 probed 30 network services in a rapid burst — this pattern typically indicates network reconnaissance or port scanning."*
-* **Dynamic Threat Gauge:** Automatically evaluates whether the overall network status is `CLEAR`, `LOW`, or `HIGH` based on incident velocity.
-* **GeoIP Intelligence:** Resolves external threat destinations to their host country with interactive flags (cached locally, rate-limit protected).
-* **Network Device Inventory:** Inspects all communicating hardware on the segment and resolves MAC prefixes via IEEE OUI to identify manufacturers (e.g., *Apple*, *Intel*, *Raspberry Pi*).
-* **Analyst Feedback Loop:** Allows operators to tag alerts as **True Positive (TP)** or **False Positive (FP)** with notes directly from the UI, generating empirical accuracy stats to guide threshold tuning.
-* **Historical Trends:** Visualizes 24-hour alert distribution using interactive Chart.js graphs.
+* **Interactive Table Filtering & Instant Search:** Filter alerts in real-time by search query (source IP, destination IP, port, or payload text), detection rule (all 19 rules), or severity level (High, Medium, Low) across both live and historical logs.
+* **19 Detection Rules Indicator:** Header status badge visually confirms the 19 active detection heuristics running in the engine.
+* **Dynamic Threat Gauge:** Automatically evaluates whether the overall network status is `CLEAR`, `LOW`, or `HIGH` based on incident velocity and severity.
+* **GeoIP Intelligence:** Resolves external threat destinations to their host country with interactive flags (cached locally, RFC-1918 private network classification, rate-limit protected).
+* **Network Device Inventory:** Inspects all communicating hardware on the segment and resolves MAC prefixes via IEEE OUI to identify manufacturers (e.g., *Apple*, *Intel*, *Raspberry Pi Foundation*, *Cisco*).
+* **Investigation Modal & Evidence Viewer:** Full forensic modal displaying structured JSON evidence, plain-language trigger explanation, and analyst True Positive (TP) / False Positive (FP) feedback loop.
+* **Interactive Calendar Log Viewer:** Heatmap calendar of daily incident volumes with one-click drilldown into complete logs for any past date.
+* **Historical Trends:** Visualizes 24-hour alert distribution using interactive Chart.js graphs color-coded across all 19 detection rules.
 
 ---
 
@@ -169,10 +205,11 @@ python evaluation/replay.py --pcap data/test_attacks.pcap
 ```
 
 **How NetGuard processes `log.pcap`:**
-* **Dual Format Auto-Detection:** Automatically detects whether `log.pcap` is a binary libpcap capture or an ASCII `tcpdump` text dump.
-* **Protocol & Field Extraction:** Decodes IP endpoints, ports, protocol flags, ARP mappings, raw payloads (DPI), and DNS queries.
-* **Rule Engine Execution:** Evaluates all 10 detection rules against every packet.
-* **Database Storage:** Inserts all detected security incidents directly into `storage/alerts.db`.
+* **Constant-Memory Streaming:** Streams binary libpcap frames iteratively instead of buffering whole multi-gigabyte captures in memory.
+* **Dual Format Auto-Detection:** Automatically detects whether `log.pcap` is a binary libpcap capture or an ASCII `tcpdump` text dump (supporting both `YYYY-MM-DD` and `HH:MM:SS` timestamp formats).
+* **Protocol & Field Extraction:** Decodes IP endpoints, ports, protocol flags, TCP window size, DNS query name/type, ARP mappings, and raw payloads.
+* **Rule Engine Execution:** Evaluates all 19 detection rules concurrently against every packet with zero early-exit truncation.
+* **Database Storage:** Inserts all detected security incidents directly into `storage/alerts.db` with durable disk spooling.
 
 ### 3. Automated Isolated Evaluation Runner
 
@@ -182,6 +219,12 @@ To run a complete, repeatable evaluation with isolated databases and fresh ARP s
 # Runs full evaluation on synthetic attack + benign PCAPs with ground truth:
 python evaluation/run_eval.py
 ```
+
+**Evaluation Results Summary:**
+- **Attack Detection:** **37 / 37 labelled scenarios detected** (100.0% Recall, 100.0% Precision, 100.0% F1).
+- **Benign Background Traffic:** **0 False Positives** on the 806-packet benign fixture.
+- **Unit Test Suite:** **248 passed tests** (`python -m pytest -q -p no:cacheprovider`).
+- *Note:* Synthetic benchmark results validate rule mechanics and do not imply 100% real-world accuracy on unlabelled production traffic.
 
 This command runs with zero contamination:
 * Replays `data/test_attacks.pcap` into an isolated temporary database.
@@ -329,18 +372,45 @@ All parameters in `config.py` can be tuned via `.env`:
 | `POSTGRES_URL` | `""` | PostgreSQL connection string (`postgresql://user:pass@host:5432/db`) |
 | `PORT_SCAN_THRESHOLD` | `15` | Distinct destination ports probed in window to trigger alert |
 | `UDP_SCAN_THRESHOLD` | `15` | Distinct UDP destination ports or hosts in `TIME_WINDOW` to trigger alert |
+| `UDP_FLOOD_THRESHOLD` | `50` | UDP packets to a single destination in `UDP_FLOOD_WINDOW` to trigger flood alert |
+| `UDP_FLOOD_WINDOW` | `5` | UDP flood sliding window duration in seconds |
+| `UDP_FLOOD_WEB_THRESHOLD` | `500` | UDP packet threshold for web/QUIC ports (UDP 443) |
 | `TCP_STEALTH_SCAN_THRESHOLD` | `15` | Distinct FIN/NULL/Xmas TCP destination ports in `TIME_WINDOW` to trigger alert |
-| `SYN_FLOOD_THRESHOLD` | `100` | Per-source SYN packets in window to trigger alert |
+| `SYN_FLOOD_THRESHOLD` | `100` | Per-source initial SYN packets in window to trigger alert |
+| `RST_FLOOD_THRESHOLD` | `100` | Per-source RST packets in window to trigger alert |
+| `RST_RESPONSE_GRACE_SECONDS` | `5.0` | Grace window to match legitimate closed-port RST responses to recent SYNs |
 | `DISTRIBUTED_SYN_FLOOD_THRESHOLD` | `500` | Aggregate SYN packets to one service in window |
 | `DISTRIBUTED_SYN_FLOOD_MIN_SOURCES` | `20` | Distinct source IPs required for distributed SYN alert |
 | `ICMP_SWEEP_THRESHOLD` | `12` | Distinct echo-request targets in `TIME_WINDOW` to trigger alert |
-| `TIME_WINDOW` | `10` | Sliding window duration in seconds for stateful rules |
+| `ICMP_FLOOD_THRESHOLD` | `50` | ICMP echo requests to single target in `ICMP_FLOOD_WINDOW` to trigger alert |
+| `ICMP_FLOOD_WINDOW` | `5` | ICMP flood sliding window duration in seconds |
+| `BRUTE_FORCE_THRESHOLD` | `20` | Rapid authentication attempts to credentialed service ports to trigger alert |
+| `BRUTE_FORCE_WINDOW` | `60` | Brute force sliding window duration in seconds |
+| `BRUTE_FORCE_EXTRA_PORTS` | `""` | Optional comma-separated non-standard authentication ports (e.g., `8443,9443`) |
+| `SLOW_SCAN_THRESHOLD` | `30` | Distinct destination ports/hosts across extended window to trigger alert |
+| `SLOW_SCAN_WINDOW` | `120` | Extended window in seconds for low-and-slow scan detection |
+| `SLOW_SCAN_COOLDOWN_S` | `120.0` | Cooldown period for duplicate low-and-slow scan alerts |
+| `DATA_EXFIL_BYTE_THRESHOLD` | `50000` | Outbound payload bytes in window to trigger data exfiltration alert |
+| `DATA_EXFIL_WINDOW` | `30` | Data exfiltration sliding window duration in seconds |
+| `DATA_EXFIL_WEB_BYTE_THRESHOLD`| `1000000` | Outbound volume threshold for common web upload ports (80, 443) |
+| `TCP_ZERO_WINDOW_THRESHOLD` | `20` | Persistent zero-window (`win=0`) advertisements in window to trigger alert |
+| `TCP_ZERO_WINDOW_WINDOW` | `10` | Zero-window sliding window duration in seconds |
+| `TCP_ZERO_WINDOW_COOLDOWN` | `60.0` | Per-endpoint-pair cooldown in seconds for zero-window alerts |
+| `TLS_INSPECTION` | `true` | Enable TLS Client Hello SNI anomaly and tunnel detection |
+| `TLS_COOLDOWN_S` | `60.0` | Cooldown period in seconds for TLS anomaly alerts |
+| `CLEAR_HTTP_TLS_MIN_REQUESTS` | `2` | Minimum repeated plaintext HTTP requests on TLS port to trigger alert |
+| `CLEAR_HTTP_TLS_WINDOW_S` | `600.0` | Window in seconds for tracking plaintext HTTP requests on TLS port |
+| `CLEAR_HTTP_TLS_COOLDOWN_S` | `600.0` | Alert cooldown in seconds for cleartext HTTP on TLS port |
+| `TIME_WINDOW` | `10` | Sliding window duration in seconds for standard stateful rules |
 | `PAYLOAD_INSPECTION` | `true` | Enable regex Deep Packet Inspection (DPI) |
 | `PAYLOAD_MAX_BYTES` | `512` | Maximum packet payload bytes and per-flow TCP stream buffer |
+| `PAYLOAD_ALERT_COOLDOWN_S` | `60.0` | Per-flow duplicate suppression cooldown for payload signatures |
 | `DNS_ENTROPY_THRESHOLD` | `3.8` | Shannon entropy threshold for relevant DNS labels |
 | `DNS_QUERY_MAX_LEN` | `60` | Maximum character length for legitimate domains |
 | `DNS_FREQ_THRESHOLD` | `20` | Minimum queries to one parent domain from one source inside `DNS_FREQ_WINDOW`; `0` disables this detector |
 | `DNS_FREQ_WINDOW` | `60` | DNS frequency sliding-window duration in seconds |
+| `DNS_SUBDOMAIN_THRESHOLD` | `20` | Minimum distinct subdomains under same parent domain to trigger exfiltration alert |
+| `DNS_SUBDOMAIN_WINDOW` | `60` | Subdomain exfiltration sliding window duration in seconds |
 | `ANALYSIS_INTERVAL` | `30` | Seconds between background aggregation and retention checks |
 | `DASHBOARD_HOST` | `127.0.0.1` | Host/IP for the Flask dashboard. Default is loopback-only. Set to `0.0.0.0` only with a firewall/reverse-proxy in place. |
 | `DASHBOARD_PORT` | `5000` | Port for Flask dashboard |

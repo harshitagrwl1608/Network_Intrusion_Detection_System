@@ -26,6 +26,10 @@
     </div>
 
     <div class="header-right">
+      <div class="rules-active-pill" id="rules-active-pill" title="19 Detection Rules Running">
+        <span class="rules-active-dot"></span>
+        <span id="rules-active-label">19 Rules Active</span>
+      </div>
       <div class="status-pill" id="status-pill">
         <span class="status-dot" id="status-dot"></span>
         <span id="status-label">Loading…</span>
@@ -269,6 +273,48 @@
         </div>
       </div>
     </div>
+
+    <!-- ── Interactive Filter & Search Controls ── -->
+    <div class="table-filter-bar">
+      <div class="filter-inputs-group">
+        <div class="filter-search-box">
+          <svg class="filter-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <input type="text" id="alert-search-input" class="filter-search-input" placeholder="Search IP, port, or payload text…" oninput="onFilterChange()" />
+        </div>
+        <select id="alert-rule-filter" class="filter-select" onchange="onFilterChange()">
+          <option value="ALL">All Rules (19)</option>
+          <option value="BLOCKLIST">BLOCKLIST</option>
+          <option value="TCP_FLAG_ANOMALY">TCP_FLAG_ANOMALY</option>
+          <option value="PORT_SCAN">PORT_SCAN</option>
+          <option value="UDP_SCAN">UDP_SCAN</option>
+          <option value="UDP_FLOOD">UDP_FLOOD</option>
+          <option value="TCP_STEALTH_SCAN">TCP_STEALTH_SCAN</option>
+          <option value="SYN_FLOOD">SYN_FLOOD</option>
+          <option value="DISTRIBUTED_SYN_FLOOD">DISTRIBUTED_SYN_FLOOD</option>
+          <option value="ICMP_SWEEP">ICMP_SWEEP</option>
+          <option value="ICMP_FLOOD">ICMP_FLOOD</option>
+          <option value="ARP_SPOOF">ARP_SPOOF</option>
+          <option value="PAYLOAD_HIT">PAYLOAD_HIT</option>
+          <option value="DNS_ANOMALY">DNS_ANOMALY</option>
+          <option value="BRUTE_FORCE">BRUTE_FORCE</option>
+          <option value="SLOW_PORT_SCAN">SLOW_PORT_SCAN</option>
+          <option value="DATA_EXFIL">DATA_EXFIL</option>
+          <option value="TLS_ANOMALY">TLS_ANOMALY</option>
+          <option value="CLEAR_HTTP_ON_TLS_PORT">CLEAR_HTTP_ON_TLS_PORT</option>
+          <option value="TCP_ZERO_WINDOW">TCP_ZERO_WINDOW</option>
+        </select>
+        <select id="alert-sev-filter" class="filter-select" onchange="onFilterChange()">
+          <option value="ALL">All Severities</option>
+          <option value="high">High Severity</option>
+          <option value="medium">Medium Severity</option>
+          <option value="low">Low Severity</option>
+        </select>
+      </div>
+      <div class="filter-meta" id="filter-meta-text">Showing all alerts</div>
+    </div>
+
     <div class="table-wrapper">
       <table class="alerts-table" id="alerts-table">
         <thead id="alerts-thead">

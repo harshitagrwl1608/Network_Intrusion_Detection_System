@@ -35,9 +35,45 @@ TEMPLATES = {
         "⚠️  A device at {src_ip} probed multiple network services in a rapid burst — "
         "this pattern typically indicates network reconnaissance or port scanning."
     ),
+    "UDP_SCAN": (
+        "⚠️  A device at {src_ip} probed multiple UDP ports or hosts in a short window — "
+        "this pattern indicates UDP reconnaissance or service sweeps."
+    ),
+    "TCP_STEALTH_SCAN": (
+        "⚠️  A device at {src_ip} sent stealth TCP probes (FIN, NULL, or Xmas scans) — "
+        "these scans attempt to evade standard connection logging to map open ports."
+    ),
+    "SLOW_PORT_SCAN": (
+        "🕵️  Low-and-slow port scan detected from {src_ip} spanning multiple minutes — "
+        "probes are spaced out to evade rapid sliding-window rate limiters."
+    ),
     "SYN_FLOOD": (
         "🔴  A device at {src_ip} sent an unusually high volume of connection requests — "
         "this pattern typically indicates a denial-of-service (SYN flood) attempt."
+    ),
+    "DISTRIBUTED_SYN_FLOOD": (
+        "🚨  Distributed SYN Flood detected targeting {dst_ip} across numerous source addresses — "
+        "this indicates a coordinated DDoS assault."
+    ),
+    "UDP_FLOOD": (
+        "🔴  A device at {src_ip} initiated a high-volume UDP packet flood toward {dst_ip} — "
+        "this pattern indicates a denial-of-service (UDP flood) attempt."
+    ),
+    "ICMP_SWEEP": (
+        "🔍  A device at {src_ip} sent ICMP echo requests across multiple hosts — "
+        "this pattern indicates an active network host discovery sweep."
+    ),
+    "ICMP_FLOOD": (
+        "🔴  A device at {src_ip} generated a rapid flood of ICMP echo packets targeting {dst_ip} — "
+        "typical of an ICMP ping flood DoS attack."
+    ),
+    "TCP_FLAG_ANOMALY": (
+        "⚠️  A device at {src_ip} sent malformed TCP packets with illegal flag combinations (e.g., SYN+FIN) — "
+        "frequently used for OS fingerprinting or firewall evasion."
+    ),
+    "TCP_ZERO_WINDOW": (
+        "🔴  A burst of TCP Zero-Window advertisements was sent by {src_ip} to {dst_ip} — "
+        "indicative of a Sockstress / resource-exhaustion DoS attack."
     ),
     "ARP_SPOOF": (
         "🔴  The network address {src_ip} suddenly changed its hardware MAC identity — "
@@ -49,13 +85,29 @@ TEMPLATES = {
     ),
     "PAYLOAD_HIT": (
         "🚨  Malicious payload detected from {src_ip} — "
-        "an attack signature (SQL injection, XSS, or credential theft) was found in "
-        "unencrypted traffic. Inspect the device immediately."
+        "an attack signature (SQL injection, command injection, webshell, or credential leak) was found in "
+        "unencrypted traffic."
     ),
     "DNS_ANOMALY": (
         "🔍  A device at {src_ip} sent a suspicious DNS query — "
-        "the domain name has unusually random characters, which is a hallmark of "
-        "malware using Domain Generation Algorithms (DGA) or DNS data tunneling."
+        "the domain name exhibits high entropy or tunneling characteristics, hallmark of "
+        "malware using Domain Generation Algorithms (DGA) or covert DNS data tunneling."
+    ),
+    "BRUTE_FORCE": (
+        "🔐  Repeated authentication connection attempts from {src_ip} to service port {dst_port} — "
+        "potential credential brute-force attack."
+    ),
+    "DATA_EXFIL": (
+        "🚨  High-volume outbound data transfer detected from {src_ip} to external destination {dst_ip} — "
+        "possible data exfiltration or database dump."
+    ),
+    "TLS_ANOMALY": (
+        "🔒  TLS handshake anomaly detected from {src_ip} — "
+        "Server Name Indication (SNI) contained a literal IP or suspicious dynamic proxy/tunnel domain."
+    ),
+    "CLEAR_HTTP_ON_TLS_PORT": (
+        "⚠️  Plaintext HTTP traffic detected on TLS port ({dst_port}) from {src_ip} — "
+        "indicates proxy bypass, unencrypted C2 communication, or misconfigured SSL."
     ),
     "MOST_ACTIVE": (
         "📊  The most active suspicious device in the last hour is {src_ip} "
@@ -179,7 +231,13 @@ def _obs_per_alert_type(alerts: list[dict]) -> list[dict]:
                 f"listed on known-malicious threat intelligence feeds."
             )
         else:
-            msg = _format(rule, src_ip=src, dst_ip=dst, count=1)
+            msg = _format(
+                rule,
+                src_ip=src,
+                dst_ip=dst,
+                dst_port=a.get("dst_port") or "—",
+                count=1,
+            )
         results.append({
             "message": msg,
             "rule_name": rule,
