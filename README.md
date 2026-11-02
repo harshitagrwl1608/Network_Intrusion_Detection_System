@@ -13,7 +13,7 @@
 > [!NOTE]
 > ### 🚧 Ongoing Project Notice
 > **NetGuard IDS is currently under active development.**  
-> The core packet-sniffing engine, 19-rule signature and heuristic detection suite, 17-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization, Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming are functional and verified across 248 unit tests and 37/37 synthetic evaluation scenarios. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
+> The core packet-sniffing engine, 19-rule signature and heuristic detection suite, 17-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization, Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed 388 tests. The latest synthetic replay detected 38/38 labeled scenarios, with zero unmatched attack alerts and zero alerts on the benign fixture; these fixtures do not estimate real-world accuracy. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
 
 ---
 
@@ -221,9 +221,9 @@ python evaluation/run_eval.py
 ```
 
 **Evaluation Results Summary:**
-- **Attack Detection:** **37 / 37 labelled scenarios detected** (100.0% Recall, 100.0% Precision, 100.0% F1).
-- **Benign Background Traffic:** **0 False Positives** on the 806-packet benign fixture.
-- **Unit Test Suite:** **248 passed tests** (`python -m pytest -q -p no:cacheprovider`).
+- **Attack Detection:** **38 / 38 labelled scenarios detected**; no unmatched attack alerts in the fixture replay.
+- **Benign Background Traffic:** **0 alerts** on the 832-packet benign fixture.
+- **Unit Test Suite:** **388 passed tests** (`python -m unittest discover -s tests`, from `ids_project/`).
 - *Note:* Synthetic benchmark results validate rule mechanics and do not imply 100% real-world accuracy on unlabelled production traffic.
 
 This command runs with zero contamination:
