@@ -144,6 +144,18 @@ def _positive_float_setting(value, default: float, setting_name: str) -> float:
         return default
     return parsed
 
+
+def _nonnegative_float_setting(value, default: float, setting_name: str) -> float:
+    """Parse a finite non-negative float, preserving zero as an opt-out."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = -1.0
+    if not math.isfinite(parsed) or parsed < 0:
+        logger.warning("%s must be a finite non-negative number; using default %s", setting_name, default)
+        return default
+    return parsed
+
 # ---------------------------------------------------------------------------
 # Ports that servers legitimately respond FROM — if a host's SOURCE port
 # is in this set, it is a server replying to clients, NOT a scanner.
@@ -4228,17 +4240,22 @@ class TcpZeroWindowRule:
     indicate Sockstress, but ordinary receiver backpressure is also possible.
     """
     name = "TCP_ZERO_WINDOW"
-    rule_version = "1.6"
+    rule_version = "1.7"
 
     def __init__(self, threshold: int = 20, window: int = 10, cooldown: float = 60.0,
                  max_tracked: int = 4096, enabled: bool = True,
                  min_distinct_flows: int = 3):
-        self.threshold = max(1, int(threshold))
-        self.window = max(1, int(window))
-        self.cooldown = float(cooldown)
-        self.max_tracked = max(100, int(max_tracked))
+        self.threshold = _positive_setting(
+            threshold, 20, "TCP_ZERO_WINDOW_THRESHOLD")
+        self.window = _positive_setting(
+            window, 10, "TCP_ZERO_WINDOW_WINDOW")
+        self.cooldown = _nonnegative_float_setting(
+            cooldown, 60.0, "TCP_ZERO_WINDOW_COOLDOWN")
+        self.max_tracked = max(100, _positive_setting(
+            max_tracked, 4096, "TCP_ZERO_WINDOW_MAX_TRACKED"))
         self.enabled = bool(enabled)
-        self.min_distinct_flows = max(2, int(min_distinct_flows))
+        self.min_distinct_flows = max(2, _positive_setting(
+            min_distinct_flows, 3, "TCP_ZERO_WINDOW_MIN_FLOWS"))
         self._lock = threading.Lock()
         self._handshake_ttl = max(120.0, self.window * 10.0)
         # (canonical connection key) -> (initiator endpoint, SYN timestamp)

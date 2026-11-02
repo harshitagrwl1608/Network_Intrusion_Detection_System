@@ -58,6 +58,23 @@ class TestTcpZeroWindowRule(unittest.TestCase):
             alert = self.rule.check(self._pkt(win=0, ts=100.0 + i * 0.1))
             self.assertIsNone(alert)
 
+    def test_invalid_thresholds_windows_and_caps_use_safe_defaults(self):
+        rule = TcpZeroWindowRule(
+            threshold=0, window=-1, cooldown=float("nan"),
+            max_tracked="invalid", min_distinct_flows="invalid",
+        )
+        self.assertEqual(rule.threshold, 20)
+        self.assertEqual(rule.window, 10)
+        self.assertEqual(rule.cooldown, 60.0)
+        self.assertEqual(rule.max_tracked, 4096)
+        self.assertEqual(rule.min_distinct_flows, 3)
+        self.assertIsNone(rule.check(self._pkt(ts=100.0)))
+        self.assertEqual(len(rule._history[("192.168.1.50", "192.168.1.1", "unknown")]), 1)
+
+    def test_zero_cooldown_remains_an_explicit_valid_setting(self):
+        rule = TcpZeroWindowRule(threshold=1, cooldown=0)
+        self.assertEqual(rule.cooldown, 0.0)
+
     def test_multi_flow_burst_fires_with_three_distinct_flows(self):
         alert = None
         ports = [50000, 50001, 50002]

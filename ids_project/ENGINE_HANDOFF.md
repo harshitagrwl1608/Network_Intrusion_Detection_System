@@ -949,6 +949,13 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Added regression cases for nonnumeric, infinite, negative, and oversized values. Existing positive and benign flag-combination cases remain covered.
 - Verification: focused TCP flag tests **11 passed**; full suite **343 tests passed** in 49.38s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios**, with zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
 
+## Follow-up: 2026-11-02 TCP_ZERO_WINDOW setting validation
+
+- The existing constructor coerced a zero detection threshold to `1`, allowing a single zero-window advertisement to satisfy the burst trigger. It also accepted negative windows and cooldowns and raised on malformed caps or thresholds.
+- Version 1.7 now uses documented defaults for invalid/nonpositive thresholds, windows, caps, and flow corroboration settings. Cooldown must be finite and non-negative; `0` remains a valid way to disable cooldown. Minimum configured state cap and two-flow corroboration behavior remain in place.
+- Added regressions proving invalid values select safe defaults, one zero-window packet does not trigger the default burst threshold, and zero cooldown remains valid.
+- Verification: focused zero-window tests **22 passed**; full suite **345 tests passed** in 48.16s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios** across all 19 rule families, with zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
 ## Follow-up: 2026-11-02 malformed TCP sequence metadata in PAYLOAD_HIT
 
 - `PayloadRule._update_stream` converted `tcp_payload_seq` without handling malformed input. Reproduction with a valid SQL injection payload and `tcp_payload_seq="malformed"` raised `ValueError` before packet-level matching, losing that detection.
