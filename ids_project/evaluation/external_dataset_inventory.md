@@ -10,6 +10,7 @@ repository under `/tmp/netguard-external-datasets`.
 | Dataset | Source and version | Format / telemetry | License / use note | Selection status |
 |---|---|---|---|---|
 | CTU-13 Scenario 1 / CTU-Malware-Capture-Botnet-42 (Neris) | [Stratosphere CTU-13 scenario page](https://www.stratosphereips.org/datasets-ctu13/), scenario directory `https://mcfp.felk.cvut.cz/publicDatasets/CTU-Malware-Capture-Botnet-42/`; retrieved 2026-11-03 | 56 MB botnet-only PCAP, 323,154 packets; network payload and protocol metadata | Dataset overview states CC-BY; scenario page permits use with attribution and warns the executable is malware. Only the PCAP was downloaded and analyzed offline; the executable was not downloaded or executed. | Selected as a manageable network subset because it exercises existing scan, DNS, flood, payload and brute-force rules. SHA-256: `b89cd5931f62d87ceff266568c97c6e36e56dd0330813cacadbc14a6c5576a36` |
+| CTU-13 Scenario 2 / CTU-Malware-Capture-Botnet-43 (Neris) | [Stratosphere scenario directory](https://mcfp.felk.cvut.cz/publicDatasets/CTU-Malware-Capture-Botnet-43/); retrieved 2026-11-03 | 35 MB botnet-only PCAP, 176,064 packets; network payload and protocol metadata | CTU-13 dataset is CC-BY; public PCAP analyzed offline with attribution; no executable downloaded or run. | Chosen as the next distinct CTU-13 scenario after Scenario 1. SHA-256: 189b38247b614ae51feee0e75b360552eecdee0b68843b88c7d9ed88d7be7631 |
 | EVTX-ATTACK-SAMPLES | [Project repository](https://github.com/sbousseaden/EVTX-ATTACK-SAMPLES) | EVTX Windows event logs | Repository identifies GPL licensing; endpoint telemetry is currently outside this packet-oriented engine's input path. | Discovered; not downloaded in this network-focused cycle |
 | OTRF Security Datasets | [Project repository](https://github.com/OTRF/Security-Datasets) | Mixed endpoint and security telemetry | Repository documents GPL-3.0; endpoint field compatibility is not present in the current engine. | Discovered; not downloaded in this network-focused cycle |
 | Splunk BOTS v2 | [Project repository](https://github.com/splunk/botsv2) | Splunk/SIEM telemetry | Dataset-specific terms require review before ingestion; no SPL implementation is present in this repository. | Discovered; not downloaded in this network-focused cycle |
@@ -18,8 +19,9 @@ repository under `/tmp/netguard-external-datasets`.
 For the network-PCAP stratum, the candidate set was the thirteen CTU-13
 botnet scenarios 42 through 54. A reproducible seeded selection was used:
 `random.Random(2).choice(range(42, 55))` selected scenario 42. This is one
-sample from the stratum, not comprehensive CTU-13 coverage; later cycles must
-use a different seed or explicitly justify a repeat.
+sample from the stratum, not comprehensive CTU-13 coverage. The following
+cycle selected the distinct Scenario 2 PCAP; two botnet-only scenarios still
+do not provide comprehensive coverage or a benign baseline.
 
 ## Rule-by-rule coverage
 
@@ -82,6 +84,21 @@ python3 ids_project/evaluation/replay.py \
   --db /tmp/netguard-ng-ctu42-settled.db \
   --arp-table /tmp/netguard-ng-ctu42-settled-arp.json \
   --blocklist ids_project/data/test_blocklist.txt
+
+# Scenario 2, current improved rules
+python3 ids_project/evaluation/replay.py \
+  --pcap /tmp/netguard-external-datasets/ctu13-b43-botnet.pcap \
+  --db /tmp/netguard-ng-ctu43-improved.db \
+  --arp-table /tmp/netguard-ng-ctu43-improved-arp.json \
+  --blocklist ids_project/data/test_blocklist.txt
+
+# Scenario 2, Suricata 8.0.7 with the same packaged ruleset
+LD_LIBRARY_PATH=/tmp/netguard-suricata-root/usr/lib/x86_64-linux-gnu \
+  /tmp/netguard-suricata-root/usr/bin/suricata \
+  -c /tmp/netguard-suricata.yaml \
+  -S /tmp/netguard-suricata-data/rules/suricata.rules \
+  -r /tmp/netguard-external-datasets/ctu13-b43-botnet.pcap \
+  -l /tmp/netguard-suricata-ctu43 --runmode autofp
 ```
 
 The final alert counts and agreement/disagreement summary are appended only
@@ -162,3 +179,52 @@ For the repository's local captures, the same procedure produced 38 NetGuard
 attack alerts versus 0 Suricata alerts, and 0 NetGuard benign alerts versus 2
 Suricata stream diagnostics. Those synthetic/local results are retained as
 regression evidence but are not treated as real-world validation.
+
+## Completed CTU-13 Scenario 2 comparison
+
+The public botnet-only PCAP contained 176,064 packets over 12,342.593 seconds.
+The original `PAYLOAD_HIT` v1.17 replay processed every packet and produced
+122 alerts: `SLOW_PORT_SCAN` 70, `SYN_FLOOD` 36, `PORT_SCAN` 8, and
+`PAYLOAD_HIT` 8. The improved v1.18 replay processed all 176,064 packets,
+produced 114 alerts, and reported `alerts_dropped=0`: `SLOW_PORT_SCAN` 70,
+`SYN_FLOOD` 36, `PORT_SCAN` 8, and `PAYLOAD_HIT` 0. Thus the other three
+existing rules kept their observed counts. Both replays reported
+`alerts_dropped=0`.
+
+The baseline replay used the v1.17 rule code at commit `0de731b`; the
+improved replay uses the current branch code.
+
+Suricata 8.0.7 recorded 2,987 alerts, 21,810 flow events, 1,594 DNS events,
+4,567 HTTP events and 50 SMTP events. Its alerts were chiefly invalid TCP
+checksums (1,876), excessive HTTP response header repetition (1,012), and
+one-direction app-layer protocol events (91); no matching scan, SYN-flood,
+SQL-injection, XXE or XSS behavior signature fired. These signatures were not
+treated as a NetGuard alert-count target.
+
+PCAP review independently confirmed all 8 `PORT_SCAN` windows' destination
+counts (15–22 distinct TCP/80 targets) and all 70 `SLOW_PORT_SCAN` windows'
+30 distinct TCP/25 or TCP/80 targets. In each of the 36 `SYN_FLOOD` windows,
+the capture contained 100 initial SYN packets; these represented 66–95
+distinct TCP 4-tuples (median 80). Reverse SYN-ACK and RST replies were also
+present in some windows, so packet rate alone does not establish service
+impact. The existing rule's SYN-rate caveat remains appropriate; this
+botnet-only sample has no benign companion for threshold tuning.
+
+The 8 v1.17 `PAYLOAD_HIT` alerts came from three weak content heuristics:
+four SQL comment-marker hits (`#` three times and `----` once) ended exactly
+at the 512-byte inspection cap. PCAP payloads showed these markers at the edge
+of truncated ad-cookie data, SMTP binary data, and a multipart form boundary.
+Two XXE hits matched the ordinary `<!DOCTYPE HTML PUBLIC` prefix in HTML email
+bodies, without an entity declaration. Two XSS hits matched static
+`document.write` ad markup that wrote an iframe and did not use a
+user-controlled value. Suricata EVE classified the surrounding flows as HTTP
+and SMTP and did not emit matching content-attack signatures.
+
+`PAYLOAD_HIT` v1.18 ignores SQL comment markers that only appear complete at
+a truncated sample boundary, requires an entity declaration or a suspicious
+external DTD reference for XXE, and requires a user-controlled source for the
+`document.write` XSS heuristic. Regression cases retain ordinary MySQL hash
+comments, external entity and DTD XXE payloads, dynamic `document.write`
+input, and the other existing payload signatures. The full suite passed:
+426 tests and 96 subtests. The botnet-only sample cannot provide a benign
+false-positive rate or precision estimate.

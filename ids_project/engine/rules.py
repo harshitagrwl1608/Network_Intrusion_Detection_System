@@ -34,7 +34,7 @@ RuleEngine execution order (all rules run; no early exit):
   9.  IcmpSweepRule          — ICMP echo target sweep by source
  10.  IcmpFloodRule          — ICMP echo-request flood
  11.  ArpSpoofRule           — persistent IP→MAC mapping change
- 12.  PayloadRule (v1.17)    — bounded TCP stream DPI + regex signatures (all matches)
+ 12.  PayloadRule (v1.18)    — bounded TCP stream DPI + regex signatures (all matches)
      Signatures:
        SQL_INJECTION        — UNION/SELECT, BENCHMARK, LOAD_FILE, INTO OUTFILE, quote-OR bypass
        XSS                  — script/event handlers + SVG/img/iframe/body bypass vectors
@@ -1908,7 +1908,9 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
         "XSS",
         re.compile(
             rb"(?i)(<script[\s>]|javascript:\s*(?:void|alert|eval|document)|onerror\s*=|onload\s*="
-            rb"|alert\s*\(|document\.cookie|document\.write\s*\("
+            rb"|alert\s*\(|document\.cookie"
+            rb"|document\.write\s*\([^)]{0,200}(?:location(?:\.[\w]+|\[[^\]]+\])"
+            rb"|document\.URL|window\.name|decodeURIComponent|unescape|atob)"
             rb"|<svg(?:\s[^>]*)?\s+on\w+\s*=|<svg/on\w+="
             rb"|<img[^>]+src\s*=\s*[\x27\x22]?x[\x27\x22]?[^>]+onerror\s*="
             rb"|<iframe[^>]+src\s*=\s*[\x27\x22]?javascript:"
@@ -2030,9 +2032,16 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
         "XXE",
         re.compile(
             rb"(?is)(?:<!ENTITY\s+%?[\w:.-]+\s+(?:SYSTEM|PUBLIC)\s+['\"]"
-            rb"|<!DOCTYPE\s+[\w:.-]+\s+(?:SYSTEM|PUBLIC)\s+['\"]"
             rb"|<!DOCTYPE\s+[\w:.-]+\s*\[[\s\S]{0,512}?"
-            rb"<!ENTITY\s+%?[\w:.-]+\s+(?:SYSTEM|PUBLIC)\s+['\"])"
+            rb"<!ENTITY\s+%?[\w:.-]+\s+(?:SYSTEM|PUBLIC)\s+['\"]"
+            rb"|<!DOCTYPE\s+[\w:.-]+\s+SYSTEM\s+['\"]"
+            rb"(?:file|ftp|gopher|dict|jar|netdoc|expect|php):[^'\"]+['\"]"
+            rb"|<!DOCTYPE\s+[\w:.-]+\s+PUBLIC\s+['\"][^'\"]+['\"]\s+['\"]"
+            rb"(?:file|ftp|gopher|dict|jar|netdoc|expect|php):[^'\"]+['\"]"
+            rb"|<!DOCTYPE\s+[\w:.-]+\s+SYSTEM\s+['\"]"
+            rb"https?://(?!(?:www\.)?w3\.org/TR/)[^'\"]+['\"]"
+            rb"|<!DOCTYPE\s+[\w:.-]+\s+PUBLIC\s+['\"][^'\"]+['\"]\s+['\"]"
+            rb"https?://(?!(?:www\.)?w3\.org/TR/)[^'\"]+['\"])"
         ),
         "high",
     ),
@@ -2258,7 +2267,7 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.17"
+    rule_version = "1.18"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048,
@@ -2508,6 +2517,15 @@ class PayloadRule:
 
         packet_sample = payload[: self.max_bytes]
         try:
+            captured_payload_len = int(record.get("payload_len", len(payload)))
+        except (TypeError, ValueError, OverflowError):
+            captured_payload_len = len(payload)
+        packet_truncated = (
+            len(packet_sample) >= self.max_bytes
+            or len(payload) > len(packet_sample)
+            or captured_payload_len > len(packet_sample)
+        )
+        try:
             tcp_flags = int(record.get("tcp_flags") or 0)
         except (TypeError, ValueError, OverflowError):
             tcp_flags = 0
@@ -2521,24 +2539,28 @@ class PayloadRule:
         )
         if not payload:
             return None
-        base_samples: list[tuple[bytes, str]] = [(packet_sample, "packet")]
+        base_samples: list[tuple[bytes, str, bool]] = [
+            (packet_sample, "packet", packet_truncated)
+        ]
         if stream_sample and stream_sample != packet_sample:
-            base_samples.append((stream_sample, "tcp_stream"))
+            base_samples.append((
+                stream_sample, "tcp_stream", len(stream_sample) >= self.max_bytes
+            ))
 
-        samples: list[tuple[bytes, str]] = list(base_samples)
+        samples: list[tuple[bytes, str, bool]] = list(base_samples)
         seen_representations: set[bytes] = {s[0] for s in samples}
 
         # Inspect single- and multi-pass URL-decoded views as well as form-encoded views.
-        for sample, source in base_samples:
+        for sample, source, truncated in base_samples:
             if b"%" in sample:
                 decoded = unquote_to_bytes(sample)
                 if decoded not in seen_representations:
-                    samples.append((decoded, "percent_decoded"))
+                    samples.append((decoded, "percent_decoded", truncated))
                     seen_representations.add(decoded)
 
                 multi_dec = _multi_unquote(sample, max_passes=3)
                 if multi_dec not in seen_representations:
-                    samples.append((multi_dec, "multi_pass_decoded"))
+                    samples.append((multi_dec, "multi_pass_decoded", truncated))
                     seen_representations.add(multi_dec)
 
             if b"+" in sample:
@@ -2546,42 +2568,53 @@ class PayloadRule:
                 # encoded literal %2B remains a plus sign.
                 form_decoded = unquote_to_bytes(sample.replace(b"+", b" "))
                 if form_decoded not in seen_representations:
-                    samples.append((form_decoded, "form_decoded"))
+                    samples.append((form_decoded, "form_decoded", truncated))
                     seen_representations.add(form_decoded)
 
                 multi_form = _multi_unquote(sample.replace(b"+", b" "), max_passes=3)
                 if multi_form not in seen_representations:
-                    samples.append((multi_form, "multi_pass_decoded"))
+                    samples.append((multi_form, "multi_pass_decoded", truncated))
                     seen_representations.add(multi_form)
 
         # Deobfuscation and evasion normalization passes:
         # - Stripping and normalizing null bytes (%00 or \x00)
         # - Collapsing inline SQL comments (/*...*/) to spaces
-        for sample, source in list(samples):
+        for sample, source, truncated in list(samples):
             if b"\x00" in sample:
                 null_stripped = sample.replace(b"\x00", b"")
                 if null_stripped not in seen_representations:
-                    samples.append((null_stripped, "null_byte_stripped"))
+                    samples.append((null_stripped, "null_byte_stripped", truncated))
                     seen_representations.add(null_stripped)
                 null_spaced = sample.replace(b"\x00", b" ")
                 if null_spaced not in seen_representations:
-                    samples.append((null_spaced, "null_byte_normalized"))
+                    samples.append((null_spaced, "null_byte_normalized", truncated))
                     seen_representations.add(null_spaced)
 
             if b"/*" in sample and b"*/" in sample:
                 comment_normalized = re.sub(rb"/\*.*?\*/", b" ", sample)
                 if comment_normalized not in seen_representations:
-                    samples.append((comment_normalized, "comment_normalized"))
+                    samples.append((comment_normalized, "comment_normalized", truncated))
                     seen_representations.add(comment_normalized)
 
         # Collect ALL matching signatures (§3.4 — do not return on first match)
         hits: list[dict] = []
         for label, pattern, confidence in _PAYLOAD_SIGNATURES:
             match = None
-            for sample, source in samples:
-                found = pattern.search(sample)
-                if found is not None:
+            for sample, source, truncated in samples:
+                for found in pattern.finditer(sample):
+                    # A comment marker at the end of a bounded packet/stream
+                    # sample may only look complete because inspection stopped
+                    # at the cap. Do not call an unfinished SQL comment a hit.
+                    if (
+                        label == "SQL_INJECTION"
+                        and truncated
+                        and found.end() == len(sample)
+                        and found.group(0).startswith((b"#", b"--"))
+                    ):
+                        continue
                     match = (found, source)
+                    break
+                if match is not None:
                     break
             if match:
                 m, representation = match
@@ -2666,7 +2699,7 @@ class PayloadRule:
             ),
             "evidence": {
                 "hits": hits,
-                "inspected_bytes": max(len(sample) for sample, _ in samples),
+                "inspected_bytes": max(len(sample) for sample, _, _ in samples),
                 "cap_bytes": self.max_bytes,
                 "inspection": "packet_and_bounded_tcp_stream",
                 "stream_timeout_s": self.stream_timeout,
