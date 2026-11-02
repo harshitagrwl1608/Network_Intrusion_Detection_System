@@ -1081,3 +1081,10 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Version 1.3 removes only that broad source-port exemption. Detection remains limited to the existing FIN/NULL/Xmas flag patterns, distinct destination ports, threshold, and time window; trusted-source handling is unchanged.
 - Regression coverage verifies ACK-bearing source-port-80 traffic does not accumulate while three stealth probes using source port 80 trigger the existing scan alert.
 - Verification: focused stealth-scan tests **8 passed**; full suite **378 tests passed** in 46.64s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
+## Follow-up: 2026-11-02 source-port evasion in PORT_SCAN
+
+- `PORT_SCAN` dropped all TCP records from common service source ports before checking packet direction. A three-port initial-SYN scan sourced from port 80 reproduced a missed alert.
+- Version 1.9 retains common-service source-port exemptions for UDP, where packet direction cannot be inferred from a handshake. TCP scan records still require the existing initial-SYN predicate, which rejects ordinary SYN-ACK replies; initial SYNs using a service source port now count normally.
+- Regressions verify TCP source-port-80 scan detection and retained UDP DNS-reply source-port exemption. Existing SYN-ACK suppression tests remain in place.
+- Verification: focused port-scan tests **27 passed**; full suite **380 tests passed** in 46.49s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.

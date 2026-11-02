@@ -94,6 +94,30 @@ class TestPortScanDetection(unittest.TestCase):
 
         self.assertEqual(len(alerts), 0, "SYN-ACK traffic should not trigger PORT_SCAN")
 
+    def test_tcp_scan_using_well_known_source_port_still_triggers(self):
+        rule = PortScanRule(threshold=3, window=10)
+        alert = None
+        for i, port in enumerate((22, 23, 25)):
+            alert = rule.check({
+                "type": "IP", "src_ip": "203.0.113.44",
+                "dst_ip": "203.0.113.80", "protocol": "TCP",
+                "src_port": 80, "dst_port": port,
+                "initial_syn": True, "timestamp": 100 + i * 0.1,
+            }) or alert
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["distinct_ports"], 3)
+
+    def test_udp_scan_keeps_common_service_source_port_exemptions(self):
+        rule = UdpScanRule(threshold=3, window=10)
+        for i in range(3):
+            alert = rule.check({
+                "type": "IP", "src_ip": "8.8.8.8",
+                "dst_ip": f"203.0.113.{i + 1}", "protocol": "UDP",
+                "src_port": 53, "dst_port": 53000, "timestamp": 100 + i,
+            })
+            self.assertIsNone(alert)
+        self.assertEqual(rule._horiz, {})
+
     def test_tcp_initial_syn_triggers_port_scan(self):
         """Pure TCP initial SYN probes (SYN=1, ACK=0) must trigger PORT_SCAN."""
         src = "192.168.1.50"

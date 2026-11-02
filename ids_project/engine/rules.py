@@ -301,7 +301,7 @@ class BlocklistRule:
 
 class PortScanRule:
     name = "PORT_SCAN"
-    rule_version = "1.8"
+    rule_version = "1.9"
 
     def __init__(self, threshold: int = 15, window: int = 10, protocol: str = "TCP",
                  max_states: int = 10_000):
@@ -367,13 +367,17 @@ class PortScanRule:
         if _is_trusted(src):
             return None
 
-        # Skip server-side responses (DNS/HTTP/etc. replying to many clients)
-        src_port = record.get("src_port")
-        if src_port and src_port in WELL_KNOWN_SERVICE_PORTS:
-            return None
-
         protocol = record.get("protocol", "")
         if protocol != self.protocol:
+            return None
+
+        # UDP has no handshake to distinguish a server reply from a probe, so
+        # keep its service-source exemptions. For TCP, the initial-SYN check
+        # below already rejects normal SYN-ACK replies; a source-port-only
+        # exemption lets scanners evade detection by selecting a service port.
+        src_port = record.get("src_port")
+        if (self.protocol != "TCP" and src_port
+                and src_port in WELL_KNOWN_SERVICE_PORTS):
             return None
 
         # TCP scans count initial SYNs only. UDP has no handshake, so the
