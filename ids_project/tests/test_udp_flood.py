@@ -37,8 +37,12 @@ class TestUdpFloodRule(unittest.TestCase):
 
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "UDP_FLOOD")
+        self.assertEqual(alert["rule_version"], "1.4")
         self.assertEqual(alert["evidence"]["packet_count"], 50)
-        self.assertEqual(alert["severity"], "high")
+        self.assertEqual(alert["severity"], "medium")
+        self.assertEqual(alert["confidence"], "heuristic")
+        self.assertEqual(alert["evidence"]["classification"], "UDP_PACKET_RATE_THRESHOLD")
+        self.assertIn("review source context", alert["detail"])
         self.assertEqual(alert["protocol"], "UDP")
 
     def test_multicast_and_limited_broadcast_do_not_count_as_host_floods(self):

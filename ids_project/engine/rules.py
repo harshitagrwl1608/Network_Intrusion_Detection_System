@@ -587,7 +587,7 @@ class UdpFloodRule:
     """
 
     name = "UDP_FLOOD"
-    rule_version = "1.3"
+    rule_version = "1.4"
     ALERT_COOLDOWN_S: float = 60.0
     _EXEMPT_SRC_PORTS: set[int] = {53, 67, 68, 123}
 
@@ -690,13 +690,14 @@ class UdpFloodRule:
                 "src_port": src_port,
                 "dst_port": record.get("dst_port"),
                 "protocol": "UDP",
-                "severity": "high",
+                "severity": "medium",
                 "confidence": "heuristic",
                 "detail": (
                     f"{src} sent {count} UDP packets to {dst} in {self.window}s "
-                    f"— possible targeted UDP flood"
+                    "— possible targeted UDP flood (packet-rate signal; review source context)"
                 ),
                 "evidence": {
+                    "classification": "UDP_PACKET_RATE_THRESHOLD",
                     "packet_count": count,
                     "target_host": dst,
                     "target_port": record.get("dst_port"),
