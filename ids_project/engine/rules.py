@@ -3395,7 +3395,7 @@ class DataExfiltrationRule:
     - Configured TRUSTED_HOSTS.
     """
     name = "DATA_EXFIL"
-    rule_version = "1.12"
+    rule_version = "1.13"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 5000
     MAX_TRACKED_FLOW_EVENTS = 1_000_000
@@ -3593,8 +3593,15 @@ class DataExfiltrationRule:
         if _is_internal(dst_ip):
             return None
 
-        # Exclude broadcast and multicast destinations
-        if dst_ip == "255.255.255.255" or dst_ip.startswith("224.") or dst_ip.lower().startswith("ff"):
+        # Exclude all IP multicast ranges, not only the 224/8 subrange, plus
+        # the limited IPv4 broadcast address. String-prefix checks omitted
+        # IPv4 multicast groups such as 239.0.0.0/8.
+        try:
+            dst_addr = ipaddress.ip_address(dst_ip)
+        except ValueError:
+            return None
+        if dst_addr.is_multicast or (
+                dst_addr.version == 4 and int(dst_addr) == 0xFFFFFFFF):
             return None
 
         if _is_trusted(src_ip):

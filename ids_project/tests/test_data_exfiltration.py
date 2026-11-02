@@ -71,6 +71,17 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertTrue(alert["evidence"]["partial_tcp_overlaps_counted"])
         self.assertEqual(alert["severity"], "medium")
 
+    def test_multicast_and_broadcast_destinations_are_exempt(self):
+        rule = DataExfiltrationRule(byte_threshold=1000, window=30)
+        for i, dst in enumerate((
+            "224.1.2.3", "239.1.2.3", "255.255.255.255", "ff02::1",
+        )):
+            with self.subTest(destination=dst):
+                alert = rule.check(self._pkt(
+                    "192.168.1.50", dst, payload=b"X" * 1000,
+                    ts=100.0 + i, dst_port=9001, proto="UDP"))
+                self.assertIsNone(alert)
+
     def test_rolling_byte_total_expires_old_packets_without_false_alert(self):
         rule = DataExfiltrationRule(byte_threshold=1000, window=30)
         first = self._pkt(
@@ -250,7 +261,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNone(rule.check(late_old_syn))
         alert = rule.check(self._tcp_payload_pkt(payload, 1001, 103.0))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.12")
+        self.assertEqual(alert["rule_version"], "1.13")
         self.assertEqual(alert["evidence"]["bytes_transferred"], 1200)
 
     def test_tcp_connection_generation_state_is_bounded(self):
