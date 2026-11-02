@@ -2537,9 +2537,36 @@ def _shannon_entropy(s: str) -> float:
     return -sum((c / n) * math.log2(c / n) for c in freq.values())
 
 
+# Common multi-label public suffixes that use country-code TLDs. This is a
+# bounded heuristic list rather than a complete Public Suffix List; unknown
+# suffixes fall back to the final two labels to avoid grouping unrelated sites.
+_COMMON_MULTI_LABEL_CC_SUFFIXES = frozenset({
+    "co.uk", "org.uk", "gov.uk", "ac.uk", "sch.uk", "me.uk", "net.uk",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
+    "co.nz", "net.nz", "org.nz", "ac.nz", "govt.nz", "school.nz",
+    "co.in", "firm.in", "net.in", "org.in", "gen.in", "ind.in",
+    "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp",
+    "co.kr", "ne.kr", "or.kr", "re.kr", "pe.kr", "go.kr", "ac.kr",
+    "com.br", "net.br", "org.br", "gov.br", "edu.br",
+    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
+    "com.sg", "net.sg", "org.sg", "gov.sg", "edu.sg",
+    "com.hk", "net.hk", "org.hk", "gov.hk", "edu.hk",
+    "com.tw", "net.tw", "org.tw", "gov.tw", "edu.tw",
+    "com.mx", "org.mx", "gob.mx", "edu.mx",
+    "co.za", "com.za", "net.za", "org.za", "gov.za",
+    "com.ar", "net.ar", "org.ar", "gov.ar", "edu.ar",
+    "com.tr", "net.tr", "org.tr", "gov.tr", "edu.tr",
+    "com.my", "net.my", "org.my", "gov.my", "edu.my",
+    "com.ph", "net.ph", "org.ph", "gov.ph", "edu.ph",
+    "com.pk", "net.pk", "org.pk", "gov.pk", "edu.pk",
+    "co.id", "web.id", "or.id", "ac.id", "go.id",
+    "com.ua", "net.ua", "org.ua", "gov.ua",
+})
+
+
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.16"
+    rule_version = "1.17"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -2595,26 +2622,21 @@ class DnsRule:
         Return a stable grouping key for the domain.
 
         Using only the last two labels (e.g. 'example.com') works for most
-        gTLDs but breaks for multi-label public suffixes like 'co.uk':
+        gTLDs but breaks for common multi-label public suffixes like 'co.uk':
         'one.example.co.uk' and 'two.other.co.uk' would both collapse to
         'co.uk', aggregating unrelated activity.
 
-        For now we use a deliberately limited heuristic: if the TLD is a
-        two-letter country code and the preceding label is a short alphabetic
-        second-level category, take the last THREE labels. This handles
-        co.uk, com.au, org.in, etc. Requiring a two-letter TLD avoids treating
-        ordinary gTLD registrations such as ``bad.com`` as public suffixes.
-        A full Public Suffix List library (tldextract) would be more correct
-        and should be introduced when the project adds a dependency manager.
+        Three-label grouping is limited to a maintained set of common
+        country-code suffixes. Guessing from label length misclassified
+        ordinary registrations such as ``foo.io`` as a public suffix and
+        split their subdomain history across unrelated parent keys. Unknown
+        suffixes fall back to the last two labels. A complete Public Suffix
+        List remains more accurate but would add a dependency.
         """
         labels = domain.rstrip(".").split(".")
-        if len(labels) >= 3:
-            tld   = labels[-1]   # e.g. 'uk'
-            tld_1 = labels[-2]   # e.g. 'co'
-            if (len(tld) == 2 and tld.isalpha()
-                    and len(tld_1) <= 3 and tld_1.isalpha()):
-                # Likely a multi-label TLD (co.uk, com.au, org.in ...)
-                return ".".join(labels[-3:])
+        if (len(labels) >= 3
+                and ".".join(labels[-2:]).lower() in _COMMON_MULTI_LABEL_CC_SUFFIXES):
+            return ".".join(labels[-3:])
         return ".".join(labels[-2:]) if len(labels) >= 2 else domain
 
     def _prune_seen(self, now: float):

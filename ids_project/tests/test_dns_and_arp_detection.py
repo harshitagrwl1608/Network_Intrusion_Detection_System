@@ -418,7 +418,7 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "dns_query": qname, "timestamp": 100,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.16")
+        self.assertEqual(alert["rule_version"], "1.17")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
         self.assertEqual(alert["evidence"]["longest_label"], "a" * 61)
         self.assertEqual(alert["evidence"]["longest_label_length"], 61)

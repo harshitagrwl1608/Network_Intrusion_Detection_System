@@ -356,7 +356,7 @@ class TestDnsSubdomainExfil(unittest.TestCase):
                 src="10.0.0.26", domain=f"{label}.bad.com",
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.16")
+        self.assertEqual(alert["rule_version"], "1.17")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
         self.assertEqual(alert["evidence"]["parent_domain"], "bad.com")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 3)
@@ -373,6 +373,28 @@ class TestDnsSubdomainExfil(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["parent_domain"], "example.co.uk")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 3)
+
+    def test_unknown_short_suffix_is_not_guessed_as_a_public_suffix(self):
+        rule = DnsRule(subdomain_threshold=3, subdomain_window=60,
+                       freq_threshold=0, entropy_threshold=10.0)
+        base = time.time()
+        alert = None
+        for i, label in enumerate(("a", "b", "c")):
+            alert = rule.check(_dns_record(
+                src="10.0.0.28", domain=f"{label}.foo.io",
+                timestamp=base + i * 0.1))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_version"], "1.17")
+        self.assertEqual(alert["evidence"]["parent_domain"], "foo.io")
+        self.assertEqual(alert["evidence"]["distinct_subdomains"], 3)
+
+        unrelated = DnsRule(subdomain_threshold=3, freq_threshold=0,
+                            entropy_threshold=10.0)
+        for i, domain in enumerate(("foo.io", "bar.io", "baz.io")):
+            self.assertIsNone(unrelated.check(_dns_record(
+                src="10.0.0.29", domain=f"a.{domain}",
+                timestamp=base + i * 0.1)))
+        self.assertEqual(unrelated._parent_domain("a.example.com.au"), "example.com.au")
 
     def test_many_distinct_subdomains_trigger_exfil(self):
         rule = DnsRule(subdomain_threshold=10, subdomain_window=60,
@@ -403,7 +425,7 @@ class TestDnsSubdomainExfil(unittest.TestCase):
                 domain=f"host.chunk{i:04x}.evil.com",
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.16")
+        self.assertEqual(alert["rule_version"], "1.17")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
         self.assertEqual(alert["evidence"]["subdomain"], "host.chunk0004")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 5)
