@@ -32,11 +32,17 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-02 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **391 passed** (`python -m unittest discover -s tests`).
+- Full test suite: **393 passed** (`python -m unittest discover -s tests`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
 - All 1,163 synthetic attack packets and 832 benign packets were replayed; alert persistence checks reported no dropped alerts or shutdown timeout.
 - `git diff --check` was clean at inspection.
 - Scapy's local interface enumeration required an approved elevated process; validation used offline tests and PCAP replay only, not live capture.
+
+## Follow-up: 2026-11-02 ICMP sweep alert storm control
+
+- A reproduction with threshold four and twelve distinct echo probes from one source emitted three alerts in one second. `ICMP_SWEEP` cleared history after each threshold crossing and had no cooldown.
+- Version 1.3 preserves its echo-request predicate, distinct-target threshold, sliding window, severity, and confidence. It now suppresses repeat alerts per source for one window and tracks fired state within the configured source bound; stale fired state is pruned.
+- Regressions cover one alert for a continuous sweep, renewed alerting after the window, and bounded/prunable fired state. Focused ICMP sweep tests: **10 passed**; full suite: **393 passed**. Offline synthetic replay detected **38/38 labelled scenarios**, with zero missed scenarios, unmatched attack alerts, or benign alerts. Fixture-only results; no real-world accuracy claim.
 
 ## External sample captures and Suricata comparison
 

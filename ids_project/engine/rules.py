@@ -1424,7 +1424,7 @@ class IcmpSweepRule:
     """Detect a source probing distinct IPv4/IPv6 destinations with echo requests."""
 
     name = "ICMP_SWEEP"
-    rule_version = "1.2"
+    rule_version = "1.3"
 
     def __init__(self, threshold: int = 12, window: int = 10,
                  max_sources: int = 4096):
@@ -1434,6 +1434,7 @@ class IcmpSweepRule:
             max_sources, 4096, "ICMP_SWEEP_MAX_SOURCES")
         self._lock = threading.RLock()
         self._history: dict[str, list[tuple[float, str]]] = defaultdict(list)
+        self._fired: dict[str, float] = {}
 
     def prune_stale(self, now: float):
         cutoff = now - self.window
@@ -1445,6 +1446,9 @@ class IcmpSweepRule:
                     self._history[src] = active
                 else:
                     del self._history[src]
+            for src, fired_at in list(self._fired.items()):
+                if now - fired_at >= self.window or fired_at > now:
+                    del self._fired[src]
 
     def check(self, record: dict) -> dict | None:
         protocol = record.get("protocol")
@@ -1475,8 +1479,14 @@ class IcmpSweepRule:
             targets = sorted({host for _, host in history})
             if len(targets) < self.threshold:
                 return None
+            last_alert = self._fired.get(src)
+            self._history.pop(src, None)
+            if last_alert is not None and now - last_alert < self.window:
+                return None
+            if src not in self._fired and len(self._fired) >= self.max_sources:
+                self._fired.pop(next(iter(self._fired)))
+            self._fired[src] = now
             window_start = min(ts for ts, _ in history)
-            self._history.pop(src, None)  # one alert per completed burst
 
         return {
             "rule_name": self.name,

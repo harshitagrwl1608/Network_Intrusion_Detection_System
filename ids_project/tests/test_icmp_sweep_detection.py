@@ -32,6 +32,31 @@ class TestIcmpSweepRule(unittest.TestCase):
         self.assertEqual(alert["evidence"]["distinct_targets"], 4)
         self.assertEqual(alert["window_start"], 100)
 
+    def test_continuous_sweep_emits_once_until_window_passes(self):
+        alerts = []
+        for i in range(12):
+            alert = self.rule.check(self.record(f"198.51.100.{i+1}", 100 + i / 10))
+            if alert:
+                alerts.append(alert)
+        self.assertEqual(len(alerts), 1)
+
+        alert = None
+        for i in range(4):
+            alert = self.rule.check(self.record(f"203.0.113.{i+1}", 111 + i)) or alert
+        self.assertIsNotNone(alert)
+
+    def test_fired_source_state_is_bounded_and_pruned(self):
+        rule = IcmpSweepRule(threshold=2, window=10, max_sources=2)
+        for source in ("192.0.2.10", "192.0.2.11", "192.0.2.12"):
+            for i in range(2):
+                rule.check(self.record(
+                    f"198.51.100.{i+1}", 100 + i,
+                    src_ip=source,
+                ))
+        self.assertLessEqual(len(rule._fired), 2)
+        rule.prune_stale(111)
+        self.assertEqual(rule._fired, {})
+
     def test_ipv6_echo_targets_trigger(self):
         alert = None
         for i in range(4):
