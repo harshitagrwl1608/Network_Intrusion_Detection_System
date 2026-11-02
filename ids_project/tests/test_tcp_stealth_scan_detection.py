@@ -37,6 +37,24 @@ class TestTcpStealthScanRule(unittest.TestCase):
             self.assertIsNone(self.rule.check(self.packet(2000 + i, 100 + i, flags)))
         self.assertEqual(self.rule._probes, {})
 
+    def test_common_source_port_does_not_hide_stealth_probes(self):
+        rule = TcpStealthScanRule(threshold=3, window=10)
+        # ACK-bearing traffic from a server port remains outside the stealth
+        # probe classifier; a scan using that source port remains detectable.
+        for i, flags in enumerate((0x11, 0x12, 0x10)):
+            record = self.packet(2000 + i, 100 + i * 0.1, flags)
+            record["src_port"] = 80
+            self.assertIsNone(rule.check(record))
+        self.assertEqual(rule._probes, {})
+
+        alert = None
+        for i, (port, flags) in enumerate(((22, 0x01), (23, 0x00), (25, 0x29))):
+            record = self.packet(port, 101 + i * 0.1, flags)
+            record["src_port"] = 80
+            alert = rule.check(record)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["distinct_ports"], 3)
+
     def test_malformed_flags_and_ports_are_ignored_without_state(self):
         for flags in ("invalid", None, float("inf")):
             record = self.packet(2000, 100, flags)

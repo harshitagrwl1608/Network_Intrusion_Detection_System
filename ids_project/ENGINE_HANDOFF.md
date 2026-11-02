@@ -1074,3 +1074,10 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Version 1.3 now excludes IPv4/IPv6 multicast and the limited IPv4 broadcast address before maintaining flow state. Unicast destinations, source-port exemptions, thresholds, and cooldown behavior remain unchanged. Directed subnet broadcasts are not excluded because the rule has no subnet-mask context to classify them reliably.
 - Regression coverage includes common IPv4 multicast, IPv6 multicast, and limited broadcast destinations and verifies no flow history is retained; the existing unicast flood test remains active.
 - Verification: focused UDP_FLOOD tests **13 passed**; full suite **377 tests passed** in 46.86s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
+## Follow-up: 2026-11-02 source-port evasion in TCP_STEALTH_SCAN
+
+- `TCP_STEALTH_SCAN` discarded every candidate packet whose source port was a common service port. FIN, NULL, and Xmas probes using source port 80 therefore never entered scan history, even though the existing probe classifier already rejects ACK-bearing normal service traffic.
+- Version 1.3 removes only that broad source-port exemption. Detection remains limited to the existing FIN/NULL/Xmas flag patterns, distinct destination ports, threshold, and time window; trusted-source handling is unchanged.
+- Regression coverage verifies ACK-bearing source-port-80 traffic does not accumulate while three stealth probes using source port 80 trigger the existing scan alert.
+- Verification: focused stealth-scan tests **8 passed**; full suite **378 tests passed** in 46.64s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.

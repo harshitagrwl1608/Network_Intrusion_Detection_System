@@ -697,7 +697,7 @@ class TcpStealthScanRule:
     """Detect vertical FIN, NULL, and Xmas TCP probes."""
 
     name = "TCP_STEALTH_SCAN"
-    rule_version = "1.2"
+    rule_version = "1.3"
     _FIN, _SYN, _RST, _PSH, _ACK, _URG, _ECE, _CWR = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80
     _XMAS_FLAGS = _FIN | _PSH | _URG
     _DISALLOWED_FLAGS = _SYN | _RST | _ACK | _ECE | _CWR
@@ -732,7 +732,7 @@ class TcpStealthScanRule:
             return None
         src_port, dst_port = record.get("src_port"), record.get("dst_port")
         flags = record.get("tcp_flags")
-        if src_port in WELL_KNOWN_SERVICE_PORTS or dst_port is None or flags is None:
+        if dst_port is None or flags is None:
             return None
         try:
             flags = int(flags)
