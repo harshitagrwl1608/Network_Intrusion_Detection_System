@@ -42,6 +42,16 @@ class TestDataExfiltrationRule(unittest.TestCase):
         record["tcp_payload_digest"] = hashlib.blake2s(payload, digest_size=16).digest()
         return record
 
+    def test_invalid_thresholds_and_window_use_defaults(self):
+        rule = DataExfiltrationRule(
+            byte_threshold=0, web_byte_threshold="invalid", window=0)
+        self.assertEqual(rule.byte_threshold, 50_000)
+        self.assertEqual(rule.web_byte_threshold, 1_000_000)
+        self.assertEqual(rule.window, 30)
+        alert = rule.check(self._pkt(
+            "192.168.1.50", "203.0.113.10", payload=b"A" * 1000, ts=100.0))
+        self.assertIsNone(alert)
+
     def test_volumetric_exfil_triggers_alert(self):
         # 192.168.1.50 -> 203.0.113.10 (internal -> external)
         chunk = b"A" * 10000
@@ -240,7 +250,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNone(rule.check(late_old_syn))
         alert = rule.check(self._tcp_payload_pkt(payload, 1001, 103.0))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.11")
+        self.assertEqual(alert["rule_version"], "1.12")
         self.assertEqual(alert["evidence"]["bytes_transferred"], 1200)
 
     def test_tcp_connection_generation_state_is_bounded(self):

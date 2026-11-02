@@ -523,6 +523,21 @@ class TestBruteForceRule(unittest.TestCase):
                           initial_syn=True, tcp_flags=0x02,
                           timestamp=timestamp or time.time())
 
+    def test_invalid_settings_use_defaults_and_ignore_bad_extra_ports(self):
+        rule = BruteForceRule(
+            threshold=0, window=0, max_states="invalid",
+            extra_ports=(2222, "bad", 70000),
+        )
+        self.assertEqual(rule.threshold, 20)
+        self.assertEqual(rule.window, 60)
+        self.assertEqual(rule.max_states, 8192)
+        self.assertIn(2222, rule.auth_ports)
+        self.assertNotIn(70000, rule.auth_ports)
+        for i in range(2):
+            self.assertIsNone(rule.check(self._syn(
+                "198.51.100.90", "203.0.113.90", dst_port=22,
+                timestamp=100 + i)))
+
     def test_fires_at_threshold_on_auth_port(self):
         rule = BruteForceRule(threshold=5, window=60)
         base = time.time()
@@ -720,6 +735,16 @@ class TestSlowPortScanRule(unittest.TestCase):
     def _syn(self, src, dst, dst_port, timestamp):
         return _ip_record(src=src, dst=dst, dst_port=dst_port,
                           initial_syn=True, tcp_flags=0x02, timestamp=timestamp)
+
+    def test_invalid_settings_use_defaults_and_do_not_lower_scan_threshold(self):
+        rule = SlowPortScanRule(
+            threshold=0, window=0, max_states="invalid", cooldown=float("nan"))
+        self.assertEqual(rule.threshold, 30)
+        self.assertEqual(rule.window, 120)
+        self.assertEqual(rule.max_states, 5000)
+        self.assertEqual(rule.cooldown, 120.0)
+        self.assertIsNone(rule.check(self._syn(
+            "198.51.100.90", "203.0.113.90", 22, 100)))
 
     def test_slow_vertical_fires(self):
         rule = SlowPortScanRule(threshold=10, window=120)

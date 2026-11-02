@@ -2962,7 +2962,7 @@ class BruteForceRule:
     """
 
     name = "BRUTE_FORCE"
-    rule_version = "1.3"
+    rule_version = "1.4"
 
     # Per-(src, dst, port) cooldown after firing. Prevents re-alerting for the
     # same ongoing brute-force burst; renewed bursts after the cooldown will fire.
@@ -2970,12 +2970,31 @@ class BruteForceRule:
 
     def __init__(self, threshold: int = 20, window: int = 60,
                  max_states: int = 8192, extra_ports=()):
-        self.threshold = max(2, int(threshold))
-        self.window = max(1, int(window))
-        self.max_states = max(1, int(max_states))
-        self.auth_ports = _BRUTE_FORCE_AUTH_PORTS | frozenset(
-            int(port) for port in extra_ports if 1 <= int(port) <= 65535
-        )
+        self.threshold = max(2, _positive_setting(
+            threshold, 20, "BRUTE_FORCE_THRESHOLD"))
+        self.window = _positive_setting(window, 60, "BRUTE_FORCE_WINDOW")
+        self.max_states = _positive_setting(
+            max_states, 8192, "BRUTE_FORCE_MAX_STATES")
+        valid_extra_ports = set()
+        invalid_extra_port = False
+        try:
+            extra_port_values = iter(extra_ports)
+        except TypeError:
+            extra_port_values = ()
+            invalid_extra_port = extra_ports is not None
+        for port in extra_port_values:
+            try:
+                parsed_port = int(port)
+            except (TypeError, ValueError, OverflowError):
+                invalid_extra_port = True
+                continue
+            if 1 <= parsed_port <= 65535:
+                valid_extra_ports.add(parsed_port)
+            else:
+                invalid_extra_port = True
+        if invalid_extra_port:
+            logger.warning("Ignoring invalid BRUTE_FORCE_EXTRA_PORTS entries")
+        self.auth_ports = _BRUTE_FORCE_AUTH_PORTS | frozenset(valid_extra_ports)
         self._lock = threading.RLock()
         # (src_ip, dst_ip, dst_port) → list of SYN timestamps
         self._history: OrderedDict[tuple, list] = OrderedDict()
@@ -3170,14 +3189,19 @@ class SlowPortScanRule:
     """
 
     name = "SLOW_PORT_SCAN"
-    rule_version = "1.2"
+    rule_version = "1.3"
 
     def __init__(self, threshold: int = 30, window: int = 120,
                  max_states: int = 5000, cooldown: float | None = None):
-        self.threshold = max(2, int(threshold))
-        self.window = max(1, int(window))
-        self.max_states = max(1, int(max_states))
-        self.cooldown = max(0.0, float(self.window if cooldown is None else cooldown))
+        self.threshold = max(2, _positive_setting(
+            threshold, 30, "SLOW_PORT_SCAN_THRESHOLD"))
+        self.window = _positive_setting(window, 120, "SLOW_PORT_SCAN_WINDOW")
+        self.max_states = _positive_setting(
+            max_states, 5000, "SLOW_PORT_SCAN_MAX_STATES")
+        cooldown_default = float(self.window)
+        self.cooldown = _nonnegative_float_setting(
+            cooldown_default if cooldown is None else cooldown,
+            cooldown_default, "SLOW_PORT_SCAN_COOLDOWN")
         self._lock = threading.RLock()
         # Vertical scan: (src_ip, dst_ip) → [(ts, dst_port)]
         self._vert: dict[tuple, list] = {}
@@ -3367,7 +3391,7 @@ class DataExfiltrationRule:
     - Configured TRUSTED_HOSTS.
     """
     name = "DATA_EXFIL"
-    rule_version = "1.11"
+    rule_version = "1.12"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 5000
     MAX_TRACKED_FLOW_EVENTS = 1_000_000
@@ -3403,9 +3427,11 @@ class DataExfiltrationRule:
 
     def __init__(self, byte_threshold: int = 50000, window: int = 30,
                  web_byte_threshold: int = 1_000_000):
-        self.byte_threshold = max(1000, int(byte_threshold))
-        self.web_byte_threshold = max(self.byte_threshold, int(web_byte_threshold))
-        self.window = max(1, int(window))
+        self.byte_threshold = max(1000, _positive_setting(
+            byte_threshold, 50_000, "DATA_EXFIL_BYTE_THRESHOLD"))
+        self.web_byte_threshold = max(self.byte_threshold, _positive_setting(
+            web_byte_threshold, 1_000_000, "DATA_EXFIL_WEB_BYTE_THRESHOLD"))
+        self.window = _positive_setting(window, 30, "DATA_EXFIL_WINDOW")
         self._lock = threading.Lock()
         # Key: (src_ip, dst_ip, dst_port, protocol) -> byte history/cooldown.
         # Keep services separate so volume on one port cannot cross-trigger another.

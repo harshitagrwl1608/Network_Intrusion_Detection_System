@@ -977,6 +977,13 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Added a regression for zero minimum requests and malformed companion settings. One request remains below the default repeat threshold.
 - Verification: focused cleartext tests **12 passed**; full suite **353 tests passed** in 45.66s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios**, with zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
 
+## Follow-up: 2026-11-02 BRUTE_FORCE, SLOW_PORT_SCAN, and DATA_EXFIL setting validation
+
+- `BRUTE_FORCE` and `SLOW_PORT_SCAN` forced thresholds to their minimums even when configured with zero, which could lower defaults from 20 to 2 and 30 to 2. `DATA_EXFIL` similarly clamped a zero byte threshold to 1,000 instead of its 50,000-byte default. Invalid windows/state caps could also fail construction.
+- Versions `BRUTE_FORCE` 1.4, `SLOW_PORT_SCAN` 1.3, and `DATA_EXFIL` 1.12 now parse settings through safe positive-integer defaults while preserving valid intentional thresholds and the existing minimums. Invalid custom brute-force ports are skipped; valid configured ports remain enabled.
+- Added regressions proving invalid settings use defaults and do not lower detection thresholds; existing custom-threshold tests remain unchanged and pass.
+- Verification: focused rule tests **118 passed**; full suite **356 tests passed** in 45.91s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios** across all 19 rule families, with zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
 ## Follow-up: 2026-11-02 malformed TCP sequence metadata in PAYLOAD_HIT
 
 - `PayloadRule._update_stream` converted `tcp_payload_seq` without handling malformed input. Reproduction with a valid SQL injection payload and `tcp_payload_seq="malformed"` raised `ValueError` before packet-level matching, losing that detection.
