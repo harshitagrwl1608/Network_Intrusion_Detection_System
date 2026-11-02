@@ -321,6 +321,34 @@ class TestRstFloodDetection(unittest.TestCase):
 
 class TestDnsSubdomainExfil(unittest.TestCase):
 
+    def test_short_label_gTLD_is_grouped_by_registered_domain(self):
+        rule = DnsRule(subdomain_threshold=3, subdomain_window=60,
+                       freq_threshold=0, entropy_threshold=10.0)
+        base = time.time()
+        alert = None
+        for i, label in enumerate(("a", "b", "c")):
+            alert = rule.check(_dns_record(
+                src="10.0.0.26", domain=f"{label}.bad.com",
+                timestamp=base + i * 0.1))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_version"], "1.16")
+        self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
+        self.assertEqual(alert["evidence"]["parent_domain"], "bad.com")
+        self.assertEqual(alert["evidence"]["distinct_subdomains"], 3)
+
+    def test_two_letter_country_code_suffix_grouping_remains_supported(self):
+        rule = DnsRule(subdomain_threshold=3, freq_threshold=0,
+                       entropy_threshold=10.0)
+        base = time.time()
+        alert = None
+        for i, label in enumerate(("a", "b", "c")):
+            alert = rule.check(_dns_record(
+                src="10.0.0.27", domain=f"{label}.example.co.uk",
+                timestamp=base + i * 0.1))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["parent_domain"], "example.co.uk")
+        self.assertEqual(alert["evidence"]["distinct_subdomains"], 3)
+
     def test_many_distinct_subdomains_trigger_exfil(self):
         rule = DnsRule(subdomain_threshold=10, subdomain_window=60,
                        freq_threshold=0, entropy_threshold=10.0)
@@ -350,7 +378,7 @@ class TestDnsSubdomainExfil(unittest.TestCase):
                 domain=f"host.chunk{i:04x}.evil.com",
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.15")
+        self.assertEqual(alert["rule_version"], "1.16")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
         self.assertEqual(alert["evidence"]["subdomain"], "host.chunk0004")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 5)

@@ -53,7 +53,7 @@ RuleEngine execution order (all rules run; no early exit):
        REVERSE_SHELL_CRADLE — curl|sh, wget|sh, PowerShell cradles, socat exec shells
        HTTP_METHOD_TAMPERING — TRACE/TRACK/DEBUG/WebDAV methods
        WEBSHELL_INJECTION   — PHP/JSP/ASP/Python web shell execution markers
- 13.  DnsRule (v1.15)       — Shannon entropy + length + frequency + subdomain exfil
+ 13.  DnsRule (v1.16)       — Shannon entropy + length + frequency + subdomain exfil
                               + hex/base64/base32 DNS tunnel chunk detection
                               mDNS (port 5353) and LLMNR (port 5355) are explicitly exempt.
  14.  BruteForceRule        — repeated auth-port SYNs per (src,dst,port); covers SSH,
@@ -2508,7 +2508,7 @@ def _shannon_entropy(s: str) -> float:
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.15"
+    rule_version = "1.16"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -2568,9 +2568,11 @@ class DnsRule:
         'one.example.co.uk' and 'two.other.co.uk' would both collapse to
         'co.uk', aggregating unrelated activity.
 
-        For now we use a deliberately limited heuristic: if the TLD-1 label
-        looks like a country-code + second-level pair (len <= 3, all alpha),
-        take the last THREE labels.  This handles co.uk, com.au, org.in etc.
+        For now we use a deliberately limited heuristic: if the TLD is a
+        two-letter country code and the preceding label is a short alphabetic
+        second-level category, take the last THREE labels. This handles
+        co.uk, com.au, org.in, etc. Requiring a two-letter TLD avoids treating
+        ordinary gTLD registrations such as ``bad.com`` as public suffixes.
         A full Public Suffix List library (tldextract) would be more correct
         and should be introduced when the project adds a dependency manager.
         """
@@ -2578,7 +2580,8 @@ class DnsRule:
         if len(labels) >= 3:
             tld   = labels[-1]   # e.g. 'uk'
             tld_1 = labels[-2]   # e.g. 'co'
-            if len(tld) <= 3 and len(tld_1) <= 3 and tld_1.isalpha():
+            if (len(tld) == 2 and tld.isalpha()
+                    and len(tld_1) <= 3 and tld_1.isalpha()):
                 # Likely a multi-label TLD (co.uk, com.au, org.in ...)
                 return ".".join(labels[-3:])
         return ".".join(labels[-2:]) if len(labels) >= 2 else domain
