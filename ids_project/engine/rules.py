@@ -825,22 +825,25 @@ class TcpStealthScanRule:
 
 class TcpFlagAnomalyRule:
     """
-    Detect malformed TCP packets carrying illegal or conflicting flag combinations.
+    Detect malformed TCP packets and unusual flag combinations that need state context.
 
-    In the TCP state machine (RFC 793, RFC 3168):
+    In the TCP state machine (RFC 9293):
       - SYN and FIN cannot be set simultaneously (SYN_FIN: 0x03).
       - SYN and RST cannot be set simultaneously (SYN_RST: 0x06).
       - All control flags set simultaneously (ALL_FLAGS / Kamikaze: 0x3F).
-      - PSH set without ACK or SYN (PSH_WITHOUT_ACK: 0x08).
-      - URG set without ACK (URG_WITHOUT_ACK: 0x20).
+      - PSH set without ACK or SYN (PSH_WITHOUT_ACK: 0x08), treated as
+        unusual because this packet-only rule cannot establish TCP state.
+      - URG set without ACK (URG_WITHOUT_ACK: 0x20), also treated as unusual
+        without connection-state context.
 
-    These packets are used for OS fingerprinting (e.g. Nmap scan evasion),
-    firewall evasion, or malformed stack exploitation.
+    Conflicting control flags can indicate malformed traffic or scan evasion.
+    The ACK-missing patterns remain lower-confidence heuristics because this
+    rule does not track connection state.
     Stateful cooldown prevents alert storms if an attacker sends a flood.
     """
 
     name = "TCP_FLAG_ANOMALY"
-    rule_version = "1.3"
+    rule_version = "1.4"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, cooldown: float = 60.0, max_states: int = 5000):
@@ -889,6 +892,8 @@ class TcpFlagAnomalyRule:
 
         anomaly_type = None
         severity = "medium"
+        confidence = "high"
+        classification = "malformed"
         desc = ""
 
         # Ignore Xmas probes (_FIN | _PSH | _URG = 0x29) and pure FIN probes — handled by TcpStealthScanRule
@@ -913,13 +918,17 @@ class TcpFlagAnomalyRule:
         # 4. PSH without ACK or SYN
         elif (flags & _PSH) and not (flags & (_ACK | _SYN)):
             anomaly_type = "PSH_WITHOUT_ACK"
+            confidence = "heuristic"
+            classification = "unusual"
             severity = "medium"
-            desc = "PSH flag set without ACK or SYN"
+            desc = "PSH flag set without ACK or SYN; connection state is unavailable"
         # 5. URG without ACK
         elif (flags & _URG) and not (flags & _ACK):
             anomaly_type = "URG_WITHOUT_ACK"
+            confidence = "heuristic"
+            classification = "unusual"
             severity = "medium"
-            desc = "URG flag set without ACK"
+            desc = "URG flag set without ACK; connection state is unavailable"
 
         if not anomaly_type:
             return None
@@ -953,13 +962,14 @@ class TcpFlagAnomalyRule:
             "dst_port": dst_port,
             "protocol": "TCP",
             "severity": severity,
-            "confidence": "high",
+            "confidence": confidence,
             "detail": (
-                f"{src} sent malformed TCP packet to {dst}:{dst_port} "
-                f"with invalid flags (0x{flags:02x}) — {desc}"
+                f"{src} sent {classification} TCP flags to {dst}:{dst_port} "
+                f"(0x{flags:02x}) — {desc}"
             ),
             "evidence": {
                 "anomaly_type": anomaly_type,
+                "classification": classification,
                 "tcp_flags": flags,
                 "flags_hex": f"0x{flags:02x}",
                 "description": desc,

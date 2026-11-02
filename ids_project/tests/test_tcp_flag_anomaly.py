@@ -49,6 +49,8 @@ class TestTcpFlagAnomalyRule(unittest.TestCase):
         self.assertEqual(alert["rule_name"], "TCP_FLAG_ANOMALY")
         self.assertEqual(alert["evidence"]["anomaly_type"], "SYN_FIN")
         self.assertEqual(alert["severity"], "high")
+        self.assertEqual(alert["confidence"], "high")
+        self.assertEqual(alert["evidence"]["classification"], "malformed")
 
     def test_syn_rst_detected(self):
         alert = self.rule.check(_tcp_pkt(flags=0x06))  # SYN + RST
@@ -66,6 +68,17 @@ class TestTcpFlagAnomalyRule(unittest.TestCase):
         alert = self.rule.check(_tcp_pkt(flags=0x08))  # PSH without ACK or SYN
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["anomaly_type"], "PSH_WITHOUT_ACK")
+        self.assertEqual(alert["confidence"], "heuristic")
+        self.assertEqual(alert["evidence"]["classification"], "unusual")
+        self.assertIn("connection state is unavailable", alert["detail"])
+
+    def test_urg_without_ack_remains_detected_as_heuristic(self):
+        alert = self.rule.check(_tcp_pkt(flags=0x20))  # URG without ACK
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["anomaly_type"], "URG_WITHOUT_ACK")
+        self.assertEqual(alert["confidence"], "heuristic")
+        self.assertEqual(alert["evidence"]["classification"], "unusual")
+        self.assertIn("connection state is unavailable", alert["detail"])
 
     def test_legitimate_handshakes_not_flagged(self):
         legitimate = [

@@ -30,9 +30,9 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 ## Latest verification
 
-Results verified during the current continuation on 2026-11-02 (branch `codex-existing-detection-improvements`, commit `2deb0b9`):
+Results verified during the current continuation on 2026-11-02 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **388 passed** (`python -m unittest discover -s tests`).
+- Full test suite: **389 passed** (`python -m unittest discover -s tests`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
 - All 1,163 synthetic attack packets and 832 benign packets were replayed; alert persistence checks reported no dropped alerts or shutdown timeout.
 - `git diff --check` was clean at inspection.
@@ -1116,3 +1116,9 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Version 1.17 uses an explicit set of common multi-label country-code suffixes and otherwise groups on the last two labels. This retains tested `.co.uk` behavior, covers common suffixes such as `.com.au`, and groups ordinary domains such as `foo.io` correctly. The curated set is intentionally incomplete; the full [Mozilla Public Suffix List](https://publicsuffix.org/list/public_suffix_list.dat) is the authoritative broader reference, and the code avoids adding a runtime dependency.
 - Regressions verify `.io` exfil aggregation, no aggregation across unrelated `.io` registrable domains, and retained `.co.uk`/`.com.au` grouping.
 - Verification: focused DNS/ARP suites **41 passed**; full suite **388 tests passed** in 46.69s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
+## Follow-up: 2026-11-02 TCP flag confidence calibration
+
+- `TCP_FLAG_ANOMALY` labeled every matched pattern high-confidence and called every packet malformed. Its `PSH_WITHOUT_ACK` and `URG_WITHOUT_ACK` cases do not have connection-state context; [RFC 9293](https://www.rfc-editor.org/rfc/rfc9293.html) defines PSH and URG independently, while established-state rules require ACK information. Those patterns can still be useful heuristic leads, so their detection and alert severity are retained while confidence is now `heuristic` and the detail says state is unavailable. SYN+FIN, SYN+RST, and all-six-flags contradictions remain `high` confidence and `malformed`.
+- Regressions verify both unusual patterns still alert with heuristic confidence and strict contradictory patterns remain high-confidence. No scenario or signature was removed.
+- Verification: focused TCP flag tests **14 passed**; full suite **389 passed** in 47.54s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
