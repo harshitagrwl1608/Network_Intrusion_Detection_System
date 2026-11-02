@@ -94,6 +94,31 @@ class TestPortScanDetection(unittest.TestCase):
 
         self.assertEqual(len(alerts), 0, "SYN-ACK traffic should not trigger PORT_SCAN")
 
+    def test_tcp_flags_reject_syn_ack_when_initial_syn_metadata_is_missing(self):
+        rule = PortScanRule(threshold=2, window=10)
+        for i, port in enumerate((22, 23, 25)):
+            self.assertIsNone(rule.check({
+                "type": "IP", "src_ip": "203.0.113.44",
+                "dst_ip": "203.0.113.80", "protocol": "TCP",
+                "src_port": 80, "dst_port": port, "syn_flag": True,
+                "tcp_flags": 0x12, "timestamp": 100 + i * 0.1,
+            }))
+        self.assertEqual(rule._vert, {})
+        self.assertEqual(rule._horiz, {})
+
+        # Legacy telemetry with only syn_flag remains supported when raw flags
+        # are unavailable.
+        legacy = PortScanRule(threshold=2, window=10)
+        alert = None
+        for i, port in enumerate((22, 23)):
+            alert = legacy.check({
+                "type": "IP", "src_ip": "203.0.113.45",
+                "dst_ip": "203.0.113.80", "protocol": "TCP",
+                "src_port": 50000, "dst_port": port, "syn_flag": True,
+                "timestamp": 101 + i * 0.1,
+            }) or alert
+        self.assertIsNotNone(alert)
+
     def test_tcp_scan_using_well_known_source_port_still_triggers(self):
         rule = PortScanRule(threshold=3, window=10)
         alert = None
@@ -349,6 +374,20 @@ class TestPortScanDetection(unittest.TestCase):
                 udp_alerts.append(alert)
         self.assertEqual(len(udp_alerts), 0)
 
+        # Older records may omit initial_syn but still carry raw flags. The
+        # ACK bit must prevent SYN-ACK replies from entering the SYN history.
+        syn_ack_alerts = []
+        for i in range(15):
+            alert = self.syn_rule.check({
+                "type": "IP", "src_ip": "10.0.0.2", "dst_ip": "10.0.0.1",
+                "protocol": "TCP", "src_port": 80, "dst_port": 50000 + i,
+                "syn_flag": True, "tcp_flags": 0x12, "timestamp": 1000.0 + i,
+            })
+            if alert:
+                syn_ack_alerts.append(alert)
+        self.assertEqual(syn_ack_alerts, [])
+        self.assertEqual(self.syn_rule._history, {})
+
     def test_late_syn_does_not_corrupt_flood_window(self):
         rule = SynFloodRule(threshold=3, window=10)
         def packet(ts):
@@ -377,6 +416,18 @@ class TestPortScanDetection(unittest.TestCase):
         self.assertEqual(alert["rule_name"], "DISTRIBUTED_SYN_FLOOD")
         self.assertEqual(alert["evidence"]["syn_count"], 6)
         self.assertEqual(alert["evidence"]["distinct_sources"], 3)
+
+    def test_distributed_flood_uses_raw_flags_when_initial_syn_metadata_is_missing(self):
+        rule = DistributedSynFloodRule(threshold=3, min_sources=2, window=10)
+        for i in range(3):
+            alert = rule.check({
+                "type": "IP", "src_ip": f"198.51.100.{i + 1}",
+                "dst_ip": "203.0.113.80", "protocol": "TCP", "dst_port": 443,
+                "src_port": 40000 + i, "syn_flag": True, "tcp_flags": 0x12,
+                "timestamp": 100 + i,
+            })
+            self.assertIsNone(alert)
+        self.assertEqual(rule._history, {})
 
     def test_distributed_syn_flood_suppresses_alert_storm_but_recovers_for_later_burst(self):
         rule = DistributedSynFloodRule(threshold=3, min_sources=2,

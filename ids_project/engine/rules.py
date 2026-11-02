@@ -157,6 +157,21 @@ def _nonnegative_float_setting(value, default: float, setting_name: str) -> floa
         return default
     return parsed
 
+
+def _is_initial_syn(record: dict) -> bool:
+    """Classify a new TCP SYN consistently when derived metadata is absent."""
+    if "initial_syn" in record:
+        return bool(record.get("initial_syn"))
+    flags = record.get("tcp_flags")
+    if flags is not None:
+        try:
+            parsed_flags = int(flags)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return bool(parsed_flags & 0x02) and not bool(parsed_flags & 0x10)
+    # Preserve compatibility with legacy records that expose only syn_flag.
+    return bool(record.get("syn_flag"))
+
 # ---------------------------------------------------------------------------
 # Ports that servers legitimately respond FROM — if a host's SOURCE port
 # is in this set, it is a server replying to clients, NOT a scanner.
@@ -301,7 +316,7 @@ class BlocklistRule:
 
 class PortScanRule:
     name = "PORT_SCAN"
-    rule_version = "1.9"
+    rule_version = "1.10"
 
     def __init__(self, threshold: int = 15, window: int = 10, protocol: str = "TCP",
                  max_states: int = 10_000):
@@ -382,12 +397,8 @@ class PortScanRule:
 
         # TCP scans count initial SYNs only. UDP has no handshake, so the
         # separate UdpScanRule counts datagrams and relies on distinct targets.
-        if self.protocol == "TCP":
-            if "initial_syn" in record:
-                if not record.get("initial_syn"):
-                    return None
-            elif not record.get("syn_flag"):
-                return None
+        if self.protocol == "TCP" and not _is_initial_syn(record):
+            return None
 
         dst_ip = record.get("dst_ip", "")
         dst_port = record.get("dst_port")
@@ -967,7 +978,7 @@ class SynFloodRule:
     """Detect SYN/RST floods while excluding normal closed-port RST replies."""
 
     name = "SYN_FLOOD"
-    rule_version = "1.7"
+    rule_version = "1.8"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 100, window: int = 10,
@@ -1062,9 +1073,7 @@ class SynFloodRule:
         _ACK = 0x10
 
         is_rst = bool(tcp_flags & _RST) and not bool(tcp_flags & _SYN)
-        is_initial_syn = bool(record.get("initial_syn")) if "initial_syn" in record else (
-            bool(tcp_flags & _SYN) and not bool(tcp_flags & _ACK)
-        )
+        is_initial_syn = _is_initial_syn(record)
         src_port = record.get("src_port")
         dst_port = record.get("dst_port")
 
@@ -1177,12 +1186,8 @@ class SynFloodRule:
 
         # ── SYN Flood detection ───────────────────────────────────────────────
         # Only count initial SYN (SYN=1, ACK=0); skip SYN-ACK server responses
-        if "initial_syn" in record:
-            if not record.get("initial_syn"):
-                return None
-        else:
-            if not record.get("syn_flag"):
-                return None
+        if not _is_initial_syn(record):
+            return None
 
         # SYN floods target services; skip ephemeral dst ports (IANA: 49152-65535)
         if dst_port and dst_port > 49151:
@@ -1257,7 +1262,7 @@ class DistributedSynFloodRule:
     """Detect high-volume initial-SYN bursts to one service from many sources."""
 
     name = "DISTRIBUTED_SYN_FLOOD"
-    rule_version = "1.4"
+    rule_version = "1.5"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 500, min_sources: int = 20,
@@ -1300,10 +1305,7 @@ class DistributedSynFloodRule:
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP" or record.get("protocol") != "TCP":
             return None
-        if "initial_syn" in record:
-            if not record.get("initial_syn"):
-                return None
-        elif not record.get("syn_flag"):
+        if not _is_initial_syn(record):
             return None
 
         src, dst, dst_port = record.get("src_ip"), record.get("dst_ip"), record.get("dst_port")
@@ -2995,7 +2997,7 @@ class BruteForceRule:
     """
 
     name = "BRUTE_FORCE"
-    rule_version = "1.5"
+    rule_version = "1.6"
 
     # Per-(src, dst, port) cooldown after firing. Prevents re-alerting for the
     # same ongoing brute-force burst; renewed bursts after the cooldown will fire.
@@ -3073,12 +3075,8 @@ class BruteForceRule:
             return None
 
         # Only count initial SYN (SYN=1, ACK=0) — new connection attempts
-        if "initial_syn" in record:
-            if not record.get("initial_syn"):
-                return None
-        else:
-            if not record.get("syn_flag"):
-                return None
+        if not _is_initial_syn(record):
+            return None
 
         src = record.get("src_ip", "")
         dst = record.get("dst_ip", "")
@@ -3219,7 +3217,7 @@ class SlowPortScanRule:
     """
 
     name = "SLOW_PORT_SCAN"
-    rule_version = "1.4"
+    rule_version = "1.5"
 
     def __init__(self, threshold: int = 30, window: int = 120,
                  max_states: int = 5000, cooldown: float | None = None):
@@ -3276,12 +3274,8 @@ class SlowPortScanRule:
             return None
 
         # Only count initial SYN (SYN=1, ACK=0)
-        if "initial_syn" in record:
-            if not record.get("initial_syn"):
-                return None
-        else:
-            if not record.get("syn_flag"):
-                return None
+        if not _is_initial_syn(record):
+            return None
 
         dst_ip = record.get("dst_ip", "")
         src_port = record.get("src_port")

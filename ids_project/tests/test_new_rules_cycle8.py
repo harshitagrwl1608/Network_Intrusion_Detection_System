@@ -606,6 +606,16 @@ class TestBruteForceRule(unittest.TestCase):
         self.assertEqual(alert["severity"], "high")
         self.assertEqual(alert["evidence"]["auth_port"], 22)
 
+    def test_syn_ack_is_not_counted_when_initial_syn_metadata_is_missing(self):
+        rule = BruteForceRule(threshold=2, window=60)
+        for i in range(3):
+            record = self._syn("203.0.113.80", "203.0.113.44", dst_port=22,
+                               timestamp=100 + i)
+            record.pop("initial_syn")
+            record.update(src_port=22, syn_flag=True, tcp_flags=0x12)
+            self.assertIsNone(rule.check(record))
+        self.assertEqual(rule._history, {})
+
     def test_common_source_port_does_not_hide_authentication_syn_attempts(self):
         rule = BruteForceRule(threshold=2, window=60)
         first = self._syn("203.0.113.44", "203.0.113.80", dst_port=22,
@@ -616,7 +626,7 @@ class TestBruteForceRule(unittest.TestCase):
         first["tcp_seq"] = 100
         alert = rule.check(second)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.5")
+        self.assertEqual(alert["rule_version"], "1.6")
         self.assertEqual(alert["evidence"]["attempt_count"], 2)
 
     def test_syn_ack_from_auth_service_port_is_not_counted(self):
@@ -846,7 +856,7 @@ class TestSlowPortScanRule(unittest.TestCase):
             record["src_port"] = 80
             alert = rule.check(record) or alert
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.4")
+        self.assertEqual(alert["rule_version"], "1.5")
         self.assertEqual(alert["evidence"]["distinct_ports"], 3)
 
         reply = self._syn(
@@ -854,6 +864,17 @@ class TestSlowPortScanRule(unittest.TestCase):
         reply.update(src_port=80, initial_syn=False, tcp_flags=0x12,
                      syn_flag=True)
         self.assertIsNone(rule.check(reply))
+
+    def test_syn_ack_is_not_counted_when_initial_syn_metadata_is_missing(self):
+        rule = SlowPortScanRule(threshold=2, window=120)
+        for i, port in enumerate((22, 23, 25)):
+            record = self._syn(
+                "203.0.113.80", "203.0.113.44", port, 100 + i)
+            record.pop("initial_syn")
+            record.update(syn_flag=True, tcp_flags=0x12)
+            self.assertIsNone(rule.check(record))
+        self.assertEqual(rule._vert, {})
+        self.assertEqual(rule._horiz, {})
 
     def test_slow_horizontal_fires(self):
         rule = SlowPortScanRule(threshold=10, window=120)

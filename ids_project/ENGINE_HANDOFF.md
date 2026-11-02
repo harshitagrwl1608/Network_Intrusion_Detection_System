@@ -1102,3 +1102,10 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Version 1.4 removes the source-port-only exemption. Detection still requires the existing initial-SYN condition and preserves the slow-window threshold, scan dimensions, trusted-source handling, and cooldown.
 - Regression coverage verifies a source-port-80 vertical scan triggers and a SYN-ACK control packet remains ignored.
 - Verification: focused slow-scan tests **12 passed**; full suite **383 tests passed** in 47.34s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
+## Follow-up: 2026-11-02 SYN-ACK fallback classification across scan and flood rules
+
+- Several TCP rules trusted `syn_flag` when the derived `initial_syn` field was absent, despite records carrying raw `tcp_flags`. This let SYN-ACK responses (`SYN|ACK`) enter port-scan, slow-scan, brute-force, SYN-flood, and distributed-SYN-flood histories in legacy/incomplete records.
+- A shared classifier now honors explicit `initial_syn` metadata; otherwise it checks raw flags for SYN without ACK; only records lacking raw flags use the legacy `syn_flag` fallback. Updated versions: `PORT_SCAN` 1.10, `SLOW_PORT_SCAN` 1.5, `BRUTE_FORCE` 1.6, `SYN_FLOOD` 1.8, and `DISTRIBUTED_SYN_FLOOD` 1.5.
+- Regressions cover SYN-ACK rejection across each affected rule and preserve the `syn_flag`-only compatibility path for old `PORT_SCAN` records.
+- Verification: focused scan/brute-force suites **61 passed**; full suite **387 tests passed** in 46.54s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
