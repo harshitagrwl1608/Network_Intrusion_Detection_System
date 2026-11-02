@@ -1503,7 +1503,7 @@ class IcmpFloodRule:
     """
 
     name = "ICMP_FLOOD"
-    rule_version = "1.3"
+    rule_version = "1.4"
     ALERT_COOLDOWN_S: float = 60.0
 
     def __init__(self, threshold: int = 50, window: int = 5,
@@ -1596,13 +1596,15 @@ class IcmpFloodRule:
             "src_port": None,
             "dst_port": None,
             "protocol": proto,
-            "severity": "high",
-            "confidence": "high",
+            "severity": "medium",
+            "confidence": "heuristic",
             "detail": (
                 f"{src} sent {count} ICMP echo requests to {dst} "
-                f"in {self.window}s — possible targeted ICMP echo flood"
+                f"in {self.window}s — possible targeted ICMP echo flood "
+                "(rate-threshold signal; review source context)"
             ),
             "evidence": {
+                "classification": "ICMP_ECHO_RATE_THRESHOLD",
                 "icmp_type": expected_type,
                 "packet_count": count,
                 "target_host": dst,
