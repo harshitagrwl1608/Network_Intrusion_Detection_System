@@ -261,7 +261,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNone(rule.check(late_old_syn))
         alert = rule.check(self._tcp_payload_pkt(payload, 1001, 103.0))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.13")
+        self.assertEqual(alert["rule_version"], "1.14")
         self.assertEqual(alert["evidence"]["bytes_transferred"], 1200)
 
     def test_tcp_connection_generation_state_is_bounded(self):
@@ -521,6 +521,21 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["sub_type"], "SIGNATURE_EXFIL")
         self.assertIn("ZIP", alert["detail"])
+
+    def test_split_zip_signature_is_reassembled_from_contiguous_tcp_segments(self):
+        rule = DataExfiltrationRule(byte_threshold=5000, window=30)
+        self.assertIsNone(rule.check(self._tcp_payload_pkt(b"PK\x03", 1000, 100.0)))
+        alert = rule.check(self._tcp_payload_pkt(b"\x04archive", 1003, 100.1))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["sub_type"], "SIGNATURE_EXFIL")
+        self.assertIn("ZIP", alert["detail"])
+        self.assertEqual(alert["rule_version"], "1.14")
+
+    def test_split_signature_is_not_joined_across_tcp_sequence_gap(self):
+        rule = DataExfiltrationRule(byte_threshold=5000, window=30)
+        self.assertIsNone(rule.check(self._tcp_payload_pkt(b"PK\x03", 1000, 100.0)))
+        alert = rule.check(self._tcp_payload_pkt(b"\x04archive", 1004, 100.1))
+        self.assertIsNone(alert)
 
     def test_dns_traffic_port_53_is_exempt(self):
         chunk = b"A" * 30000

@@ -1060,3 +1060,10 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - `PORT_SCAN` version 1.8, `TCP_FLAG_ANOMALY` version 1.3, and `ARP_SPOOF` version 1.4 now fall back to their existing defaults for invalid state caps and cooldowns. Explicit zero TCP-flag cooldown remains supported.
 - Regressions verify scan history survives invalid capacity settings, malformed flag-rule settings preserve cooldown behavior, and ARP continues learning mappings with invalid constructor capacities.
 - Verification: focused port-scan, TCP-flag, and DNS/ARP suites **69 passed**; full suite **374 tests passed** in 47.39s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
+## Follow-up: 2026-11-02 split TCP signature coverage in DATA_EXFIL
+
+- `DATA_EXFIL` checked archive and database magic only within each packet's payload. A ZIP header split across contiguous TCP segments (`PK\x03` followed by `\x04`) reproduced a missed signature alert.
+- Version 1.14 keeps a bounded 512-byte prefix for at most 5,000 directional TCP flows, joins only sequence-contiguous payloads within the configured window and connection generation, and prunes stale entries. It skips reassembly when the payload sample is truncated, preventing incorrect sequence advancement. The existing signature set, direct packet matching, direction/host exemptions, and volumetric threshold are unchanged.
+- Regressions cover the split ZIP header and a sequence gap that must not be joined.
+- Verification: focused DATA_EXFIL tests **38 passed**; full suite **376 tests passed** in 47.13s. Final synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.

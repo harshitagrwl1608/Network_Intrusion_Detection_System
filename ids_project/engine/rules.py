@@ -3409,13 +3409,15 @@ class DataExfiltrationRule:
     - Configured TRUSTED_HOSTS.
     """
     name = "DATA_EXFIL"
-    rule_version = "1.13"
+    rule_version = "1.14"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 5000
     MAX_TRACKED_FLOW_EVENTS = 1_000_000
     MAX_FRAGMENT_ORPHAN_EVENTS = 10_000
     MAX_TRACKED_PAYLOAD_SEGMENTS = 50_000
     MAX_TRACKED_TCP_CONNECTIONS = 5000
+    MAX_TRACKED_SIGNATURE_STREAMS = 5000
+    SIGNATURE_PREFIX_BYTES = 512
     COMMON_WEB_PORTS = frozenset({80, 443, 8000, 8080, 8443, 8888})
 
     # Archive / DB file signatures: (magic_bytes, format_name)
@@ -3476,6 +3478,10 @@ class DataExfiltrationRule:
         # Canonical endpoint pair -> (initial sequence, generation, last seen).
         # A new SYN distinguishes tuple reuse from an exact segment retransmit.
         self._tcp_connection_generations: OrderedDict[tuple, tuple[int, int, float]] = OrderedDict()
+        # Bounded directional TCP prefixes allow existing file signatures to
+        # be recognized when their leading bytes cross contiguous segments.
+        # Each value is (next sequence, prefix bytes, last timestamp).
+        self._signature_streams: OrderedDict[tuple, tuple[int, bytes, float]] = OrderedDict()
 
     @property
     def _flow_event_limit(self) -> int:
@@ -3591,6 +3597,9 @@ class DataExfiltrationRule:
             for key, (_, _, timestamp) in list(self._tcp_connection_generations.items()):
                 if timestamp < cutoff or timestamp > now:
                     del self._tcp_connection_generations[key]
+            for key, (_, _, timestamp) in list(self._signature_streams.items()):
+                if timestamp < cutoff or timestamp > now:
+                    del self._signature_streams[key]
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP":
@@ -3671,8 +3680,45 @@ class DataExfiltrationRule:
                     break
 
         with self._lock:
-            duplicate_key = None
+            # Join only sequence-adjacent payloads in the same direction and
+            # TCP generation. Gaps and overlaps reset the prefix, avoiding
+            # signatures synthesized from unrelated or retransmitted bytes.
+            raw_payload = bytes(payload) if isinstance(
+                payload, (bytes, bytearray, memoryview)) else b""
             tcp_seq = record.get("tcp_payload_seq")
+            if (protocol == "TCP" and raw_payload and len(raw_payload) == bytes_sent
+                    and tcp_seq is not None
+                    and src_port is not None and dst_port is not None):
+                try:
+                    seq = int(tcp_seq) & 0xFFFFFFFF
+                    stream_key = (
+                        str(src_ip), int(src_port), str(dst_ip), int(dst_port),
+                        tcp_generation,
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    stream_key = None
+                if stream_key is not None:
+                    previous = self._signature_streams.get(stream_key)
+                    if previous is not None and 0 <= now - previous[2] <= self.window \
+                            and seq == previous[0]:
+                        prefix = (previous[1] + raw_payload)[
+                            :self.SIGNATURE_PREFIX_BYTES]
+                    else:
+                        prefix = raw_payload[:self.SIGNATURE_PREFIX_BYTES]
+                    self._signature_streams[stream_key] = (
+                        (seq + len(raw_payload)) & 0xFFFFFFFF, prefix, now)
+                    self._signature_streams.move_to_end(stream_key)
+                    while len(self._signature_streams) > self.MAX_TRACKED_SIGNATURE_STREAMS:
+                        self._signature_streams.popitem(last=False)
+                    if not matched_sig:
+                        for magic, desc in self._EXFIL_SIGNATURES:
+                            if (prefix.startswith(magic)
+                                    or (magic == b"ustar"
+                                        and magic in prefix[:self.SIGNATURE_PREFIX_BYTES])):
+                                matched_sig = desc
+                                break
+
+            duplicate_key = None
             tcp_digest = record.get("tcp_payload_digest")
             if (protocol == "TCP" and src_port is not None and dst_port is not None
                     and tcp_seq is not None and tcp_digest is not None):
