@@ -49,6 +49,21 @@ class TestPayloadRule(unittest.TestCase):
         self.assertIn("SQL_INJECTION", [h["signature"] for h in alert["evidence"]["hits"]])
         self.assertEqual(self.rule._streams, {})
 
+    def test_invalid_event_timestamp_skips_state_but_preserves_packet_signature(self):
+        for invalid_time in ("bad-time", float("nan"), float("inf")):
+            with self.subTest(timestamp=invalid_time):
+                rule = PayloadRule(alert_cooldown=60)
+                record = self.packet(
+                    b"GET /?q=UNION SELECT password", 1000,
+                    event_timestamp=invalid_time)
+                alert = rule.check(record)
+                self.assertIsNotNone(alert)
+                self.assertIn("SQL_INJECTION", [
+                    hit["signature"] for hit in alert["evidence"]["hits"]
+                ])
+                self.assertEqual(rule._streams, {})
+                self.assertEqual(rule._alerted, {})
+
     def test_normal_cdata_xml_is_not_misclassified_as_xxe(self):
         alert = self.rule.check(self.packet(
             b"POST /soap HTTP/1.1\\r\\n\\r\\n<![CDATA[ordinary content]]>", 7000))
@@ -155,7 +170,7 @@ class TestPayloadRule(unittest.TestCase):
         suffix.update(tcp_flags=0x18, tcp_seq=1018)
         alert = self.rule.check(suffix)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.15")
+        self.assertEqual(alert["rule_version"], "1.16")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):

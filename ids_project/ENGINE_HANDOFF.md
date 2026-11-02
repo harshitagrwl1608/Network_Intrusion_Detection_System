@@ -32,11 +32,17 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **402 passed** (`python -m unittest discover -s tests`).
+- Full test suite: **403 passed** (`python -m unittest discover -s tests`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
 - All 1,163 synthetic attack packets and 832 benign packets were replayed; alert persistence checks reported no dropped alerts or shutdown timeout.
 - `git diff --check` was clean at inspection.
 - Scapy's local interface enumeration required an approved elevated process; validation used offline tests and PCAP replay only, not live capture.
+
+## Follow-up: 2026-11-03 invalid timestamps in PAYLOAD_HIT
+
+- `PAYLOAD_HIT` directly converted event time during TCP stream reconstruction and alert cooldown, so malformed timestamps could raise before a packet signature was checked.
+- Version 1.16 skips stream reassembly and cooldown state updates when time is invalid, but still inspects the packet payload directly and can emit its existing signature alert. Valid-time stream and cooldown behavior is unchanged.
+- Regressions cover string, NaN, and infinite timestamps on a TCP payload with an existing SQL injection signature; direct inspection still alerts while stream/cooldown state remains untouched. Payload tests: **40 passed**; full suite: **403 passed**. Offline replay retained **38/38** labelled detections with zero unmatched attack alerts, benign alerts, drops, or shutdown timeout. Fixture-only results.
 
 ## Follow-up: 2026-11-03 finite timestamps in TLS and zero-window rules
 

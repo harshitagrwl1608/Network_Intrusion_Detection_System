@@ -2222,7 +2222,7 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.15"
+    rule_version = "1.16"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048,
@@ -2267,7 +2267,9 @@ class PayloadRule:
         sport, dport = record.get("src_port"), record.get("dst_port")
         if not src or not dst or sport is None or dport is None:
             return None
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
         key = (src, sport, dst, dport)
         try:
             seq = int(seq) & 0xFFFFFFFF
@@ -2493,32 +2495,33 @@ class PayloadRule:
                 flow_key = (
                     src_ip, dst_ip, record.get("protocol"), int(record["dst_port"])
                 )
-                now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
-                cutoff = now - self.alert_cooldown
-                eligible_hits = []
-                with self._stream_lock:
-                    for key in list(self._alerted):
-                        if self._alerted[key] < cutoff:
-                            del self._alerted[key]
-                    for hit in hits:
-                        # A repeated C2 request may use a fresh client source
-                        # port each time. Collapse identical matches by host
-                        # pair, transport and service for the cooldown, while retaining
-                        # distinct signatures and destination services.
-                        key = (flow_key, hit["signature"], hit["matched"])
-                        last_alert = self._alerted.get(key)
-                        if last_alert is not None and now - last_alert < self.alert_cooldown:
-                            # Retain actively suppressed signatures under key
-                            # pressure, and do not let late packets erase newer
-                            # cooldown evidence.
+                now = _finite_record_timestamp(record)
+                if now is not None:
+                    cutoff = now - self.alert_cooldown
+                    eligible_hits = []
+                    with self._stream_lock:
+                        for key in list(self._alerted):
+                            if self._alerted[key] < cutoff:
+                                del self._alerted[key]
+                        for hit in hits:
+                            # A repeated C2 request may use a fresh client source
+                            # port each time. Collapse identical matches by host
+                            # pair, transport and service for the cooldown, while retaining
+                            # distinct signatures and destination services.
+                            key = (flow_key, hit["signature"], hit["matched"])
+                            last_alert = self._alerted.get(key)
+                            if last_alert is not None and now - last_alert < self.alert_cooldown:
+                                # Retain actively suppressed signatures under key
+                                # pressure, and do not let late packets erase newer
+                                # cooldown evidence.
+                                self._alerted.move_to_end(key)
+                                continue
+                            if key not in self._alerted and len(self._alerted) >= self._max_alert_states:
+                                self._alerted.pop(next(iter(self._alerted)))
+                            self._alerted[key] = now
                             self._alerted.move_to_end(key)
-                            continue
-                        if key not in self._alerted and len(self._alerted) >= self._max_alert_states:
-                            self._alerted.pop(next(iter(self._alerted)))
-                        self._alerted[key] = now
-                        self._alerted.move_to_end(key)
-                        eligible_hits.append(hit)
-                hits = eligible_hits
+                            eligible_hits.append(hit)
+                    hits = eligible_hits
 
         if not hits:
             return None
