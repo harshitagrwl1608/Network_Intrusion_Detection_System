@@ -4041,7 +4041,7 @@ class CleartextHttpOnTlsPortRule:
     """Flag repeated plaintext HTTP requests sent to conventional TLS ports."""
 
     name = "CLEAR_HTTP_ON_TLS_PORT"
-    rule_version = "1.6"
+    rule_version = "1.7"
     MAX_REQUEST_LINE_BYTES = 2064
     STREAM_TIMEOUT_S = 30.0
     MAX_SEEN_REQUEST_IDENTITIES = 32_768
@@ -4206,7 +4206,9 @@ class CleartextHttpOnTlsPortRule:
         if not isinstance(payload, bytes):
             return None
 
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
         request_line_bytes = self._extract_request_line(record, payload, now)
         if request_line_bytes is None:
             return None
@@ -4407,7 +4409,7 @@ class TlsAnomalyRule:
     Port expansion covers: XMPP-SSL (5223), MQTT-TLS (8083), alternative HTTPS C2 (4443, 9443).
     """
     name = "TLS_ANOMALY"
-    rule_version = "1.6"
+    rule_version = "1.7"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
     MAX_CLIENT_HELLO_BYTES = 16_389
@@ -4556,7 +4558,9 @@ class TlsAnomalyRule:
         if not isinstance(payload, bytes) or not payload:
             return None
 
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
         sni = self._extract_sni(record, payload, now)
         if not sni:
             return None
@@ -4628,7 +4632,7 @@ class TcpZeroWindowRule:
     indicate Sockstress, but ordinary receiver backpressure is also possible.
     """
     name = "TCP_ZERO_WINDOW"
-    rule_version = "1.7"
+    rule_version = "1.8"
 
     def __init__(self, threshold: int = 20, window: int = 10, cooldown: float = 60.0,
                  max_tracked: int = 4096, enabled: bool = True,
@@ -4704,7 +4708,9 @@ class TcpZeroWindowRule:
         if not src_ip or not dst_ip:
             return None
 
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
         connection_key = self._connection_key(src_ip, src_port, dst_ip, dst_port)
 
         # Learn direction from the initial SYN so an alert can distinguish

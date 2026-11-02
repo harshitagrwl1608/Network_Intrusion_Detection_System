@@ -96,12 +96,25 @@ class TestTlsAnomalyRule(unittest.TestCase):
         alert = self.rule.check(self._pkt(payload=payload, ts=100.0))
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "TLS_ANOMALY")
-        self.assertEqual(alert["rule_version"], "1.6")
+        self.assertEqual(alert["rule_version"], "1.7")
         self.assertEqual(alert["severity"], "high")
         self.assertEqual(alert["confidence"], "high")
         self.assertEqual(alert["evidence"]["anomaly_type"], "DIRECT_IP_SNI")
         self.assertEqual(alert["evidence"]["sni"], "198.51.100.42")
         self.assertIn("violates RFC 6066", alert["detail"])
+
+    def test_invalid_event_timestamps_do_not_mutate_tls_state(self):
+        payload = make_tls_client_hello("198.51.100.42")
+        for invalid_time in ("bad-time", float("nan"), float("inf")):
+            with self.subTest(timestamp=invalid_time):
+                rule = TlsAnomalyRule(cooldown=60.0, enabled=True)
+                self.assertIsNone(rule.check(self._pkt(
+                    payload=payload, ts=100.0, event_timestamp=invalid_time)))
+                self.assertEqual(rule._seen, {})
+                self.assertEqual(rule._hello_prefixes, {})
+                alert = rule.check(self._pkt(payload=payload, ts=100.0))
+                self.assertIsNotNone(alert)
+                self.assertEqual(alert["rule_version"], "1.7")
 
     def test_suspicious_tunnel_sni_triggers_alert(self):
         for i, domain in enumerate(("c2-node.ngrok-free.app", "beacon.duckdns.org", "tunnel.localtunnel.me", "drop.serveo.net")):
@@ -109,7 +122,7 @@ class TestTlsAnomalyRule(unittest.TestCase):
             alert = self.rule.check(self._pkt(dst=f"203.0.113.{100 + i}", payload=payload, ts=100.0))
             self.assertIsNotNone(alert, f"Expected alert for suspicious SNI {domain}")
             self.assertEqual(alert["rule_name"], "TLS_ANOMALY")
-            self.assertEqual(alert["rule_version"], "1.6")
+            self.assertEqual(alert["rule_version"], "1.7")
             self.assertEqual(alert["severity"], "medium")
             self.assertEqual(alert["confidence"], "heuristic")
             self.assertEqual(alert["evidence"]["anomaly_type"], "SUSPICIOUS_TUNNEL_SNI")

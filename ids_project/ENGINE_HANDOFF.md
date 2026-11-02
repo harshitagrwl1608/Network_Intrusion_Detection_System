@@ -32,11 +32,17 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **401 passed** (`python -m unittest discover -s tests`).
+- Full test suite: **402 passed** (`python -m unittest discover -s tests`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
 - All 1,163 synthetic attack packets and 832 benign packets were replayed; alert persistence checks reported no dropped alerts or shutdown timeout.
 - `git diff --check` was clean at inspection.
 - Scapy's local interface enumeration required an approved elevated process; validation used offline tests and PCAP replay only, not live capture.
+
+## Follow-up: 2026-11-03 finite timestamps in TLS and zero-window rules
+
+- `CLEAR_HTTP_ON_TLS_PORT`, `TLS_ANOMALY`, and `TCP_ZERO_WINDOW` also converted event timestamps directly; invalid times could raise or contaminate request, ClientHello, or flow state.
+- These rules now use `_finite_record_timestamp` and ignore invalid times before request extraction, TLS reassembly, handshake learning, or zero-window counting. Existing triggers are unchanged; versions are 1.7, 1.7, and 1.8.
+- Regressions cover bad strings, NaN, and infinity, verify no state mutation, then verify a valid event still triggers the existing rule. Focused TLS/request/zero-window set: **51 passed**; full suite: **402 passed**. Offline replay detected **38/38** labelled scenarios with no unmatched attack alerts, benign alerts, drops, or shutdown timeout. Fixture-only results.
 
 ## Follow-up: 2026-11-03 finite timestamps across rate and scan rules
 

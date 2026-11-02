@@ -8,12 +8,14 @@ if PROJECT_DIR not in sys.path:
 
 from engine.rules import (
     BruteForceRule,
+    CleartextHttpOnTlsPortRule,
     DistributedSynFloodRule,
     IcmpFloodRule,
     IcmpSweepRule,
     SlowPortScanRule,
     TcpFlagAnomalyRule,
     TcpStealthScanRule,
+    TcpZeroWindowRule,
     UdpFloodRule,
 )
 
@@ -59,6 +61,17 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "dst_ip": "203.0.113.17", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_vert", "_horiz", "_alert_cooldown")),
+            ("CLEAR_HTTP_ON_TLS_PORT", "1.7", lambda: CleartextHttpOnTlsPortRule(
+                min_requests=2), {
+                "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.18",
+                "dst_ip": "203.0.113.18", "src_port": 50000, "dst_port": 443,
+                "payload": b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n",
+            }, ("_history", "_seen", "_saturated", "_tcp_prefixes", "_seen_requests")),
+            ("TCP_ZERO_WINDOW", "1.8", lambda: TcpZeroWindowRule(threshold=1), {
+                "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.19",
+                "dst_ip": "203.0.113.19", "src_port": 50000, "dst_port": 443,
+                "tcp_flags": 0x10, "tcp_window": 0,
+            }, ("_history", "_fired", "_initiators")),
         )
 
         for invalid_time in ("bad-time", float("nan"), float("inf")):
@@ -69,7 +82,8 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                                    event_timestamp=invalid_time)
                     self.assertIsNone(rule.check(invalid))
                     for state_name in state_names:
-                        self.assertEqual(getattr(rule, state_name), {})
+                        state = getattr(rule, state_name)
+                        self.assertEqual(state, type(state)())
 
                     valid = dict(base_record, timestamp=100.0,
                                  event_timestamp=100.0)
@@ -77,7 +91,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                     if alert is None:
                         next_record = dict(valid, timestamp=101.0,
                                            event_timestamp=101.0)
-                        if name != "BRUTE_FORCE":
+                        if name not in ("BRUTE_FORCE", "CLEAR_HTTP_ON_TLS_PORT"):
                             next_record["dst_port"] += 1
                         alert = rule.check(next_record)
                     self.assertIsNotNone(alert)
