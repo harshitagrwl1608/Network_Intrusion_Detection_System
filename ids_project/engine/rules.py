@@ -2648,7 +2648,7 @@ _COMMON_MULTI_LABEL_CC_SUFFIXES = frozenset({
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.17"
+    rule_version = "1.18"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -2771,7 +2771,8 @@ class DnsRule:
         # frequency and dedup keys so mixed-case queries still aggregate.
         domain = domain.rstrip(".").lower()
         src = record.get("src_ip", "unknown")
-        now = record.get("timestamp", time.time())
+        now = _finite_record_timestamp(record, prefer_event_timestamp=False)
+        has_valid_time = now is not None
 
         # --- Allowlist: applied only to entropy check, NOT to length/frequency ---
         # Broad suffix allowlisting should not suppress other anomaly signals.
@@ -2860,7 +2861,7 @@ class DnsRule:
         query_count = 0
         freq_window_start = None
         query_count_saturated = False
-        if self._freq_threshold > 0:
+        if has_valid_time and self._freq_threshold > 0:
             query_identity = None
             try:
                 dns_id = int(record["dns_id"])
@@ -2921,7 +2922,7 @@ class DnsRule:
         subdomain_count = 0
         subdomain_count_saturated = False
         subdomain_window_start = None
-        if self._subdomain_threshold > 0:
+        if has_valid_time and self._subdomain_threshold > 0:
             with self._lock:
                 sdkey = (src, parent)
                 if sdkey not in self._subdomain_freq and len(self._subdomain_freq) >= self._max_frequency_keys:
@@ -2962,16 +2963,17 @@ class DnsRule:
         # Deduplicate by parent and anomaly class. Randomized query labels under
         # one domain otherwise evade per-QNAME cooldowns and can flood alerts.
         alert_key = (src, parent, sub_type)
-        with self._lock:
-            last_alert = self._seen.get(alert_key)
-            if last_alert is not None and now - last_alert < self.ALERT_COOLDOWN_S:
+        if has_valid_time:
+            with self._lock:
+                last_alert = self._seen.get(alert_key)
+                if last_alert is not None and now - last_alert < self.ALERT_COOLDOWN_S:
+                    self._seen.move_to_end(alert_key)
+                    return None
+                if alert_key not in self._seen and len(self._seen) >= self._max_seen_keys:
+                    self._seen.popitem(last=False)
+                self._seen.pop(alert_key, None)
+                self._seen[alert_key] = now
                 self._seen.move_to_end(alert_key)
-                return None
-            if alert_key not in self._seen and len(self._seen) >= self._max_seen_keys:
-                self._seen.popitem(last=False)
-            self._seen.pop(alert_key, None)
-            self._seen[alert_key] = now
-            self._seen.move_to_end(alert_key)
 
         reason = []
         if high_ent:
@@ -3043,7 +3045,7 @@ class DnsRule:
                 subdomain_window_start if high_subdomain
                 else (freq_window_start if high_freq else None)
             ),
-            "window_end": now if (high_freq or high_subdomain) else None,
+            "window_end": now if has_valid_time and (high_freq or high_subdomain) else None,
         }
 
 
@@ -3522,7 +3524,7 @@ class DataExfiltrationRule:
     - Configured TRUSTED_HOSTS.
     """
     name = "DATA_EXFIL"
-    rule_version = "1.14"
+    rule_version = "1.15"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 5000
     MAX_TRACKED_FLOW_EVENTS = 1_000_000
@@ -3743,7 +3745,7 @@ class DataExfiltrationRule:
         if _is_trusted(src_ip):
             return None
 
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
         dst_port = record.get("dst_port")
         src_port = record.get("src_port")
         protocol = record.get("protocol")
@@ -3755,7 +3757,10 @@ class DataExfiltrationRule:
             record.get("tcp_payload_digest") is not None
             or (tcp_flags & 0x02 and not tcp_flags & 0x10)
         )
-        tcp_generation = self._tcp_generation(record, now) if generation_needed else 0
+        tcp_generation = (
+            self._tcp_generation(record, now)
+            if generation_needed and now is not None else 0
+        )
 
         payload = record.get("payload", b"")
         # IP total length includes network and transport headers, not just
@@ -3791,6 +3796,47 @@ class DataExfiltrationRule:
                 if payload.startswith(magic) or (magic == b"ustar" and magic in payload[:512]):
                     matched_sig = desc
                     break
+
+        # File signatures are packet-local and do not need event ordering.
+        # Preserve that high-confidence coverage when timestamps are malformed,
+        # while avoiding mutation of flow, retransmission, and cooldown state.
+        if now is None:
+            if not matched_sig:
+                return None
+            detail = (
+                f"{src_ip} transmitting {matched_sig} to external host "
+                f"{dst_ip}:{dst_port} ({bytes_sent} bytes) — possible sensitive data exfiltration"
+            )
+            return {
+                "rule_name": self.name,
+                "rule_version": self.rule_version,
+                "src_ip": src_ip,
+                "dst_ip": dst_ip,
+                "src_port": record.get("src_port"),
+                "dst_port": dst_port,
+                "protocol": protocol or "TCP",
+                "severity": "high",
+                "confidence": "high",
+                "detail": detail,
+                "evidence": {
+                    "sub_type": "SIGNATURE_EXFIL",
+                    "bytes_transferred": bytes_sent,
+                    "byte_count_is_lower_bound": False,
+                    "byte_count_basis": "captured_payload_bytes_after_exact_duplicate_suppression",
+                    "partial_tcp_overlaps_counted": True,
+                    "deduplication": (
+                        "exact TCP-segment retransmissions suppressed by connection generation, "
+                        "sequence, length and fingerprint; exact IP-fragment retransmissions "
+                        "suppressed by fragment identity and fingerprint; partial overlaps are not suppressed"
+                    ),
+                    "threshold": self.byte_threshold,
+                    "base_threshold": self.byte_threshold,
+                    "window_s": self.window,
+                    "matched_signature": matched_sig,
+                },
+                "window_start": None,
+                "window_end": None,
+            }
 
         with self._lock:
             # Join only sequence-adjacent payloads in the same direction and

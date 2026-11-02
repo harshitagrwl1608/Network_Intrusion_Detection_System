@@ -126,6 +126,31 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["sub_type"], "SIGNATURE_EXFIL")
 
+    def test_invalid_timestamp_preserves_direct_signature_without_temporal_state(self):
+        for invalid_time in ("bad-time", float("nan"), float("inf")):
+            with self.subTest(timestamp=invalid_time):
+                rule = DataExfiltrationRule(byte_threshold=1000, window=30)
+                packet = self._pkt(
+                    "192.168.1.50", "203.0.113.10",
+                    payload=b"PK\x03\x04" + b"Z" * 96, ts=invalid_time)
+                alert = rule.check(packet)
+                self.assertIsNotNone(alert)
+                self.assertEqual(alert["evidence"]["sub_type"], "SIGNATURE_EXFIL")
+                self.assertIsNone(alert["window_start"])
+                self.assertIsNone(alert["window_end"])
+                self.assertEqual(rule._flows, {})
+                self.assertEqual(rule._signature_streams, {})
+                self.assertEqual(rule._cooldown, {})
+
+    def test_invalid_timestamp_does_not_accumulate_volumetric_state(self):
+        rule = DataExfiltrationRule(byte_threshold=1000, window=30)
+        packet = self._pkt(
+            "192.168.1.50", "203.0.113.10", payload=b"A" * 1000,
+            ts="bad-time")
+        self.assertIsNone(rule.check(packet))
+        self.assertEqual(rule._flows, {})
+        self.assertEqual(rule._cooldown, {})
+
     def test_rolling_byte_total_is_removed_with_pruned_or_evicted_flow(self):
         rule = DataExfiltrationRule(byte_threshold=5000, window=30)
         rule.MAX_TRACKED_FLOWS = 1
@@ -261,7 +286,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNone(rule.check(late_old_syn))
         alert = rule.check(self._tcp_payload_pkt(payload, 1001, 103.0))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.14")
+        self.assertEqual(alert["rule_version"], "1.15")
         self.assertEqual(alert["evidence"]["bytes_transferred"], 1200)
 
     def test_tcp_connection_generation_state_is_bounded(self):
@@ -529,7 +554,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["sub_type"], "SIGNATURE_EXFIL")
         self.assertIn("ZIP", alert["detail"])
-        self.assertEqual(alert["rule_version"], "1.14")
+        self.assertEqual(alert["rule_version"], "1.15")
 
     def test_split_signature_is_not_joined_across_tcp_sequence_gap(self):
         rule = DataExfiltrationRule(byte_threshold=5000, window=30)

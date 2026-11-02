@@ -419,7 +419,7 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "dns_query": qname, "timestamp": 100,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.17")
+        self.assertEqual(alert["rule_version"], "1.18")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
         self.assertEqual(alert["evidence"]["longest_label"], "a" * 61)
         self.assertEqual(alert["evidence"]["longest_label_length"], 61)
@@ -535,6 +535,38 @@ class TestDnsAndArpDetection(unittest.TestCase):
         self.assertEqual(alert["severity"], "high")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
         self.assertEqual(alert["evidence"]["hex_encoded_chunk"], "61646d696e3a70617373776f7264")
+
+    def test_invalid_timestamp_preserves_direct_dns_signal_without_temporal_state(self):
+        for invalid_time in ("bad-time", float("nan"), float("inf")):
+            with self.subTest(timestamp=invalid_time):
+                rule = DnsRule(
+                    entropy_threshold=9.0, max_query_len=200,
+                    freq_threshold=2, subdomain_threshold=2)
+                query = {
+                    "type": "IP", "protocol": "UDP", "src_ip": "192.168.1.50",
+                    "dst_ip": "8.8.8.8", "src_port": 53000, "dst_port": 53,
+                    "dns_query": "61646d696e3a70617373776f7264.covert.net",
+                    "timestamp": invalid_time,
+                }
+                alert = rule.check(query)
+                self.assertIsNotNone(alert)
+                self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
+                self.assertIsNone(alert["window_end"])
+                self.assertEqual(rule._freq, {})
+                self.assertEqual(rule._subdomain_freq, {})
+                self.assertEqual(rule._seen, {})
+
+    def test_invalid_timestamp_does_not_synthesize_dns_frequency_alert(self):
+        rule = DnsRule(
+            entropy_threshold=9.0, max_query_len=200,
+            freq_threshold=2, subdomain_threshold=0)
+        query = {
+            "type": "IP", "protocol": "UDP", "src_ip": "203.0.113.45",
+            "dst_ip": "192.0.2.53", "src_port": 40000, "dst_port": 53,
+            "dns_query": "api.example.com", "timestamp": "invalid",
+        }
+        self.assertIsNone(rule.check(query))
+        self.assertEqual(rule._freq, {})
 
     def test_cdn_whitelisted_hex_label_is_exempt(self):
         rule = DnsRule(entropy_threshold=3.8, max_query_len=60, freq_threshold=20)
