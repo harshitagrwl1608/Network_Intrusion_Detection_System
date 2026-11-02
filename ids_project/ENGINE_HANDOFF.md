@@ -30,17 +30,17 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 ## Latest verification
 
-Results verified during the current continuation on 2026-10-22:
+Results verified during the current continuation on 2026-11-02 (branch `codex-existing-detection-improvements`, commit `2deb0b9`):
 
-- Full test suite: **248 passed** (`python -m pytest -q -p no:cacheprovider`). The `no:cacheprovider` option avoids pytest trying to write cache files into the repository.
-- Synthetic evaluation: **37/37 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
-- All 1,159 synthetic attack packets and 806 benign packets were replayed; alert persistence checks reported no dropped/spooled alerts or shutdown timeout.
+- Full test suite: **388 passed** (`python -m unittest discover -s tests`).
+- Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
+- All 1,163 synthetic attack packets and 832 benign packets were replayed; alert persistence checks reported no dropped alerts or shutdown timeout.
 - `git diff --check` was clean at inspection.
-- The sandbox denied Scapy's local interface enumeration during import. Re-running the offline tests/evaluation with an approved elevated process succeeded; Scapy did not perform live capture. If this happens in another environment, preserve offline-only operation and use the platform's approved test permissions.
+- Scapy's local interface enumeration required an approved elevated process; validation used offline tests and PCAP replay only, not live capture.
 
 ## External sample captures and Suricata comparison
 
-Previously downloaded public malware-traffic-analysis.net captures and associated artifacts were in `/tmp` (verify they still exist before use):
+Previously downloaded public malware-traffic-analysis.net captures and associated artifacts were in `/tmp`. A workspace check on 2026-11-02 found no documented public sample PCAPs or Suricata EVE artifacts under `/tmp` (only the synthetic project fixtures were present); obtain or regenerate them before attempting another sample comparison:
 
 - `/tmp/netguard-samples-20251229/2025-12-29-ClickFix-page-sends-NetSupportRAT.pcap` (~41 MB, 52,602 packets)
 - `/tmp/netguard-samples-20251230/2025-12-30-Lumma-Stealer-infection-with-other-malware.pcap` (~19 MB, 17,013 packets)
