@@ -121,6 +121,12 @@ port with NetGuard `SLOW_PORT_SCAN` alerts (4 distinct endpoint triples); 1
 alert pair fell within the NetGuard 120-second window. This indicates partial
 behavioral overlap, not ground truth.
 
+PCAP review of all 98 `SLOW_PORT_SCAN` alerts confirmed each alert's 30
+distinct destinations in its own time window. All were horizontal TCP/25
+probes from `147.32.84.165`; the observed windows spanned about 54–113 seconds.
+This supports the rule's classification for this capture but does not estimate
+how often the same threshold would alert on benign SMTP clients.
+
 For the 76 `DNS_FREQ` alerts, each NetGuard window had at least 20 distinct
 Suricata DNS request identities matching the source and parent domain (20–23
 identities per window). Each of the 5 `DNS_DGA` alerts had its exact queried
