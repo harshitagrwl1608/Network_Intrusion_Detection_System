@@ -204,6 +204,11 @@ class TestTcpZeroWindowRule(unittest.TestCase):
         self.assertEqual(list(rule._history[("192.168.1.50", "192.168.1.1", "unknown")]),
                          [(102.5, 80, 50000), (103.0, 80, 50000)])
 
+    def test_malformed_tcp_flags_are_ignored_without_raising(self):
+        packet = self._pkt(ts=100.0, tcp_flags="not-an-integer")
+        self.assertIsNone(self.rule.check(packet))
+        self.assertEqual(self.rule._history, {})
+
 
 if __name__ == "__main__":
     unittest.main()

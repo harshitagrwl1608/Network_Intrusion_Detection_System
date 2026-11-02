@@ -87,12 +87,12 @@ False Positive Mitigations:
   - BruteForceRule: only fires on known authentication ports; tunable thresholds per-port.
   - SlowPortScanRule: longer window (default 120s) and higher port threshold to avoid FPs
     from normal slow browsing patterns.
-  - All stateful rules: per-rule threading.RLock (§3.8).
+  - Stateful rules protect their mutable state with a per-rule lock (§3.8).
 
 Thread safety:
-  Every stateful rule guards its mutable history/table/stream state with a
-  threading.RLock so the capture thread (check) and GC thread
-  (prune_stale) cannot race.
+  Each stateful rule guards its mutable history/table/stream state with a
+  per-rule threading.Lock or threading.RLock so the capture thread (check)
+  and GC thread (prune_stale) cannot race.
 """
 
 import json
@@ -4059,7 +4059,7 @@ class TcpZeroWindowRule:
     indicate Sockstress, but ordinary receiver backpressure is also possible.
     """
     name = "TCP_ZERO_WINDOW"
-    rule_version = "1.5"
+    rule_version = "1.6"
 
     def __init__(self, threshold: int = 20, window: int = 10, cooldown: float = 60.0,
                  max_tracked: int = 4096, enabled: bool = True,
@@ -4116,7 +4116,10 @@ class TcpZeroWindowRule:
         tcp_flags = record.get("tcp_flags")
         if tcp_flags is None:
             return None
-        tcp_flags = int(tcp_flags)
+        try:
+            tcp_flags = int(tcp_flags)
+        except (TypeError, ValueError, OverflowError):
+            return None
         if tcp_flags & 0x04:  # RST does not advertise receiver capacity.
             return None
 

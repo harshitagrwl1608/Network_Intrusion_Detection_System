@@ -906,3 +906,10 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 
 - Compare the saved ClickFix and Lumma PCAPs against their existing local Suricata EVE files. Keep exact agreement separate from endpoint-family correlation; Suricata agreement is a comparator, not ground truth.
 - If Sigma/SPL coverage is required, define the source corpus and expected normalized outputs without creating additional detection rules; then add validation around those supplied artifacts.
+
+## Follow-up: 2026-11-02 malformed TCP flags in TCP_ZERO_WINDOW
+
+- The existing `TCP_ZERO_WINDOW` rule converted `tcp_flags` directly with `int()`. A malformed normalized record raised from the rule and was caught by the engine's outer guard, which logged an error and skipped this rule for that record.
+- Version 1.6 treats non-integer TCP flag values as unavailable telemetry and returns no alert. Valid packet behavior and the zero-window predicate are unchanged; no rule was added.
+- Regression comparison: the new malformed-input test would raise `ValueError` at the old direct conversion and now returns `None` with no history mutation.
+- Verification: focused TCP zero-window tests **20 passed**; full suite **329 passed, 2 subtests passed** in 48.73s. `git diff --check` was clean before the documentation update; rerun it before commit.
