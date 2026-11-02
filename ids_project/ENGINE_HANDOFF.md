@@ -44,6 +44,12 @@ Results verified during the current continuation on 2026-11-03 on branch `codex-
 - Added `_finite_record_timestamp` and applied it to `UDP_FLOOD`, `TCP_STEALTH_SCAN`, `TCP_FLAG_ANOMALY`, `DISTRIBUTED_SYN_FLOOD`, `ICMP_SWEEP`, and `ICMP_FLOOD`; `PORT_SCAN`/`UDP_SCAN` and `SYN_FLOOD` now use the same helper for their existing timestamp field. Records with invalid times are ignored before state mutation. Existing trigger logic is unchanged.
 - Updated versions for the six newly guarded rules: UDP flood 1.5, TCP stealth scan 1.5, TCP flag anomaly 1.5, distributed SYN flood 1.6, ICMP sweep 1.4, and ICMP flood 1.5. Cross-rule regressions cover malformed strings, NaN, and infinity with valid traffic immediately afterward. Focused rule set: **130 passed**; full suite: **401 passed**. Offline synthetic replay: **38/38** labelled detections, zero unmatched attack alerts, zero benign alerts, no drops or shutdown timeout. Fixture-only results.
 
+## Follow-up: 2026-11-03 finite timestamps in brute-force and slow-scan rules
+
+- `BRUTE_FORCE` and `SLOW_PORT_SCAN` still parsed event timestamps directly, so malformed values could raise or enter their rolling histories/cooldowns.
+- Both now use `_finite_record_timestamp` and ignore invalid times before state mutation. Existing minimum thresholds and detection windows remain unchanged; versions are 1.8 and 1.6 respectively.
+- Tests verify malformed string, NaN, and infinity leave state untouched, then valid SYN telemetry still reaches each rule's configured threshold. Focused brute-force/slow-scan set: **33 passed**; full suite: **401 passed**. Offline synthetic replay remained **38/38** labelled detections with zero unmatched attack alerts, benign alerts, drops, or shutdown timeout. Fixture-only results.
+
 ## Follow-up: 2026-11-03 malformed SYN_FLOOD timestamps
 
 - `SYN_FLOOD` used raw timestamps for both initial-SYN and RST rate windows. A malformed value raised `ValueError`; NaN/infinity could be stored in histories and handshake context.

@@ -667,7 +667,7 @@ class TestBruteForceRule(unittest.TestCase):
                 break
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "BRUTE_FORCE")
-        self.assertEqual(alert["rule_version"], "1.7")
+        self.assertEqual(alert["rule_version"], "1.8")
         self.assertEqual(alert["severity"], "medium")
         self.assertEqual(alert["confidence"], "heuristic")
         self.assertEqual(alert["evidence"]["classification"], "AUTH_SERVICE_SYN_BURST")
@@ -694,7 +694,7 @@ class TestBruteForceRule(unittest.TestCase):
         first["tcp_seq"] = 100
         alert = rule.check(second)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.7")
+        self.assertEqual(alert["rule_version"], "1.8")
         self.assertEqual(alert["evidence"]["attempt_count"], 2)
 
     def test_syn_ack_from_auth_service_port_is_not_counted(self):
@@ -924,7 +924,7 @@ class TestSlowPortScanRule(unittest.TestCase):
             record["src_port"] = 80
             alert = rule.check(record) or alert
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.5")
+        self.assertEqual(alert["rule_version"], "1.6")
         self.assertEqual(alert["evidence"]["distinct_ports"], 3)
 
         reply = self._syn(

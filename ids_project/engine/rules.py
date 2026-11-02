@@ -3098,7 +3098,7 @@ class BruteForceRule:
     """
 
     name = "BRUTE_FORCE"
-    rule_version = "1.7"
+    rule_version = "1.8"
 
     # Per-(src, dst, port) cooldown after firing. Prevents re-alerting for the
     # same ongoing brute-force burst; renewed bursts after the cooldown will fire.
@@ -3187,7 +3187,9 @@ class BruteForceRule:
             return None
 
         src_port = record.get("src_port")
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
         key = (src, dst, dst_port)
 
         syn_identity = None
@@ -3320,7 +3322,7 @@ class SlowPortScanRule:
     """
 
     name = "SLOW_PORT_SCAN"
-    rule_version = "1.5"
+    rule_version = "1.6"
 
     def __init__(self, threshold: int = 30, window: int = 120,
                  max_states: int = 5000, cooldown: float | None = None):
@@ -3386,7 +3388,9 @@ class SlowPortScanRule:
         if dst_port is None:
             return None
 
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
         vkey = (src, dst_ip)
         hkey = (src, dst_port)
 

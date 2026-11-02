@@ -7,9 +7,11 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from engine.rules import (
+    BruteForceRule,
     DistributedSynFloodRule,
     IcmpFloodRule,
     IcmpSweepRule,
+    SlowPortScanRule,
     TcpFlagAnomalyRule,
     TcpStealthScanRule,
     UdpFloodRule,
@@ -47,6 +49,16 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "type": "IP", "protocol": "ICMP", "src_ip": "198.51.100.15",
                 "dst_ip": "203.0.113.15", "icmp_type": 8, "icmp_code": 0,
             }, ("_history", "_cooldown")),
+            ("BRUTE_FORCE", "1.8", lambda: BruteForceRule(threshold=1), {
+                "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.16",
+                "dst_ip": "203.0.113.16", "src_port": 50000, "dst_port": 22,
+                "initial_syn": True, "tcp_flags": 0x02,
+            }, ("_history", "_cooldown", "_seen_syns")),
+            ("SLOW_PORT_SCAN", "1.6", lambda: SlowPortScanRule(threshold=1), {
+                "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.17",
+                "dst_ip": "203.0.113.17", "src_port": 50000, "dst_port": 22,
+                "initial_syn": True, "tcp_flags": 0x02,
+            }, ("_vert", "_horiz", "_alert_cooldown")),
         )
 
         for invalid_time in ("bad-time", float("nan"), float("inf")):
@@ -62,6 +74,12 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                     valid = dict(base_record, timestamp=100.0,
                                  event_timestamp=100.0)
                     alert = rule.check(valid)
+                    if alert is None:
+                        next_record = dict(valid, timestamp=101.0,
+                                           event_timestamp=101.0)
+                        if name != "BRUTE_FORCE":
+                            next_record["dst_port"] += 1
+                        alert = rule.check(next_record)
                     self.assertIsNotNone(alert)
                     self.assertEqual(alert["rule_version"], version)
 
