@@ -837,6 +837,24 @@ class TestSlowPortScanRule(unittest.TestCase):
         self.assertEqual(alert["evidence"]["scan_type"], "slow_vertical")
         self.assertEqual(alert["severity"], "medium")
 
+    def test_service_source_port_does_not_hide_initial_syn_slow_scan(self):
+        rule = SlowPortScanRule(threshold=3, window=120)
+        alert = None
+        for i, port in enumerate((22, 23, 25)):
+            record = self._syn(
+                "203.0.113.44", "203.0.113.80", port, 100 + i * 20)
+            record["src_port"] = 80
+            alert = rule.check(record) or alert
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_version"], "1.4")
+        self.assertEqual(alert["evidence"]["distinct_ports"], 3)
+
+        reply = self._syn(
+            "203.0.113.80", "203.0.113.44", 50000, 200)
+        reply.update(src_port=80, initial_syn=False, tcp_flags=0x12,
+                     syn_flag=True)
+        self.assertIsNone(rule.check(reply))
+
     def test_slow_horizontal_fires(self):
         rule = SlowPortScanRule(threshold=10, window=120)
         base = time.time()

@@ -3211,14 +3211,15 @@ class SlowPortScanRule:
     False Positive Mitigations:
       - Only initial SYN packets are counted.
       - Trusted sources are exempted.
-      - Known service SOURCE ports are exempted (server replies).
+      - Only initial SYN packets are counted, so SYN-ACK service replies do
+        not need a source-port-only exemption.
       - Default threshold (30 ports) is 2× the PortScanRule threshold to
         compensate for the longer window accumulating incidental activity.
       - Alert cooldown prevents storm after a long burst.
     """
 
     name = "SLOW_PORT_SCAN"
-    rule_version = "1.3"
+    rule_version = "1.4"
 
     def __init__(self, threshold: int = 30, window: int = 120,
                  max_states: int = 5000, cooldown: float | None = None):
@@ -3274,10 +3275,6 @@ class SlowPortScanRule:
         if _is_trusted(src):
             return None
 
-        src_port = record.get("src_port")
-        if src_port and src_port in WELL_KNOWN_SERVICE_PORTS:
-            return None
-
         # Only count initial SYN (SYN=1, ACK=0)
         if "initial_syn" in record:
             if not record.get("initial_syn"):
@@ -3287,6 +3284,7 @@ class SlowPortScanRule:
                 return None
 
         dst_ip = record.get("dst_ip", "")
+        src_port = record.get("src_port")
         dst_port = record.get("dst_port")
         if dst_port is None:
             return None

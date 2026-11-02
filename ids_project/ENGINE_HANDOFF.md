@@ -1095,3 +1095,10 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Version 1.5 removes the source-port-only exemption. The existing auth-port filter and initial-SYN check remain, so SYN-ACK replies are still ignored; retransmission suppression, threshold, cooldown, and trusted-source handling are unchanged.
 - Regressions cover detection of source-port-80 attempts and suppression of SYN-ACK records sourced from an authentication port.
 - Verification: focused brute-force tests **18 passed**; full suite **382 tests passed** in 49.24s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
+## Follow-up: 2026-11-02 source-port evasion in SLOW_PORT_SCAN
+
+- `SLOW_PORT_SCAN` discarded initial SYN probes from common service source ports, so low-and-slow scans using source port 80 never entered its extended-window history.
+- Version 1.4 removes the source-port-only exemption. Detection still requires the existing initial-SYN condition and preserves the slow-window threshold, scan dimensions, trusted-source handling, and cooldown.
+- Regression coverage verifies a source-port-80 vertical scan triggers and a SYN-ACK control packet remains ignored.
+- Verification: focused slow-scan tests **12 passed**; full suite **383 tests passed** in 47.34s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
