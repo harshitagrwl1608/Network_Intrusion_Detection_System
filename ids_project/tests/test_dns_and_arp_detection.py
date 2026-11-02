@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import tempfile
@@ -445,7 +446,7 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "timestamp": 101.0,
         })
         self.assertIsNotNone(alert1, "First ARP spoof event must fire")
-        self.assertEqual(alert1["rule_version"], "1.5")
+        self.assertEqual(alert1["rule_version"], "1.6")
         self.assertEqual(alert1["severity"], "medium")
         self.assertEqual(alert1["confidence"], "heuristic")
         self.assertEqual(alert1["evidence"]["classification"], "ARP_IDENTITY_CHANGE")
@@ -459,6 +460,22 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "timestamp": 103.0,
         })
         self.assertIsNone(alert2, "Rapid repeat ARP spoof for same IP should be suppressed by cooldown")
+
+    def test_malformed_arp_timestamps_use_finite_cooldown_values(self):
+        rule = ArpSpoofRule(self.arp_table_path)
+        for index, timestamp in enumerate(("bad-timestamp", float("nan"), float("inf"))):
+            with self.subTest(timestamp=timestamp):
+                ip = f"192.0.2.{100 + index}"
+                first_mac = f"00:11:22:33:44:{index + 1:02x}"
+                rule.check({"type": "ARP", "src_ip": ip,
+                            "src_mac": first_mac, "timestamp": 100.0})
+                changed = {"type": "ARP", "src_ip": ip,
+                           "src_mac": "00:11:22:33:44:99", "timestamp": timestamp}
+                self.assertIsNotNone(rule.check(changed))
+                self.assertTrue(math.isfinite(rule._cooldown[ip]))
+
+                repeated = dict(changed, src_mac="00:11:22:33:44:98")
+                self.assertIsNone(rule.check(repeated))
 
     def test_arp_rule_ignores_invalid_identity_claims(self):
         rule = ArpSpoofRule(self.arp_table_path)

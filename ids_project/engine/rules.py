@@ -1654,7 +1654,7 @@ class IcmpFloodRule:
 # =============================================================================
 class ArpSpoofRule:
     name = "ARP_SPOOF"
-    rule_version = "1.5"
+    rule_version = "1.6"
 
     # Per-IP cooldown: once an alert fires for a given IP, suppress repeats
     # for this many seconds to avoid alert storms. Set to 0 to disable.
@@ -1772,7 +1772,12 @@ class ArpSpoofRule:
                 return None
 
             if known_mac != mac:
-                now_t = record.get("timestamp", time.time())
+                try:
+                    now_t = float(record.get("timestamp", time.time()))
+                except (TypeError, ValueError, OverflowError):
+                    now_t = time.time()
+                if not math.isfinite(now_t):
+                    now_t = time.time()
                 if ip in self._cooldown:
                     if now_t - self._cooldown[ip] < self.ALERT_COOLDOWN_S:
                         return None  # suppress — already alerted recently
