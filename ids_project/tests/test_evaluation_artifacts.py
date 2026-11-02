@@ -15,6 +15,14 @@ from run_eval import _load_labels, _run_metadata, _scenario_results, _write_csv
 
 
 class TestEvaluationArtifacts(unittest.TestCase):
+    def test_label_validation_accepts_cleartext_http_on_tls_existing_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "labels.csv")
+            with open(path, "w", encoding="utf-8") as labels:
+                labels.write("scenario_id,expected_rule\nS38,CLEAR_HTTP_ON_TLS_PORT\n")
+            self.assertEqual(_load_labels(path)[0]["expected_rule"],
+                             "CLEAR_HTTP_ON_TLS_PORT")
+
     def test_label_validation_rejects_unknown_rule_and_duplicate_ids(self):
         cases = (
             "scenario_id,expected_rule\nS1,NOT_A_RULE\n",
@@ -34,7 +42,9 @@ class TestEvaluationArtifacts(unittest.TestCase):
         self.assertIn("DISTRIBUTED_SYN_FLOOD", metadata["rule_versions"])
         self.assertIn("TCP_STEALTH_SCAN", metadata["rule_versions"])
         self.assertIn("PAYLOAD_HIT", metadata["rule_versions"])
+        self.assertIn("CLEAR_HTTP_ON_TLS_PORT", metadata["rule_versions"])
         self.assertIn("DNS_FREQ_THRESHOLD", metadata["settings"])
+        self.assertIn("CLEAR_HTTP_TLS_MIN_REQUESTS", metadata["settings"])
         self.assertIn("TCP_STEALTH_SCAN_THRESHOLD", metadata["settings"])
         self.assertEqual(metadata["bounded_rule_state"]["tcp_stealth_scan_keys"], 10_000)
         self.assertEqual(metadata["bounded_rule_state"]["device_dedup_keys"], 65_536)

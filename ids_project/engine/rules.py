@@ -120,6 +120,18 @@ def _positive_setting(value, default: int, setting_name: str) -> int:
         return default
     return parsed
 
+
+def _positive_float_setting(value, default: float, setting_name: str) -> float:
+    """Parse a finite positive float rule setting, falling back when invalid."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = 0.0
+    if not math.isfinite(parsed) or parsed <= 0:
+        logger.warning("%s must be a finite positive number; using default %s", setting_name, default)
+        return default
+    return parsed
+
 # ---------------------------------------------------------------------------
 # Ports that servers legitimately respond FROM — if a host's SOURCE port
 # is in this set, it is a server replying to clients, NOT a scanner.
@@ -2449,7 +2461,7 @@ def _shannon_entropy(s: str) -> float:
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.13"
+    rule_version = "1.14"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -2469,8 +2481,10 @@ class DnsRule:
         subdomain_threshold: int = 20,
         subdomain_window: int = 60,
     ):
-        self.entropy_threshold = entropy_threshold
-        self.max_query_len     = max_query_len
+        self.entropy_threshold = _positive_float_setting(
+            entropy_threshold, 3.8, "DNS_ENTROPY_THRESHOLD")
+        self.max_query_len = _positive_setting(
+            max_query_len, 60, "DNS_QUERY_MAX_LEN")
         # Frequency detection parameters — wired from config via RuleEngine (P1)
         self._freq_threshold   = freq_threshold
         self._freq_window      = freq_window

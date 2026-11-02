@@ -1,7 +1,7 @@
 """
 evaluation/generate_test_pcap.py
 ---------------------------------
-Generates labelled synthetic test fixtures for all ten current detection rules.
+Generates labelled synthetic test fixtures for the existing detection rules.
 
 Each scenario is documented with:
   - scenario_id
@@ -759,6 +759,26 @@ def gen_tcp_zero_window(base: float) -> list:
     return pkts
 
 
+def gen_cleartext_http_on_tls_port(base: float) -> list:
+    """S38: Repeated plaintext HTTP requests on TCP 443 → CLEAR_HTTP_ON_TLS_PORT."""
+    scenario(
+        "S38", "CLEAR_HTTP_ON_TLS_PORT",
+        "Repeated plaintext HTTP requests sent to a TLS service port",
+        src_ip="192.168.1.104", dst_ip="203.0.113.104",
+        dst_port="443", protocol="TCP",
+    )
+    pkts = []
+    for i, path in enumerate(("/health", "/status")):
+        payload = f"GET {path} HTTP/1.1\r\nHost: example.test\r\n\r\n".encode()
+        pkt = (_make_eth() /
+               IP(src="192.168.1.104", dst="203.0.113.104") /
+               TCP(sport=54370 + i, dport=443, flags="PA") /
+               Raw(load=payload))
+        pkt.time = base + 320.0 + i * 0.25
+        pkts.append(pkt)
+    return pkts
+
+
 
 
 
@@ -1179,6 +1199,7 @@ def generate_all():
     attack_pkts += gen_tls_direct_ip_sni(base)
     attack_pkts += gen_webdav_method_tampering(base)
     attack_pkts += gen_tcp_zero_window(base)
+    attack_pkts += gen_cleartext_http_on_tls_port(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)

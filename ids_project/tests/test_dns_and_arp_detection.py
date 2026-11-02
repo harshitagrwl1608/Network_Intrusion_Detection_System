@@ -47,6 +47,29 @@ class TestDnsAndArpDetection(unittest.TestCase):
         self.assertIsNone(alert, "freq_threshold=0 should disable frequency alerts, but an alert was returned")
         self.assertEqual(dns_rule._freq, {}, "disabled frequency detection should retain no query history")
 
+    def test_nonpositive_dns_entropy_and_length_thresholds_use_safe_defaults(self):
+        entropy_rule = DnsRule(
+            entropy_threshold=0, max_query_len=60,
+            freq_threshold=0, subdomain_threshold=0)
+        entropy_alert = entropy_rule.check({
+            "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.30",
+            "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+            "dns_query": "abcdefgh.example.com", "timestamp": 100.0,
+        })
+        self.assertEqual(entropy_rule.entropy_threshold, 3.8)
+        self.assertIsNone(entropy_alert)
+
+        length_rule = DnsRule(
+            entropy_threshold=9.0, max_query_len=0,
+            freq_threshold=0, subdomain_threshold=0)
+        length_alert = length_rule.check({
+            "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.31",
+            "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+            "dns_query": "google.com", "timestamp": 100.0,
+        })
+        self.assertEqual(length_rule.max_query_len, 60)
+        self.assertIsNone(length_alert)
+
     def test_dns_over_tcp_preserves_transport_in_alert(self):
         dns_rule = DnsRule(
             entropy_threshold=3.5,
@@ -347,7 +370,7 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "dns_query": qname, "timestamp": 100,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.13")
+        self.assertEqual(alert["rule_version"], "1.14")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
         self.assertEqual(alert["evidence"]["longest_label"], "a" * 61)
         self.assertEqual(alert["evidence"]["longest_label_length"], 61)

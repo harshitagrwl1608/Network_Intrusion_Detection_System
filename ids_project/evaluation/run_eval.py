@@ -119,7 +119,7 @@ def _load_labels(path: str) -> list:
         IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
         TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
         TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
-        TlsAnomalyRule, TcpZeroWindowRule,
+        TlsAnomalyRule, TcpZeroWindowRule, CleartextHttpOnTlsPortRule,
     )
     known_rules = {
         rule.name for rule in (
@@ -127,7 +127,7 @@ def _load_labels(path: str) -> list:
             IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
             TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
             TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
-            TlsAnomalyRule, TcpZeroWindowRule,
+            TlsAnomalyRule, TcpZeroWindowRule, CleartextHttpOnTlsPortRule,
         )
     }
     protocols = {"TCP", "UDP", "ICMP", "ICMPV6", "ARP"}
@@ -169,7 +169,7 @@ def _run_metadata() -> dict:
         IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
         TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
         TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
-        TlsAnomalyRule, TcpZeroWindowRule,
+        TlsAnomalyRule, TcpZeroWindowRule, CleartextHttpOnTlsPortRule,
     )
 
     rules = (
@@ -177,7 +177,7 @@ def _run_metadata() -> dict:
         IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
         TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
         TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
-        TlsAnomalyRule, TcpZeroWindowRule,
+        TlsAnomalyRule, TcpZeroWindowRule, CleartextHttpOnTlsPortRule,
     )
     setting_names = (
         "PORT_SCAN_THRESHOLD", "UDP_SCAN_THRESHOLD", "UDP_FLOOD_THRESHOLD", "UDP_FLOOD_WINDOW",
@@ -192,6 +192,8 @@ def _run_metadata() -> dict:
         "SLOW_SCAN_THRESHOLD", "SLOW_SCAN_WINDOW", "SLOW_SCAN_COOLDOWN_S",
         "DATA_EXFIL_BYTE_THRESHOLD", "DATA_EXFIL_WINDOW", "DATA_EXFIL_WEB_BYTE_THRESHOLD",
         "TLS_INSPECTION",
+        "CLEAR_HTTP_TLS_MIN_REQUESTS", "CLEAR_HTTP_TLS_WINDOW_S",
+        "CLEAR_HTTP_TLS_COOLDOWN_S",
         "TCP_ZERO_WINDOW_THRESHOLD", "TCP_ZERO_WINDOW_WINDOW",
         "TCP_ZERO_WINDOW_MIN_FLOWS",
         "PAYLOAD_INSPECTION", "PAYLOAD_MAX_BYTES", "PAYLOAD_ALERT_COOLDOWN_S",
