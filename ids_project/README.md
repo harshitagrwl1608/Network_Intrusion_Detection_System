@@ -13,7 +13,7 @@
 > [!NOTE]
 > ### 🚧 Ongoing Project Notice
 > **NetGuard IDS is currently under active development.**  
-> The core packet-sniffing engine, 19-rule signature and heuristic detection suite, 17-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization, Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed 398 tests. The synthetic evaluation detected 38/38 labelled scenarios across all 19 existing rules, with zero unmatched attack alerts and zero alerts on the benign fixture; fixture results do not estimate real-world accuracy. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
+> The core packet-sniffing engine, 19-rule signature and heuristic detection suite, 17-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization, Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed 399 tests. The synthetic evaluation detected 38/38 labelled scenarios across all 19 existing rules, with zero unmatched attack alerts and zero alerts on the benign fixture; fixture results do not estimate real-world accuracy. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
 
 ---
 

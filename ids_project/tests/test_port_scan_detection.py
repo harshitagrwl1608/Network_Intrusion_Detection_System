@@ -211,6 +211,30 @@ class TestPortScanDetection(unittest.TestCase):
         self.assertEqual(alert["window_start"], 20)
         self.assertEqual(alert["window_end"], 22)
 
+    def test_malformed_timestamps_are_ignored_without_corrupting_scan_window(self):
+        for rule_cls, protocol, version in (
+            (PortScanRule, "TCP", "1.11"),
+            (UdpScanRule, "UDP", "1.2"),
+        ):
+            for invalid_time in ("bad-time", float("nan"), float("inf")):
+                with self.subTest(rule=rule_cls.__name__, timestamp=invalid_time):
+                    rule = rule_cls(threshold=3, window=10)
+                    base = {
+                        "type": "IP", "src_ip": "203.0.113.20",
+                        "dst_ip": "203.0.113.30", "protocol": protocol,
+                        "src_port": 50000, "initial_syn": True,
+                    }
+                    self.assertIsNone(rule.check(dict(base, dst_port=80, timestamp=100)))
+                    self.assertIsNone(rule.check(dict(base, dst_port=81, timestamp=101)))
+                    history_before = dict(rule._vert[(base["src_ip"], base["dst_ip"])])
+                    self.assertIsNone(rule.check(dict(
+                        base, dst_port=82, timestamp=invalid_time)))
+                    self.assertEqual(
+                        rule._vert[(base["src_ip"], base["dst_ip"])], history_before)
+                    alert = rule.check(dict(base, dst_port=82, timestamp=102))
+                    self.assertIsNotNone(alert)
+                    self.assertEqual(alert["rule_version"], version)
+
     def test_duplicate_tcp_probes_refresh_one_entry_in_scan_state(self):
         rule = PortScanRule(threshold=5, window=60)
         def packet(port, ts, sport=50000):

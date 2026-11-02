@@ -316,7 +316,7 @@ class BlocklistRule:
 
 class PortScanRule:
     name = "PORT_SCAN"
-    rule_version = "1.10"
+    rule_version = "1.11"
 
     def __init__(self, threshold: int = 15, window: int = 10, protocol: str = "TCP",
                  max_states: int = 10_000):
@@ -405,7 +405,12 @@ class PortScanRule:
         if dst_port is None:
             return None
 
-        now = float(record.get("timestamp", time.time()))
+        try:
+            now = float(record.get("timestamp", time.time()))
+        except (TypeError, ValueError, OverflowError):
+            return None  # malformed event time cannot safely update scan windows
+        if not math.isfinite(now):
+            return None
         vkey = (src, dst_ip)
         hkey = (src, dst_port)
 
@@ -565,7 +570,7 @@ class UdpScanRule(PortScanRule):
     """UDP scan detector sharing the TCP scanner's vertical/horizontal logic."""
 
     name = "UDP_SCAN"
-    rule_version = "1.1"
+    rule_version = "1.2"
 
     def __init__(self, threshold: int = 15, window: int = 10,
                  max_states: int = 10_000):
