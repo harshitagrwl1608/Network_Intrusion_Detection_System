@@ -30,13 +30,19 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 ## Latest verification
 
-Results verified during the current continuation on 2026-11-02 on branch `codex-existing-detection-improvements`:
+Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **393 passed** (`python -m unittest discover -s tests`).
+- Full test suite: **396 passed** (`python -m unittest discover -s tests`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
 - All 1,163 synthetic attack packets and 832 benign packets were replayed; alert persistence checks reported no dropped alerts or shutdown timeout.
 - `git diff --check` was clean at inspection.
 - Scapy's local interface enumeration required an approved elevated process; validation used offline tests and PCAP replay only, not live capture.
+
+## Follow-up: 2026-11-03 BLOCKLIST rule regression coverage
+
+- Review found `BLOCKLIST` had no direct rule-level tests; existing tests exercised feed parsing and file updates but not the rule's exact-address/CIDR matching or alert direction.
+- Added focused tests for exact IPv4 contact matches, IPv4/IPv6 CIDR source matches, receive/contact evidence, and ignored non-IP, malformed, or unlisted records. Detection logic and coverage are unchanged.
+- Focused blocklist tests: **8 passed**; full suite: **396 passed**. Synthetic evaluation was not rerun because only tests and test-count documentation changed; the latest unchanged-code replay remains 38/38 synthetic scenarios with zero unmatched attack alerts and zero benign alerts.
 
 ## Follow-up: 2026-11-02 ICMP sweep alert storm control
 

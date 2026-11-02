@@ -8,10 +8,48 @@ PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
-from engine.blocklist import atomic_write_text, download_blocklist, load_blocklist
+from engine.blocklist import BlocklistData, atomic_write_text, download_blocklist, load_blocklist
+from engine.rules import BlocklistRule
 
 
 class TestBlocklistPathHandling(unittest.TestCase):
+    def test_rule_matches_exact_ipv4_and_reports_contact_direction(self):
+        rule = BlocklistRule(BlocklistData({"198.51.100.7"}, []))
+        alert = rule.check({
+            "type": "IP", "src_ip": "192.0.2.10", "dst_ip": "198.51.100.7",
+            "protocol": "TCP", "dst_port": 443,
+        })
+        self.assertEqual(alert["evidence"], {
+            "bad_ip": "198.51.100.7", "direction": "contact",
+        })
+
+    def test_rule_matches_ipv4_and_ipv6_cidrs_and_reports_receive_direction(self):
+        import ipaddress
+
+        rule = BlocklistRule(BlocklistData(set(), [
+            ipaddress.ip_network("198.51.100.0/24"),
+            ipaddress.ip_network("2001:db8:bad::/48"),
+        ]))
+        for source in ("198.51.100.9", "2001:db8:bad::9"):
+            with self.subTest(source=source):
+                alert = rule.check({
+                    "type": "IP", "src_ip": source, "dst_ip": "192.0.2.10",
+                    "protocol": "UDP",
+                })
+                self.assertEqual(alert["evidence"], {
+                    "bad_ip": source, "direction": "receive",
+                })
+
+    def test_rule_ignores_non_ip_records_unlisted_and_malformed_addresses(self):
+        rule = BlocklistRule(BlocklistData({"198.51.100.7"}, []))
+        for record in (
+            {"type": "ARP", "src_ip": "198.51.100.7"},
+            {"type": "IP", "src_ip": "bad-ip", "dst_ip": "192.0.2.10"},
+            {"type": "IP", "src_ip": "192.0.2.10", "dst_ip": "203.0.113.9"},
+        ):
+            with self.subTest(record=record):
+                self.assertIsNone(rule.check(record))
+
     def test_download_accepts_bare_filename_without_network_access(self):
         response = Mock()
         response.text = "198.51.100.1\n"
