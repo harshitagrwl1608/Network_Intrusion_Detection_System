@@ -796,7 +796,7 @@ class TcpFlagAnomalyRule:
     """
 
     name = "TCP_FLAG_ANOMALY"
-    rule_version = "1.1"
+    rule_version = "1.2"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, cooldown: float = 60.0, max_states: int = 5000):
@@ -824,7 +824,14 @@ class TcpFlagAnomalyRule:
         flags = record.get("tcp_flags")
         if flags is None:
             return None
-        flags = int(flags)
+        try:
+            flags = int(flags)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        # TCP reserves nine flag bits (including NS); values outside that
+        # range are malformed telemetry and cannot support a reliable verdict.
+        if not 0 <= flags <= 0x1FF:
+            return None
 
         # Standard TCP flags
         _FIN = 0x01

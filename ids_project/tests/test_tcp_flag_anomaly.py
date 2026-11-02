@@ -85,6 +85,12 @@ class TestTcpFlagAnomalyRule(unittest.TestCase):
             alert = self.rule.check(_tcp_pkt(flags=flag))
             self.assertIsNone(alert, f"Legitimate flag 0x{flag:02x} should not be flagged")
 
+    def test_malformed_or_out_of_range_flags_are_ignored_without_state(self):
+        for flags in ("invalid", float("inf"), -1, 0x200, 0xFFFFFFFF):
+            with self.subTest(flags=flags):
+                self.assertIsNone(self.rule.check(_tcp_pkt(flags=flags)))
+                self.assertEqual(self.rule._cooldown, {})
+
     def test_cooldown_suppresses_repeat_alerts(self):
         base = time.time()
         first = self.rule.check(_tcp_pkt(src="192.168.1.50", flags=0x03, timestamp=base))

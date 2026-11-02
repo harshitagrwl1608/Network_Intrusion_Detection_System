@@ -942,6 +942,13 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Added a unit regression that sends the last segment before the middle segment and verifies the request is counted exactly once. Existing S38 now exercises the same three-segment reordering in the replay PCAP.
 - Verification: focused cleartext tests **11 passed**; full suite **342 tests passed** in 46.02s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios** across all 19 rule families, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. These remain fixture-only results.
 
+## Follow-up: 2026-11-02 malformed flag metadata in TCP_FLAG_ANOMALY
+
+- `TCP_FLAG_ANOMALY` converted `tcp_flags` directly to `int`, so a malformed normalized record raised before the rule could return safely. Negative or wider-than-nine-bit values could also satisfy masked flag predicates despite not representing a TCP flags field.
+- Version 1.2 ignores non-integer values and values outside `0..0x1FF` without changing cooldown state. All existing anomaly conditions and valid nine-bit TCP flag combinations remain unchanged.
+- Added regression cases for nonnumeric, infinite, negative, and oversized values. Existing positive and benign flag-combination cases remain covered.
+- Verification: focused TCP flag tests **11 passed**; full suite **343 tests passed** in 49.38s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios**, with zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
 ## Follow-up: 2026-11-02 malformed TCP sequence metadata in PAYLOAD_HIT
 
 - `PayloadRule._update_stream` converted `tcp_payload_seq` without handling malformed input. Reproduction with a valid SQL injection payload and `tcp_payload_seq="malformed"` raised `ValueError` before packet-level matching, losing that detection.
