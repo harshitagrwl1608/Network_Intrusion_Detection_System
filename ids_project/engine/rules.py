@@ -3033,7 +3033,7 @@ class BruteForceRule:
     """
 
     name = "BRUTE_FORCE"
-    rule_version = "1.6"
+    rule_version = "1.7"
 
     # Per-(src, dst, port) cooldown after firing. Prevents re-alerting for the
     # same ongoing brute-force burst; renewed bursts after the cooldown will fire.
@@ -3199,14 +3199,16 @@ class BruteForceRule:
             "src_port": src_port,
             "dst_port": dst_port,
             "protocol": "TCP",
-            "severity": "high",
+            "severity": "medium",
             "confidence": "heuristic",
             "detail": (
                 f"{src} made {'at least ' if count_saturated else ''}"
                 f"{count} connection attempts to {dst}:{dst_port} "
-                f"(auth port) in {self.window}s — possible credential brute-force"
+                f"(auth port) in {self.window}s — possible credential brute-force "
+                "(SYN-rate signal; authentication outcome is not observed)"
             ),
             "evidence": {
+                "classification": "AUTH_SERVICE_SYN_BURST",
                 "attempt_count": count,
                 "attempt_count_saturated": count_saturated,
                 "auth_port": dst_port,
