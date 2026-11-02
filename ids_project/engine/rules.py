@@ -570,18 +570,21 @@ class UdpFloodRule:
     """
 
     name = "UDP_FLOOD"
-    rule_version = "1.1"
+    rule_version = "1.2"
     ALERT_COOLDOWN_S: float = 60.0
     _EXEMPT_SRC_PORTS: set[int] = {53, 67, 68, 123}
 
     def __init__(self, threshold: int = 50, window: int = 5,
                  max_flows: int = 4096, cooldown: float = 60.0,
                  web_threshold: int = 500):
-        self.threshold = max(1, int(threshold))
-        self.web_threshold = max(self.threshold, int(web_threshold))
-        self.window = max(1, int(window))
-        self.max_flows = max(1, int(max_flows))
-        self.cooldown = max(0.0, float(cooldown))
+        self.threshold = _positive_setting(
+            threshold, 50, "UDP_FLOOD_THRESHOLD")
+        self.web_threshold = max(self.threshold, _positive_setting(
+            web_threshold, 500, "UDP_FLOOD_WEB_THRESHOLD"))
+        self.window = _positive_setting(window, 5, "UDP_FLOOD_WINDOW")
+        self.max_flows = _positive_setting(max_flows, 4096, "UDP_FLOOD_MAX_FLOWS")
+        self.cooldown = _nonnegative_float_setting(
+            cooldown, 60.0, "UDP_FLOOD_COOLDOWN")
         self._lock = threading.RLock()
         # (src_ip, dst_ip) → list of timestamps
         self._history: OrderedDict[tuple, list[float]] = OrderedDict()
@@ -1458,15 +1461,17 @@ class IcmpFloodRule:
     """
 
     name = "ICMP_FLOOD"
-    rule_version = "1.2"
+    rule_version = "1.3"
     ALERT_COOLDOWN_S: float = 60.0
 
     def __init__(self, threshold: int = 50, window: int = 5,
                  max_flows: int = 4096, cooldown: float = 60.0):
-        self.threshold = max(1, int(threshold))
-        self.window = max(1, int(window))
-        self.max_flows = max(1, int(max_flows))
-        self.cooldown = float(cooldown)
+        self.threshold = _positive_setting(
+            threshold, 50, "ICMP_FLOOD_THRESHOLD")
+        self.window = _positive_setting(window, 5, "ICMP_FLOOD_WINDOW")
+        self.max_flows = _positive_setting(max_flows, 4096, "ICMP_FLOOD_MAX_FLOWS")
+        self.cooldown = _nonnegative_float_setting(
+            cooldown, 60.0, "ICMP_FLOOD_COOLDOWN")
         self._lock = threading.RLock()
         # (src_ip, dst_ip) → list of timestamps
         self._history: dict[tuple, list[float]] = {}

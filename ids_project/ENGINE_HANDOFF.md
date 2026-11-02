@@ -956,6 +956,13 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Added regressions proving invalid values select safe defaults, one zero-window packet does not trigger the default burst threshold, and zero cooldown remains valid.
 - Verification: focused zero-window tests **22 passed**; full suite **345 tests passed** in 48.16s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios** across all 19 rule families, with zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
 
+## Follow-up: 2026-11-02 UDP_FLOOD and ICMP_FLOOD setting validation
+
+- Both flood-rule constructors coerced a zero threshold to `1`, so a single packet could satisfy a flood rule. Invalid windows/state caps could raise, and `ICMP_FLOOD` accepted negative or non-finite cooldowns that bypassed expected suppression behavior.
+- `UDP_FLOOD` version 1.2 and `ICMP_FLOOD` version 1.3 now fall back to existing documented threshold/window/state defaults and require a finite non-negative cooldown. Valid low test thresholds, including `1`, and `cooldown=0` remain supported. UDP's higher web threshold remains at least its general threshold.
+- Added regressions for invalid values and one-packet no-alert behavior while asserting valid threshold-one behavior.
+- Verification: focused UDP/ICMP flood tests **23 passed**; full suite **349 tests passed** in 46.32s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios** across all 19 rule families, with zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
 ## Follow-up: 2026-11-02 malformed TCP sequence metadata in PAYLOAD_HIT
 
 - `PayloadRule._update_stream` converted `tcp_payload_seq` without handling malformed input. Reproduction with a valid SQL injection payload and `tcp_payload_seq="malformed"` raised `ValueError` before packet-level matching, losing that detection.

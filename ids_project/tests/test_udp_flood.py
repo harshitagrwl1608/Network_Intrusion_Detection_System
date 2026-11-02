@@ -50,6 +50,23 @@ class TestUdpFloodRule(unittest.TestCase):
 
         self.assertIsNone(alert)
 
+    def test_invalid_settings_fall_back_and_do_not_make_one_packet_a_flood(self):
+        rule = UdpFloodRule(
+            threshold=0, web_threshold="invalid", window=0,
+            max_flows="invalid", cooldown=float("nan"),
+        )
+        self.assertEqual(rule.threshold, 50)
+        self.assertEqual(rule.web_threshold, 500)
+        self.assertEqual(rule.window, 5)
+        self.assertEqual(rule.max_flows, 4096)
+        self.assertEqual(rule.cooldown, 60.0)
+        self.assertIsNone(rule.check(self._pkt("192.0.2.60", "198.51.100.60")))
+
+    def test_valid_threshold_one_and_zero_cooldown_remain_supported(self):
+        rule = UdpFloodRule(threshold=1, cooldown=0)
+        self.assertEqual(rule.threshold, 1)
+        self.assertEqual(rule.cooldown, 0.0)
+
     def test_quic_port_uses_higher_web_burst_threshold(self):
         rule = UdpFloodRule(threshold=50, web_threshold=100, window=5)
         for i in range(99):

@@ -60,6 +60,21 @@ class TestIcmpFloodRule(unittest.TestCase):
             alert = self.rule.check(_icmp_pkt(timestamp=base + i * 0.1))
             self.assertIsNone(alert)
 
+    def test_invalid_settings_fall_back_and_do_not_make_one_packet_a_flood(self):
+        rule = IcmpFloodRule(
+            threshold=0, window="invalid", max_flows=0, cooldown=-1,
+        )
+        self.assertEqual(rule.threshold, 50)
+        self.assertEqual(rule.window, 5)
+        self.assertEqual(rule.max_flows, 4096)
+        self.assertEqual(rule.cooldown, 60.0)
+        self.assertIsNone(rule.check(_icmp_pkt(timestamp=100.0)))
+
+    def test_valid_threshold_one_and_zero_cooldown_remain_supported(self):
+        rule = IcmpFloodRule(threshold=1, cooldown=0)
+        self.assertEqual(rule.threshold, 1)
+        self.assertEqual(rule.cooldown, 0.0)
+
     def test_ignores_echo_replies(self):
         base = time.time()
         for i in range(20):
