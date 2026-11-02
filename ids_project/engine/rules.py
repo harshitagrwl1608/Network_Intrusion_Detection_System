@@ -34,7 +34,7 @@ RuleEngine execution order (all rules run; no early exit):
   9.  IcmpSweepRule          — ICMP echo target sweep by source
  10.  IcmpFloodRule          — ICMP echo-request flood
  11.  ArpSpoofRule           — persistent IP→MAC mapping change
- 12.  PayloadRule (v1.13)    — bounded TCP stream DPI + regex signatures (all matches)
+ 12.  PayloadRule (v1.17)    — bounded TCP stream DPI + regex signatures (all matches)
      Signatures:
        SQL_INJECTION        — UNION/SELECT, BENCHMARK, LOAD_FILE, INTO OUTFILE, quote-OR bypass
        XSS                  — script/event handlers + SVG/img/iframe/body bypass vectors
@@ -1887,7 +1887,11 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
             rb"|insert\s+into|update\s+\w+\s+set"
             rb"|or\s+[\x27\x22]?\s*[\w]+\s*=\s*[\x27\x22]?\s*[\w]"
             rb"|or\s+1\s*=\s*1|or\s+\x27\w+\x27\s*=\s*\x27\w+\x27"
-            rb"|--.{0,2}(?:\r?\n|$)|#\s*$"
+            # A bounded sample may start or end inside a binary/application
+            # value. Only accept a MySQL comment after a SQL-like value or
+            # whitespace; exclude assignment values such as `bgColor=#` and
+            # punctuation in binary data while retaining line-ending comments.
+            rb"|--.{0,2}(?:\r?\n|$)|(?:(?<=[\w'\")\]])|(?<=\s))#[ \t]*(?:\r?\n|$)"
             rb"|sleep\s*\(\s*\d+|benchmark\s*\(\s*\d+|waitfor\s+delay\s+\x27"
             rb"|exec\s+(?:xp_cmdshell|sp_executesql)|xp_cmdshell"
             rb"|load_file\s*\(|into\s+(?:outfile|dumpfile)\s+[\x27\x22]"
@@ -1937,7 +1941,11 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
         "CMD_INJECTION",
         re.compile(
             rb"(?i)(/bin/sh|/bin/bash|/etc/passwd|/etc/shadow|cmd\.exe|powershell\.exe"
-            rb"|\$\(|`[^`]{1,100}`"
+            # A bare command-substitution delimiter is common in quoted mail,
+            # logs and templates. Require a recognizable command inside it so
+            # arbitrary delimited prose does not become a shell alert.
+            rb"|\$\(\s*(?:/(?:[\w.-]+/)*[\w.-]+|(?:id|whoami|uname|cat|curl|wget|nc|netcat|bash|sh|cmd|powershell|python\d?|perl|ruby|node|php|chmod|chown|sudo|touch|rm|echo|sleep|ping)\b)[^)]{0,100}\)"
+            rb"|`\s*(?:/(?:[\w.-]+/)*[\w.-]+|(?:id|whoami|uname|cat|curl|wget|nc|netcat|bash|sh|cmd|powershell|python\d?|perl|ruby|node|php|chmod|chown|sudo|touch|rm|echo|sleep|ping)\b)[^`]{0,100}`"
             # Reverse-shell patterns
             rb"|bash\s+-i\s+>&\s*/dev/tcp/|/dev/tcp/"
             rb"|nc\s+-(?:e|c)\s+/bin"
@@ -1987,8 +1995,11 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
     (
         "SSRF",
         re.compile(
-            rb"(?i)(file://|dict://|gopher://|sftp://|tftp://"
-            rb"|ldap://|ldaps://"
+            # Non-HTTP schemes are SSRF candidates when supplied as a
+            # server-side fetch/URL value. A literal file:// in SMTP content,
+            # documentation or a message body is not enough to establish SSRF.
+            rb"(?i)(?:(?:\b(?:url|uri|dest|target|callback|webhook|proxy|redirect|fetch|path)\s*[:=]\s*|[?&][\w.-]{1,32}=)"
+            rb"(?:file|dict|gopher|sftp|tftp|ldap|ldaps)://"
             rb"|ftp://127\.|ftp://0\."
             rb"|http://127\.|http://0\.0\.0\.0|http://0:"
             rb"|http://169\.254\.169\.254|http://metadata\.google"
@@ -2247,7 +2258,7 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.16"
+    rule_version = "1.17"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048,
@@ -2265,6 +2276,10 @@ class PayloadRule:
         # Each value is (next expected sequence, bounded bytes, last event time,
         # queued out-of-order segments, and initial SYN sequence when observed).
         self._streams: dict[tuple, tuple[int, bytes, float, dict[int, bytes], int | None]] = {}
+        # STARTTLS can switch an otherwise cleartext SMTP/IMAP flow to TLS on
+        # the same service port. Remember that transition so ciphertext and
+        # certificate bytes never enter the payload signatures.
+        self._tls_flows: OrderedDict[tuple, float] = OrderedDict()
         # Per directional TCP flow and signature, suppress duplicate packet
         # matches while allowing a newly observed signature to alert at once.
         self._alerted: OrderedDict[tuple, float] = OrderedDict()
@@ -2276,10 +2291,35 @@ class PayloadRule:
             for key in list(self._streams):
                 if self._streams[key][2] < cutoff or self._streams[key][2] > now:
                     del self._streams[key]
+            for key, last_seen in list(self._tls_flows.items()):
+                if last_seen < cutoff or last_seen > now:
+                    del self._tls_flows[key]
             alert_cutoff = now - self.alert_cooldown
             for key in list(self._alerted):
                 if self._alerted[key] < alert_cutoff:
                     del self._alerted[key]
+
+    @staticmethod
+    def _tls_flow_key(record: dict) -> tuple | None:
+        src, dst = record.get("src_ip"), record.get("dst_ip")
+        src_port, dst_port = record.get("src_port"), record.get("dst_port")
+        if not src or not dst or src_port is None or dst_port is None:
+            return None
+        try:
+            endpoints = sorted(((src, int(src_port)), (dst, int(dst_port))))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return endpoints[0], endpoints[1]
+
+    @staticmethod
+    def _looks_like_tls_record(payload: bytes) -> bool:
+        """Recognize a TLS record header without treating arbitrary binary as TLS."""
+        if len(payload) < 5 or payload[0] not in (0x14, 0x15, 0x16, 0x17):
+            return False
+        if payload[1] != 0x03 or payload[2] > 0x04:
+            return False
+        record_len = int.from_bytes(payload[3:5], "big")
+        return 0 < record_len <= 18_432
 
     def _update_stream(self, record: dict, payload: bytes) -> bytes | None:
         """Return a bounded contiguous TCP sample, resetting across sequence gaps."""
@@ -2412,6 +2452,15 @@ class PayloadRule:
         dst_port = record.get("dst_port") or 0
         src_port = record.get("src_port") or 0
 
+        # A reused TCP 4-tuple starts a new connection. Clear any STARTTLS
+        # suppression state first so an earlier connection cannot hide new
+        # plaintext traffic on the same endpoints.
+        if record.get("protocol") == "TCP" and record.get("initial_syn"):
+            flow_key = self._tls_flow_key(record)
+            if flow_key is not None:
+                with self._stream_lock:
+                    self._tls_flows.pop(flow_key, None)
+
         # Direction decision (P1 §3.4 direction fix):
         # - Both dst and src NOT in DPI_PORTS → not a plaintext app port, skip.
         # - src_port IS a known service port AND dst_port is NOT → this looks
@@ -2424,6 +2473,38 @@ class PayloadRule:
         if src_port in _DPI_PORTS and dst_port not in _DPI_PORTS:
             # Server responding to a client — skip inspection
             return None
+
+        if record.get("protocol") == "TCP" and payload:
+            now = _finite_record_timestamp(record)
+            flow_key = self._tls_flow_key(record)
+            if flow_key is not None:
+                with self._stream_lock:
+                    if flow_key in self._tls_flows:
+                        last_seen = self._tls_flows[flow_key]
+                        if now is not None and (
+                            last_seen < now - self.stream_timeout or last_seen > now
+                        ):
+                            del self._tls_flows[flow_key]
+                        else:
+                            if now is not None:
+                                self._tls_flows[flow_key] = now
+                                self._tls_flows.move_to_end(flow_key)
+                            return None
+                    if self._looks_like_tls_record(payload):
+                        if now is not None:
+                            self._tls_flows[flow_key] = now
+                            self._tls_flows.move_to_end(flow_key)
+                            while len(self._tls_flows) > self.max_streams:
+                                self._tls_flows.popitem(last=False)
+                        # Discard any cleartext reassembly buffer at the
+                        # protocol transition so later ciphertext cannot join it.
+                        self._streams.pop(
+                            (record.get("src_ip"), src_port,
+                             record.get("dst_ip"), dst_port), None)
+                        self._streams.pop(
+                            (record.get("dst_ip"), dst_port,
+                             record.get("src_ip"), src_port), None)
+                        return None
 
         packet_sample = payload[: self.max_bytes]
         try:

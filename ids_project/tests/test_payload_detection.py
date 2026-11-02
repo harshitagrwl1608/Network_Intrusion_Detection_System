@@ -170,7 +170,7 @@ class TestPayloadRule(unittest.TestCase):
         suffix.update(tcp_flags=0x18, tcp_seq=1018)
         alert = self.rule.check(suffix)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.16")
+        self.assertEqual(alert["rule_version"], "1.17")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):
@@ -282,6 +282,107 @@ class TestPayloadRule(unittest.TestCase):
         hit = alert["evidence"]["hits"][0]
         self.assertEqual(hit["signature"], "SQL_INJECTION")
         self.assertEqual(hit["representation"], "multi_pass_decoded")
+
+    def test_command_substitution_requires_recognizable_command(self):
+        benign = self.rule.check(self.packet(
+            b"POST /mail HTTP/1.1\r\n\r\nQuoted phrase: \x60a long time ago\x60",
+            8100, dst_port=587))
+        attack = PayloadRule().check(self.packet(
+            b"GET /search?q=\x60id\x60 HTTP/1.1\r\n\r\n", 8200))
+        self.assertIsNone(benign)
+        self.assertIsNotNone(attack)
+        self.assertIn("CMD_INJECTION", [h["signature"] for h in attack["evidence"]["hits"]])
+
+    def test_shell_command_substitution_still_fires(self):
+        alert = self.rule.check(self.packet(
+            b"GET /search?q=$(whoami) HTTP/1.1\r\n\r\n", 8300))
+        self.assertIsNotNone(alert)
+        self.assertIn("CMD_INJECTION", [h["signature"] for h in alert["evidence"]["hits"]])
+
+    def test_file_uri_in_message_body_is_not_ssrf_without_fetch_context(self):
+        alert = self.rule.check(self.packet(
+            b"MAIL FROM:<sender@example.test>\r\nDATA\r\n"
+            b"Personal note: file:///D:/Documents/letter.txt\r\n",
+            8400, dst_port=587))
+        self.assertIsNone(alert)
+
+    def test_file_uri_in_fetch_parameter_still_fires_ssrf(self):
+        alert = self.rule.check(self.packet(
+            b"GET /proxy?url=file:///etc/passwd HTTP/1.1\r\n\r\n", 8500))
+        self.assertIsNotNone(alert)
+        self.assertIn("SSRF", [h["signature"] for h in alert["evidence"]["hits"]])
+
+    def test_starttls_handshake_and_ciphertext_are_not_payload_inspected(self):
+        rule = PayloadRule()
+        starttls = self.packet(
+            b"\x16\x03\x03\x00\x20\x01\x00\x00\x1c\x60file://",
+            8600, dst_port=587, ts=100)
+        encrypted = self.packet(
+            b"\x17\x03\x03\x00\x20\x60/bin/sh",
+            8620, dst_port=587, ts=101)
+        self.assertIsNone(rule.check(starttls))
+        self.assertIsNone(rule.check(encrypted))
+        self.assertEqual(len(rule._tls_flows), 1)
+
+    def test_tls_flow_suppression_expires_before_later_cleartext_is_inspected(self):
+        rule = PayloadRule(stream_timeout=5)
+        starttls = self.packet(
+            b"\x16\x03\x03\x00\x20\x01\x00\x00\x1c",
+            8700, ts=100, dst_port=587)
+        later_cleartext = self.packet(
+            b"GET /?q=UNION SELECT password HTTP/1.1\r\n\r\n",
+            8900, ts=106, dst_port=587)
+
+        self.assertIsNone(rule.check(starttls))
+        alert = rule.check(later_cleartext)
+        self.assertIsNotNone(alert)
+        self.assertIn("SQL_INJECTION", [h["signature"] for h in alert["evidence"]["hits"]])
+        self.assertEqual(rule._tls_flows, {})
+
+    def test_truncated_html_color_is_not_a_sql_comment(self):
+        alert = self.rule.check(self.packet(
+            b"POST /mail HTTP/1.1\r\n\r\n<BODY bgColor=#",
+            9000, dst_port=587))
+        self.assertIsNone(alert)
+
+    def test_mysql_hash_comment_marker_still_fires(self):
+        for index, request in enumerate((
+            b"GET /search?q=admin' #",
+            b"GET /search?q=admin#",
+        )):
+            rule = PayloadRule()
+            alert = rule.check(self.packet(request, 9100 + index))
+            self.assertIsNotNone(alert, request)
+            self.assertIn("SQL_INJECTION", [h["signature"] for h in alert["evidence"]["hits"]])
+
+    def test_hash_at_packet_start_is_not_a_sql_comment(self):
+        self.assertIsNone(self.rule.check(self.packet(b"#", 9200, dst_port=587)))
+
+    def test_hash_before_embedded_line_break_is_not_a_sql_comment(self):
+        self.assertIsNone(self.rule.check(self.packet(
+            b"binary-fragment%#\n\xc4\x0f\x9f\xf2", 9250, dst_port=587)))
+
+    def test_mysql_hash_comment_before_newline_still_fires(self):
+        alert = PayloadRule().check(self.packet(
+            b"GET /search?q=admin#\r\nHost: example.test\r\n", 9260))
+        self.assertIsNotNone(alert)
+        self.assertIn("SQL_INJECTION", [h["signature"] for h in alert["evidence"]["hits"]])
+
+    def test_new_tcp_connection_reuse_clears_tls_suppression(self):
+        rule = PayloadRule(stream_timeout=30)
+        tls = self.packet(b"\x16\x03\x03\x00\x20\x01", 9300, ts=100, dst_port=587)
+        new_syn = self.packet(
+            b"", 0, ts=101, dst_port=587, initial_syn=True, tcp_flags=0x02,
+            tcp_payload_seq=None)
+        cleartext = self.packet(
+            b"GET /?q=UNION SELECT password HTTP/1.1\r\n\r\n",
+            9400, ts=102, dst_port=587)
+
+        self.assertIsNone(rule.check(tls))
+        self.assertIsNone(rule.check(new_syn))
+        alert = rule.check(cleartext)
+        self.assertIsNotNone(alert)
+        self.assertIn("SQL_INJECTION", [h["signature"] for h in alert["evidence"]["hits"]])
 
     def test_double_url_encoded_path_traversal(self):
         # Double-encoded ../../ and double-encoded win.ini:
