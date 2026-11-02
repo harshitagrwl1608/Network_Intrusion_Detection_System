@@ -52,6 +52,40 @@ class TestPayloadRule(unittest.TestCase):
         self.assertIsNone(other_flow)
         self.assertIsNotNone(other_service)
 
+    def test_late_payload_event_does_not_clear_newer_cooldown(self):
+        rule = PayloadRule(alert_cooldown=60)
+        payload = b"GET /?q=UNION SELECT"
+        self.assertIsNotNone(rule.check(self.packet(payload, 9000, ts=100)))
+        rule.prune_stale(99)
+        self.assertEqual(len(rule._alerted), 1)
+        self.assertIsNone(rule.check(self.packet(payload, 9000, ts=99)))
+        self.assertIsNone(rule.check(self.packet(payload, 9000, ts=101)))
+        self.assertIsNotNone(rule.check(self.packet(payload, 9000, ts=160)))
+
+    def test_active_signature_cooldown_survives_alert_key_churn(self):
+        rule = PayloadRule(alert_cooldown=60)
+        rule._max_alert_states = 2
+        payload = b"GET /?q=UNION SELECT"
+
+        def send(dst, ts):
+            return rule.check(self.packet(payload, 9000, ts=ts, dst_ip=dst))
+
+        self.assertIsNotNone(send("192.0.2.80", 100))  # alert A
+        self.assertIsNotNone(send("192.0.2.81", 101))  # alert B
+        self.assertIsNone(send("192.0.2.80", 102))  # refresh A's LRU position
+        self.assertIsNotNone(send("192.0.2.82", 103))  # evict B
+        self.assertIsNone(send("192.0.2.80", 104))  # A's cooldown survives
+
+    def test_cooldown_is_scoped_to_transport_protocol(self):
+        rule = PayloadRule(alert_cooldown=60)
+        payload = b"GET /?q=UNION SELECT"
+        tcp = self.packet(payload, 9000, ts=100)
+        udp = self.packet(payload, 9000, ts=101, protocol="UDP")
+        tcp_alert = rule.check(tcp)
+        udp_alert = rule.check(udp)
+        self.assertIsNotNone(tcp_alert)
+        self.assertIsNotNone(udp_alert)
+
     def test_percent_and_form_encoded_signatures_are_detected(self):
         percent = self.rule.check(self.packet(b"GET /?q=%55NION%20SELECT", 1000))
         self.assertIsNotNone(percent)
@@ -72,6 +106,66 @@ class TestPayloadRule(unittest.TestCase):
         alert = self.rule.check(self.packet(second, 1000 + len(first), ts=101))
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["inspection"], "packet_and_bounded_tcp_stream")
+
+    def test_raw_header_injection_split_across_tcp_segments_fires(self):
+        first = b"GET /?next=value\r\nSet-"
+        second = b"Cookie: admin=1 HTTP/1.1\r\n"
+        self.assertIsNone(self.rule.check(self.packet(first, 2000)))
+        alert = self.rule.check(self.packet(second, 2000 + len(first), ts=101))
+        self.assertIsNotNone(alert)
+        self.assertIn("HEADER_INJECTION", [h["signature"] for h in alert["evidence"]["hits"]])
+
+    def test_new_connection_reusing_tuple_resets_tcp_stream_sequence_space(self):
+        old_prefix = self.packet(b"UNION SEL", 1000, ts=100)
+        old_prefix.update(tcp_flags=0x18, tcp_seq=1000)
+        self.assertIsNone(self.rule.check(old_prefix))
+
+        # New initial sequence on the same 4-tuple marks a distinct connection.
+        syn = self.packet(b"", 1010, ts=101, initial_syn=True,
+                          tcp_flags=0x02, tcp_seq=1009)
+        self.assertIsNone(self.rule.check(syn))
+
+        # The new connection's partial payload must be joined only to its own
+        # subsequent bytes, even though the sequence happens to follow the old flow.
+        new_prefix = self.packet(b"UNION SEL", 1010, ts=102)
+        new_prefix.update(tcp_flags=0x18, tcp_seq=1009)
+        self.assertIsNone(self.rule.check(new_prefix))
+        suffix = self.packet(b"ECT password", 1019, ts=103)
+        suffix.update(tcp_flags=0x18, tcp_seq=1018)
+        alert = self.rule.check(suffix)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_version"], "1.13")
+        self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
+
+    def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):
+        syn = self.packet(b"", 1001, ts=100, initial_syn=True,
+                          tcp_flags=0x02, tcp_seq=1000)
+        self.assertIsNone(self.rule.check(syn))
+        first = self.packet(b"UNION SEL", 1001, ts=101)
+        first.update(tcp_flags=0x18, tcp_seq=1000)
+        self.assertIsNone(self.rule.check(first))
+
+        retransmitted_syn = dict(syn, timestamp=102)
+        self.assertIsNone(self.rule.check(retransmitted_syn))
+        suffix = self.packet(b"ECT password", 1010, ts=103)
+        suffix.update(tcp_flags=0x18, tcp_seq=1009)
+        alert = self.rule.check(suffix)
+        self.assertIsNotNone(alert)
+        self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
+
+    def test_new_connection_does_not_join_payload_from_previous_connection(self):
+        old_prefix = self.packet(b"UNION SEL", 1000, ts=100)
+        old_prefix.update(tcp_flags=0x18, tcp_seq=1000)
+        self.assertIsNone(self.rule.check(old_prefix))
+
+        # The new ISN is adjacent to the old stream's expected sequence. Without
+        # connection tracking, its payload would complete the old SQL signature.
+        syn = self.packet(b"", 1009, ts=101, initial_syn=True,
+                          tcp_flags=0x02, tcp_seq=1008)
+        self.assertIsNone(self.rule.check(syn))
+        suffix = self.packet(b"ECT password", 1009, ts=102)
+        suffix.update(tcp_flags=0x18, tcp_seq=1008)
+        self.assertIsNone(self.rule.check(suffix))
 
     def test_sequence_gap_does_not_join_unrelated_payloads(self):
         self.assertIsNone(self.rule.check(self.packet(b"UNION ", 1000)))
@@ -243,6 +337,7 @@ class TestPayloadRule(unittest.TestCase):
             b"DEBUG /test.aspx HTTP/1.1\r\nHost: example.com\r\nCommand: stop-debug\r\n\r\n",
             b"PROPFIND /webdav/ HTTP/1.1\r\nHost: example.com\r\nDepth: 1\r\n\r\n",
             b"GET /login.asp HTTP/1.1\r\nHost: example.com\r\nTranslate: f\r\n\r\n",
+            b"DELETE /api/v1/admin/users/10 HTTP/1.1\r\nHost: example.com\r\n\r\n",
         )
         for req in tamper_requests:
             pkt = self.packet(req, 5400)
@@ -251,6 +346,32 @@ class TestPayloadRule(unittest.TestCase):
             signatures = [h["signature"] for h in alert["evidence"]["hits"]]
             self.assertIn("HTTP_METHOD_TAMPERING", signatures)
             self.assertEqual(alert["severity"], "high")
+
+    def test_management_delete_patch_paths_fire_at_segment_boundaries(self):
+        requests = (
+            b"DELETE /admin HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            b"PATCH /api/v1/admin/users/10 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            b"DELETE /api/v1/config HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            b"PATCH /actuator/env HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            b"DELETE /manage?all=true HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        )
+        for index, request in enumerate(requests):
+            rule = PayloadRule(max_bytes=128)
+            alert = rule.check(self.packet(request, 5600 + index, src_port=40100 + index))
+            self.assertIsNotNone(alert, request)
+            self.assertIn("HTTP_METHOD_TAMPERING", [h["signature"] for h in alert["evidence"]["hits"]])
+
+    def test_normal_query_headers_and_prefixed_management_paths_do_not_fire(self):
+        requests = (
+            b"GET /api?x=y HTTP/1.1\r\nContent-Type: application/json\r\n\r\n",
+            b"GET /api?x=y HTTP/1.1\r\nLocation: /home\r\n\r\n",
+            b"GET /api?x=y HTTP/1.1\r\nSet-Cookie: session=ok\r\n\r\n",
+            b"DELETE /administrator HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            b"PATCH /api/v1/administer HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        )
+        for index, request in enumerate(requests):
+            rule = PayloadRule(max_bytes=128)
+            self.assertIsNone(rule.check(self.packet(request, 5700 + index, src_port=40200 + index)), request)
 
     def test_webshell_injection(self):
         shells = (

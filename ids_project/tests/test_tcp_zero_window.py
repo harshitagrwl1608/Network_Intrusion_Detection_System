@@ -19,13 +19,13 @@ class TestTcpZeroWindowRule(unittest.TestCase):
     def tearDown(self):
         rules_mod.TRUSTED_HOSTS = self.orig_trusted
 
-    def _pkt(self, src="192.168.1.50", dst="192.168.1.1", dport=80, win=0, proto="TCP", ts=100.0, tcp_flags=0x10):
+    def _pkt(self, src="192.168.1.50", dst="192.168.1.1", sport=50000, dport=80, win=0, proto="TCP", ts=100.0, tcp_flags=0x10):
         return {
             "type": "IP",
             "protocol": proto,
             "src_ip": src,
             "dst_ip": dst,
-            "src_port": 50000,
+            "src_port": sport,
             "dst_port": dport,
             "tcp_window": win,
             "tcp_flags": tcp_flags,
@@ -40,15 +40,41 @@ class TestTcpZeroWindowRule(unittest.TestCase):
 
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "TCP_ZERO_WINDOW")
-        self.assertEqual(alert["severity"], "high")
-        self.assertEqual(alert["confidence"], "high")
+        # Zero-window advertisements can be benign backpressure; the rule is
+        # a useful heuristic signal, not proof of a Sockstress attack.
+        self.assertEqual(alert["severity"], "medium")
+        self.assertEqual(alert["confidence"], "heuristic")
         self.assertEqual(alert["src_ip"], "192.168.1.50")
         self.assertEqual(alert["dst_ip"], "192.168.1.1")
         self.assertEqual(alert["evidence"]["zero_window_count"], 20)
+        self.assertTrue(alert["evidence"]["zero_window_count_is_lower_bound"])
+        self.assertIn("at least 20", alert["detail"])
+        self.assertEqual(alert["evidence"]["advertiser_role"], "unknown")
+        self.assertEqual(alert["evidence"]["detection_mode"], "single_flow")
+        self.assertEqual(alert["evidence"]["distinct_flow_count"], 1)
 
     def test_sub_threshold_traffic_does_not_fire(self):
         for i in range(19):
             alert = self.rule.check(self._pkt(win=0, ts=100.0 + i * 0.1))
+            self.assertIsNone(alert)
+
+    def test_multi_flow_burst_fires_with_three_distinct_flows(self):
+        alert = None
+        ports = [50000, 50001, 50002]
+        for i in range(20):
+            alert = self.rule.check(self._pkt(
+                sport=ports[i % len(ports)], win=0, ts=100.0 + i * 0.1))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["detection_mode"], "multi_flow")
+        self.assertEqual(alert["evidence"]["distinct_flow_count"], 3)
+        self.assertEqual(alert["evidence"]["max_flow_count"], 7)
+
+    def test_bursts_across_only_two_flows_do_not_aggregate(self):
+        rule = TcpZeroWindowRule(
+            threshold=20, window=10, min_distinct_flows=3)
+        for i in range(20):
+            alert = rule.check(self._pkt(
+                sport=50000 + (i % 2), win=0, ts=100.0 + i * 0.1))
             self.assertIsNone(alert)
 
     def test_positive_window_does_not_fire(self):
@@ -60,6 +86,43 @@ class TestTcpZeroWindowRule(unittest.TestCase):
         for i in range(30):
             self.assertIsNone(self.rule.check(self._pkt(
                 win=0, ts=100.0 + i * 0.1, tcp_flags=0x14)))
+
+    def test_syn_zero_window_is_ignored_until_connection_is_established(self):
+        for i in range(30):
+            self.assertIsNone(self.rule.check(self._pkt(
+                win=0, ts=100.0 + i * 0.1, tcp_flags=0x02)))
+
+    def test_syn_ack_zero_window_is_ignored_during_handshake(self):
+        for i in range(30):
+            self.assertIsNone(self.rule.check(self._pkt(
+                win=0, ts=100.0 + i * 0.1, tcp_flags=0x12)))
+        self.assertEqual(self.rule._history, {})
+        self.assertEqual(self.rule._fired, {})
+
+    def test_zero_window_alert_reports_responder_role_from_handshake(self):
+        self.rule.check(self._pkt(
+            src="192.168.1.50", dst="192.168.1.1", sport=50000,
+            dport=443, win=65535, ts=99.0, tcp_flags=0x02))
+        alert = None
+        for i in range(20):
+            alert = self.rule.check(self._pkt(
+                src="192.168.1.1", dst="192.168.1.50", sport=443,
+                dport=50000, win=0, ts=100.0 + i * 0.1, tcp_flags=0x10))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["advertiser_role"], "responder")
+        self.assertEqual(alert["severity"], "medium")
+
+    def test_zero_window_alert_reports_initiator_role_from_handshake(self):
+        self.rule.check(self._pkt(
+            src="192.168.1.50", dst="192.168.1.1", sport=50000,
+            dport=443, win=65535, ts=99.0, tcp_flags=0x02))
+        alert = None
+        for i in range(20):
+            alert = self.rule.check(self._pkt(
+                src="192.168.1.50", dst="192.168.1.1", sport=50000,
+                dport=443, win=0, ts=100.0 + i * 0.1, tcp_flags=0x10))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["advertiser_role"], "initiator")
 
     def test_non_tcp_traffic_ignored(self):
         for i in range(30):
@@ -103,6 +166,31 @@ class TestTcpZeroWindowRule(unittest.TestCase):
         self.rule.prune_stale(115.0)
         self.assertEqual(len(self.rule._history), 0)
 
+    def test_per_key_history_is_bounded_during_sustained_advertisements(self):
+        for i in range(1000):
+            self.rule.check(self._pkt(ts=100.0 + i * 0.001))
+        history = self.rule._history[("192.168.1.50", "192.168.1.1", "unknown")]
+        self.assertLessEqual(len(history), self.rule.threshold)
+
+    def test_cooldown_state_is_bounded_with_history_eviction(self):
+        rule = TcpZeroWindowRule(
+            threshold=1, window=10, cooldown=60.0, max_tracked=100)
+        for i in range(125):
+            alert = rule.check(self._pkt(
+                src=f"198.51.100.{i + 1}", win=0, ts=100.0 + i * 0.01))
+            self.assertIsNotNone(alert)
+        self.assertLessEqual(len(rule._history), rule.max_tracked)
+        self.assertLessEqual(len(rule._fired), rule.max_tracked)
+
+    def test_prune_stale_evicts_old_handshake_direction_state(self):
+        self.rule.check(self._pkt(
+            src="192.168.1.50", dst="192.168.1.1", sport=50000,
+            dport=443, win=65535, ts=100.0, tcp_flags=0x02))
+        self.assertEqual(len(self.rule._initiators), 1)
+
+        self.rule.prune_stale(100.0 + self.rule._handshake_ttl + 1)
+        self.assertEqual(len(self.rule._initiators), 0)
+
     def test_out_of_order_event_cannot_corrupt_window_or_revive_stale_count(self):
         rule = TcpZeroWindowRule(threshold=3, window=2, cooldown=60.0)
         self.assertIsNone(rule.check(self._pkt(ts=100.0)))
@@ -110,11 +198,11 @@ class TestTcpZeroWindowRule(unittest.TestCase):
         # A delayed packet must not be appended behind the newer event. If it
         # were, the following current packet could leave a stale count in deque.
         self.assertIsNone(rule.check(self._pkt(ts=100.5)))
-        self.assertEqual(list(rule._history[("192.168.1.50", "192.168.1.1")]),
-                         [(102.5, 80)])
+        self.assertEqual(list(rule._history[("192.168.1.50", "192.168.1.1", "unknown")]),
+                         [(102.5, 80, 50000)])
         self.assertIsNone(rule.check(self._pkt(ts=103.0)))
-        self.assertEqual(list(rule._history[("192.168.1.50", "192.168.1.1")]),
-                         [(102.5, 80), (103.0, 80)])
+        self.assertEqual(list(rule._history[("192.168.1.50", "192.168.1.1", "unknown")]),
+                         [(102.5, 80, 50000), (103.0, 80, 50000)])
 
 
 if __name__ == "__main__":

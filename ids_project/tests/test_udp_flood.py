@@ -100,6 +100,38 @@ class TestUdpFloodRule(unittest.TestCase):
                 second_alert = res
         self.assertIsNone(second_alert)
 
+    def test_cooldown_state_is_bounded_and_preserves_active_keys(self):
+        rule = UdpFloodRule(threshold=1, max_flows=2, cooldown=10)
+        self.assertIsNotNone(rule.check(self._pkt(
+            "192.0.2.40", "198.51.100.80", ts=100)))
+        self.assertIsNotNone(rule.check(self._pkt(
+            "192.0.2.41", "198.51.100.81", ts=101)))
+        self.assertIsNone(rule.check(self._pkt(
+            "192.0.2.40", "198.51.100.80", ts=102)))
+        self.assertIsNotNone(rule.check(self._pkt(
+            "192.0.2.42", "198.51.100.82", ts=103)))
+
+        key_a = ("192.0.2.40", "198.51.100.80")
+        key_b = ("192.0.2.41", "198.51.100.81")
+        self.assertLessEqual(len(rule._cooldown), rule.max_flows)
+        self.assertIn(key_a, rule._cooldown)
+        self.assertNotIn(key_b, rule._cooldown)
+        self.assertIsNone(rule.check(self._pkt(
+            "192.0.2.40", "198.51.100.80", ts=104)))
+
+    def test_active_subthreshold_flow_survives_key_churn(self):
+        rule = UdpFloodRule(threshold=3, window=5, max_flows=2)
+        a = ("192.0.2.50", "198.51.100.90")
+        b = ("192.0.2.51", "198.51.100.91")
+        c = ("192.0.2.52", "198.51.100.92")
+        self.assertIsNone(rule.check(self._pkt(*a, ts=100)))
+        self.assertIsNone(rule.check(self._pkt(*b, ts=101)))
+        self.assertIsNone(rule.check(self._pkt(*a, ts=102)))  # refresh A
+        self.assertIsNone(rule.check(self._pkt(*c, ts=103)))  # evict B
+        alert = rule.check(self._pkt(*a, ts=104))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["packet_count"], 3)
+
     def test_prune_stale_cleans_expired_states(self):
         self.rule.check(self._pkt("192.168.1.150", "192.168.1.1", ts=100.0))
         self.assertIn(("192.168.1.150", "192.168.1.1"), self.rule._history)

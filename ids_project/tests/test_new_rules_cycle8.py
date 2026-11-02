@@ -189,6 +189,40 @@ class TestRstFloodDetection(unittest.TestCase):
             r = self._rst("192.168.1.11", "192.168.1.21", timestamp=base + i * 0.1)
             self.assertIsNone(rule.check(r))
 
+    def test_syn_flood_alerts_are_cooled_down_during_sustained_burst(self):
+        rule = SynFloodRule(threshold=3, window=5, rst_threshold=1000)
+        rule.ALERT_COOLDOWN_S = 3.0
+
+        def syn(ts):
+            return _ip_record(
+                src="198.51.100.60", dst="203.0.113.60", src_port=50000,
+                dst_port=80, timestamp=ts, initial_syn=True, tcp_flags=0x02)
+
+        first = [rule.check(syn(100 + i * 0.1)) for i in range(3)]
+        self.assertEqual(sum(alert is not None for alert in first), 1)
+        sustained = [rule.check(syn(100.4 + i * 0.05)) for i in range(30)]
+        self.assertFalse(any(alert is not None for alert in sustained))
+        self.assertLessEqual(len(rule._syn_cooldown), rule.max_flows)
+        later = [rule.check(syn(110 + i * 0.1)) for i in range(3)]
+        self.assertEqual(sum(alert is not None for alert in later), 1)
+
+    def test_rst_flood_alerts_are_cooled_down_during_sustained_burst(self):
+        rule = SynFloodRule(threshold=1000, rst_threshold=3, rst_window=5)
+        rule.ALERT_COOLDOWN_S = 3.0
+
+        def rst(ts, seq):
+            record = self._rst("198.51.100.61", "203.0.113.61", 443, ts)
+            record.update(src_port=50000, tcp_seq=seq, tcp_ack=1)
+            return record
+
+        first = [rule.check(rst(100 + i * 0.1, i)) for i in range(3)]
+        self.assertEqual(sum(alert is not None for alert in first), 1)
+        sustained = [rule.check(rst(100.4 + i * 0.05, 3 + i)) for i in range(30)]
+        self.assertFalse(any(alert is not None for alert in sustained))
+        self.assertLessEqual(len(rule._rst_cooldown), rule.max_rst_flows)
+        later = [rule.check(rst(110 + i * 0.1, 33 + i)) for i in range(3)]
+        self.assertEqual(sum(alert is not None for alert in later), 1)
+
     def test_identical_rst_retransmissions_count_once_but_distinct_segments_count(self):
         rule = SynFloodRule(rst_threshold=10, rst_window=5)
         base = time.time()
@@ -264,6 +298,7 @@ class TestRstFloodDetection(unittest.TestCase):
         rule.prune_stale(base + 1000)
         with rule._lock:
             self.assertEqual(len(rule._rst_history), 0)
+            self.assertEqual(len(rule._rst_cooldown), 0)
 
     def test_distinct_destinations_tracked_separately(self):
         rule = SynFloodRule(rst_threshold=10, rst_window=5)
@@ -302,6 +337,23 @@ class TestDnsSubdomainExfil(unittest.TestCase):
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
         self.assertEqual(alert["severity"], "high")
         self.assertGreaterEqual(alert["evidence"]["distinct_subdomains"], 10)
+
+    def test_distinct_nested_subdomains_under_stable_prefix_trigger_exfil(self):
+        rule = DnsRule(subdomain_threshold=5, subdomain_window=60,
+                       freq_threshold=0, entropy_threshold=10.0,
+                       max_query_len=100)
+        base = time.time()
+        alert = None
+        for i in range(5):
+            alert = rule.check(_dns_record(
+                src="10.0.0.23",
+                domain=f"host.chunk{i:04x}.evil.com",
+                timestamp=base + i * 0.1))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_version"], "1.13")
+        self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
+        self.assertEqual(alert["evidence"]["subdomain"], "host.chunk0004")
+        self.assertEqual(alert["evidence"]["distinct_subdomains"], 5)
 
     def test_exfil_takes_precedence_over_freq_when_freq_enabled(self):
         """When both frequency and subdomain thresholds are reached, exfil takes priority."""
@@ -436,7 +488,7 @@ class TestNewPayloadSignatures(unittest.TestCase):
         self.assertIn("HEADER_INJECTION", self._sigs(alert))
 
     def test_raw_crlf_header_injection(self):
-        payload = b'value\r\nSet-Cookie: admin=1\r\n'
+        payload = b'GET /?next=value\r\nSet-Cookie: admin=1 HTTP/1.1\r\n'
         alert = self._check(payload)
         self.assertIsNotNone(alert)
         self.assertIn("HEADER_INJECTION", self._sigs(alert))
@@ -485,6 +537,34 @@ class TestBruteForceRule(unittest.TestCase):
         self.assertEqual(alert["rule_name"], "BRUTE_FORCE")
         self.assertEqual(alert["severity"], "high")
         self.assertEqual(alert["evidence"]["auth_port"], 22)
+
+    def test_retransmitted_syn_is_not_counted_as_a_second_login_attempt(self):
+        rule = BruteForceRule(threshold=2, window=60)
+        base = time.time()
+        first = self._syn("10.0.0.11", "10.0.0.12", dst_port=22,
+                          timestamp=base)
+        first.update(src_port=50000, tcp_seq=100)
+        self.assertIsNone(rule.check(first))
+
+        retransmission = dict(first, timestamp=base + 1)
+        self.assertIsNone(rule.check(retransmission))
+
+        # Same tuple with a new initial sequence is a distinct connection.
+        new_attempt = dict(first, timestamp=base + 2, tcp_seq=200)
+        alert = rule.check(new_attempt)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["attempt_count"], 2)
+
+    def test_syn_retransmission_cache_is_bounded(self):
+        rule = BruteForceRule(threshold=100, window=60, max_states=1)
+        rule._max_seen_syns = 2
+        base = time.time()
+        for i in range(3):
+            record = self._syn(f"10.0.0.{20 + i}", "10.0.0.12",
+                               timestamp=base + i)
+            record.update(src_port=51000 + i, tcp_seq=100 + i)
+            self.assertIsNone(rule.check(record))
+        self.assertEqual(len(rule._seen_syns), 2)
 
     def test_non_auth_port_does_not_fire(self):
         rule = BruteForceRule(threshold=5, window=60)
@@ -538,6 +618,37 @@ class TestBruteForceRule(unittest.TestCase):
             a = rule.check(self._syn("10.0.0.8", "10.0.0.9", dst_port=22,
                                      timestamp=base + 1.0 + i * 0.1))
             self.assertIsNone(a)
+
+    def test_cooldown_history_is_threshold_bounded_and_recovers(self):
+        rule = BruteForceRule(threshold=3, window=60)
+        rule.ALERT_COOLDOWN_S = 5
+        base = 100.0
+        first_alert = None
+        for i in range(3):
+            first_alert = rule.check(self._syn(
+                "10.0.0.18", "10.0.0.19", timestamp=base + i * 0.1))
+        self.assertIsNotNone(first_alert)
+        for i in range(1000):
+            self.assertIsNone(rule.check(self._syn(
+                "10.0.0.18", "10.0.0.19", timestamp=base + 1 + i * 0.001)))
+        key = ("10.0.0.18", "10.0.0.19", 22)
+        self.assertLessEqual(len(rule._history[key]), rule.threshold)
+        later_alert = rule.check(self._syn(
+            "10.0.0.18", "10.0.0.19", timestamp=base + 7))
+        self.assertIsNotNone(later_alert)
+        self.assertEqual(later_alert["evidence"]["attempt_count"], 3)
+        self.assertTrue(later_alert["evidence"]["attempt_count_saturated"])
+
+    def test_cooldown_map_stays_bounded_after_history_pruning(self):
+        rule = BruteForceRule(threshold=2, window=1, max_states=5)
+        for i in range(20):
+            base = 100.0 + i * 2
+            self.assertIsNone(rule.check(self._syn(
+                f"10.1.{i}.1", "10.1.0.2", timestamp=base)))
+            self.assertIsNotNone(rule.check(self._syn(
+                f"10.1.{i}.1", "10.1.0.2", timestamp=base + 0.1)))
+            rule.prune_stale(base + 1.5)
+        self.assertLessEqual(len(rule._cooldown), rule.max_states)
 
     def test_different_auth_ports_tracked_independently(self):
         rule = BruteForceRule(threshold=5, window=60)
@@ -686,6 +797,16 @@ class TestSlowPortScanRule(unittest.TestCase):
                                   timestamp=base + i * 0.1))
         with rule._lock:
             self.assertLessEqual(len(rule._vert), 5)
+
+    def test_active_source_cooldown_survives_key_churn(self):
+        rule = SlowPortScanRule(threshold=3, window=120, max_states=1, cooldown=30)
+        self.assertTrue(rule._allow_alert(("10.8.0.1", "vertical"), 100))
+        self.assertTrue(rule._allow_alert(("10.8.0.2", "vertical"), 100))
+        self.assertFalse(rule._allow_alert(("10.8.0.1", "vertical"), 101))
+        self.assertTrue(rule._allow_alert(("10.8.0.3", "vertical"), 102))
+        self.assertIn(("10.8.0.1", "vertical"), rule._alert_cooldown)
+        self.assertNotIn(("10.8.0.2", "vertical"), rule._alert_cooldown)
+        self.assertLessEqual(len(rule._alert_cooldown), rule.max_states * 2)
 
     def test_prune_stale_removes_state(self):
         rule = SlowPortScanRule(threshold=100, window=30)

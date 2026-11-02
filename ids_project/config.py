@@ -74,7 +74,7 @@ PAYLOAD_MAX_BYTES   = int(os.getenv("PAYLOAD_MAX_BYTES", 512))   # per-packet an
 # entropy_threshold: raise if too many FPs on random-looking but legit names.
 # DGA-like labels often reach 3.8; short human-readable labels are ~2.5–3.2.
 DNS_ENTROPY_THRESHOLD = float(os.getenv("DNS_ENTROPY_THRESHOLD", 3.8))  # bits/char
-DNS_QUERY_MAX_LEN     = int(os.getenv("DNS_QUERY_MAX_LEN", 60))         # chars; legit domains <60
+DNS_QUERY_MAX_LEN     = int(os.getenv("DNS_QUERY_MAX_LEN", 60))         # longest DNS label in chars
 # Query-frequency detection: alert if src queries same parent domain >= N times in T seconds.
 DNS_FREQ_THRESHOLD    = int(os.getenv("DNS_FREQ_THRESHOLD", 20))         # queries in window
 DNS_FREQ_WINDOW       = int(os.getenv("DNS_FREQ_WINDOW", 60))            # seconds
@@ -138,4 +138,5 @@ DATA_EXFIL_WEB_BYTE_THRESHOLD = int(os.getenv("DATA_EXFIL_WEB_BYTE_THRESHOLD", 1
 TCP_ZERO_WINDOW_THRESHOLD = int(os.getenv("TCP_ZERO_WINDOW_THRESHOLD", 20))  # zero-window pkts in window
 TCP_ZERO_WINDOW_WINDOW    = int(os.getenv("TCP_ZERO_WINDOW_WINDOW", 10))     # seconds
 TCP_ZERO_WINDOW_COOLDOWN  = float(os.getenv("TCP_ZERO_WINDOW_COOLDOWN", 60.0))  # per-pair cooldown seconds
+TCP_ZERO_WINDOW_MIN_FLOWS = int(os.getenv("TCP_ZERO_WINDOW_MIN_FLOWS", 3))  # multi-flow corroboration
 PAYLOAD_ALERT_COOLDOWN_S = float(os.getenv("PAYLOAD_ALERT_COOLDOWN_S", 60.0))

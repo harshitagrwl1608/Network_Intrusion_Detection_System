@@ -166,6 +166,85 @@ class TestPortScanDetection(unittest.TestCase):
         self.assertEqual(len(rule._vert[("203.0.113.22", "203.0.113.32")]), 1)
         self.assertEqual(len(rule._horiz[("203.0.113.22", 53)]), 1)
 
+    def test_horizontal_scan_evidence_is_bounded_after_threshold(self):
+        rule = PortScanRule(threshold=3, window=60)
+        rule._alert_cooldown = 0
+        alert = None
+        for i in range(500):
+            record = {
+                "type": "IP", "src_ip": "198.51.100.30",
+                "dst_ip": f"203.0.{i // 256}.{i % 256 + 1}",
+                "protocol": "TCP", "src_port": 50000, "dst_port": 443,
+                "initial_syn": True, "timestamp": 100 + i / 10,
+            }
+            alert = rule.check(record) or alert
+        key = ("198.51.100.30", 443)
+        self.assertLessEqual(len(rule._horiz[key]), rule._max_evidence)
+        self.assertTrue(rule._horiz_saturated.__contains__(key))
+        self.assertLessEqual(alert["evidence"]["distinct_hosts"], rule._max_evidence)
+        self.assertTrue(alert["evidence"]["distinct_hosts_saturated"])
+        self.assertIn("at least", alert["detail"])
+
+    def test_port_scan_cooldown_state_is_bounded_under_key_churn(self):
+        rule = PortScanRule(threshold=2, window=60, max_states=5)
+        for i in range(20):
+            src, dst = f"198.51.{i}.1", f"203.0.{i}.1"
+            for j in range(2):
+                rule.check({
+                    "type": "IP", "src_ip": src, "dst_ip": dst,
+                    "protocol": "TCP", "src_port": 50000,
+                    "dst_port": 80 + j, "initial_syn": True,
+                    "timestamp": 100 + i + j / 10,
+                })
+        self.assertLessEqual(len(rule._vert), rule.max_states)
+        self.assertLessEqual(len(rule._horiz), rule.max_states)
+        self.assertLessEqual(len(rule._vert_fired), rule.max_states)
+        self.assertLessEqual(len(rule._horiz_fired), rule.max_states)
+
+    def test_active_vertical_scan_history_is_not_evicted_by_new_keys(self):
+        rule = PortScanRule(threshold=3, window=60, max_states=2)
+
+        def packet(src, dst, port, timestamp):
+            return {
+                "type": "IP", "src_ip": src, "dst_ip": dst,
+                "protocol": "TCP", "src_port": 50000, "dst_port": port,
+                "initial_syn": True, "timestamp": timestamp,
+            }
+
+        a = ("198.51.100.40", "203.0.113.40")
+        b = ("198.51.100.41", "203.0.113.41")
+        c = ("198.51.100.42", "203.0.113.42")
+        self.assertIsNone(rule.check(packet(*a, 80, 100)))
+        self.assertIsNone(rule.check(packet(*b, 80, 101)))
+        self.assertIsNone(rule.check(packet(*a, 81, 102)))  # refresh A
+        self.assertIsNone(rule.check(packet(*c, 80, 103)))  # evict B
+        alert = rule.check(packet(*a, 82, 104))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["scan_type"], "vertical")
+        self.assertEqual(alert["evidence"]["distinct_ports"], 3)
+
+    def test_active_horizontal_scan_history_is_not_evicted_by_new_keys(self):
+        rule = PortScanRule(threshold=3, window=60, max_states=2)
+
+        def packet(src, dst, timestamp):
+            return {
+                "type": "IP", "src_ip": src, "dst_ip": dst,
+                "protocol": "TCP", "src_port": 50000, "dst_port": 443,
+                "initial_syn": True, "timestamp": timestamp,
+            }
+
+        a = "198.51.100.50"
+        b = "198.51.100.51"
+        c = "198.51.100.52"
+        self.assertIsNone(rule.check(packet(a, "203.0.113.50", 100)))
+        self.assertIsNone(rule.check(packet(b, "203.0.113.51", 101)))
+        self.assertIsNone(rule.check(packet(a, "203.0.113.52", 102)))  # refresh A
+        self.assertIsNone(rule.check(packet(c, "203.0.113.53", 103)))  # evict B
+        alert = rule.check(packet(a, "203.0.113.54", 104))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["scan_type"], "horizontal")
+        self.assertEqual(alert["evidence"]["distinct_hosts"], 3)
+
     def test_scan_and_syn_flow_key_cardinality_is_bounded(self):
         scan = PortScanRule(threshold=100, window=60, max_states=2)
         syn = SynFloodRule(threshold=100, window=60, max_flows=2)
@@ -231,6 +310,33 @@ class TestPortScanDetection(unittest.TestCase):
         self.assertEqual(alert["evidence"]["syn_count"], 6)
         self.assertEqual(alert["evidence"]["distinct_sources"], 3)
 
+    def test_distributed_syn_flood_suppresses_alert_storm_but_recovers_for_later_burst(self):
+        rule = DistributedSynFloodRule(threshold=3, min_sources=2,
+                                       window=5, max_targets=8)
+        rule.ALERT_COOLDOWN_S = 3.0
+
+        def packet(src, ts):
+            return {
+                "type": "IP", "src_ip": src, "dst_ip": "203.0.113.81",
+                "protocol": "TCP", "dst_port": 443, "initial_syn": True,
+                "timestamp": ts,
+            }
+
+        sources = ["198.51.100.1", "198.51.100.2", "198.51.100.3"]
+        alerts = [rule.check(packet(sources[i % 3], 100 + i * 0.1)) for i in range(3)]
+        self.assertEqual(sum(alert is not None for alert in alerts), 1)
+
+        # A sustained burst remains over threshold but must not emit an alert
+        # for every subsequent SYN while the target cooldown is active.
+        followups = [rule.check(packet(sources[i % 3], 100.4 + i * 0.05))
+                     for i in range(30)]
+        self.assertFalse(any(alert is not None for alert in followups))
+
+        # Once both the event window and alert cooldown expire, a new burst fires.
+        later = [rule.check(packet(sources[i % 2], 110 + i * 0.1))
+                 for i in range(3)]
+        self.assertEqual(sum(alert is not None for alert in later), 1)
+
     def test_distributed_syn_flood_does_not_fire_for_one_source_or_syn_ack(self):
         rule = DistributedSynFloodRule(threshold=3, min_sources=2, window=10)
         for i in range(5):
@@ -293,6 +399,19 @@ class TestPortScanDetection(unittest.TestCase):
                 "dst_port": 443, "initial_syn": True, "timestamp": 100 + i,
             }))
         self.assertLessEqual(len(rule._history), 2)
+
+    def test_distributed_syn_flood_bounds_cooldown_state_with_target_eviction(self):
+        rule = DistributedSynFloodRule(threshold=1, min_sources=1,
+                                       window=10, max_targets=2)
+        for i in range(3):
+            alert = rule.check({
+                "type": "IP", "src_ip": f"198.51.100.{i + 1}",
+                "dst_ip": f"203.0.113.{i + 1}", "protocol": "TCP",
+                "dst_port": 443, "initial_syn": True, "timestamp": 100 + i,
+            })
+            self.assertIsNotNone(alert)
+        self.assertLessEqual(len(rule._history), 2)
+        self.assertLessEqual(len(rule._cooldown), 2)
 
 
 if __name__ == "__main__":

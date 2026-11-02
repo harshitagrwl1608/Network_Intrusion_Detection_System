@@ -12,7 +12,8 @@ from capture.sniffer import _replay_text_log, replay_pcap
 from capture.sniffer import _extract
 from engine.rules import RuleEngine, PortScanRule, TcpStealthScanRule
 import config
-from scapy.all import Ether, IP, IPv6, TCP, UDP, ICMPv6EchoRequest, DNS, DNSQR
+from scapy.all import Ether, IP, IPv6, TCP, UDP, Raw, ICMPv6EchoRequest, DNS, DNSQR, fragment, raw
+from scapy.layers.inet6 import IPv6ExtHdrFragment, fragment6
 from unittest.mock import patch
 
 
@@ -25,6 +26,65 @@ class DummyEngine:
 
 
 class TestPcapReplayAndParsing(unittest.TestCase):
+    def test_extract_preserves_full_payload_length_when_dpi_sample_is_capped(self):
+        payload = b"X" * 2000
+        for transport in (
+            TCP(sport=40000, dport=9001, flags="PA") / Raw(load=payload),
+            UDP(sport=40000, dport=9001) / Raw(load=payload),
+        ):
+            record = _extract(
+                Ether() / IP(src="192.0.2.1", dst="203.0.113.2") / transport,
+                capture_ts=1000.0,
+            )
+            self.assertEqual(record["payload_len"], len(payload))
+            self.assertLessEqual(len(record["payload"]), len(payload))
+            if record["protocol"] == "TCP":
+                self.assertIsNotNone(record["tcp_payload_digest"])
+
+    def test_extract_preserves_icmpv6_echo_payload_length(self):
+        payload = b"C" * 2000
+        packet = Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / \
+            IPv6(src="fd00::1", dst="2001:4860:4860::8888") / \
+            ICMPv6EchoRequest(data=payload)
+        record = _extract(Ether(raw(packet)), capture_ts=1000.0)
+        self.assertEqual(record["protocol"], "ICMPV6")
+        self.assertEqual(record["payload_len"], len(payload))
+        self.assertLessEqual(len(record["payload"]), len(payload))
+
+    def test_extract_preserves_ipv4_fragment_payload_and_flow_metadata(self):
+        packet = IP(src="192.0.2.1", dst="203.0.113.2", id=321) / \
+            TCP(sport=40000, dport=443, flags="PA") / Raw(load=b"A" * 250)
+        fragments = fragment(packet, fragsize=100)
+        records = [
+            _extract(Ether(raw(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / f)), 1000 + i)
+            for i, f in enumerate(fragments)
+        ]
+        self.assertTrue(all(r["ip_fragmented"] for r in records))
+        self.assertEqual({r["ip_fragment_id"] for r in records}, {321})
+        self.assertTrue(all(r["protocol"] == "TCP" for r in records))
+        self.assertEqual(sum(r["payload_len"] for r in records), 250)
+        self.assertEqual(records[0]["dst_port"], 443)
+        self.assertTrue(all(r["dst_port"] is None for r in records[1:]))
+        self.assertGreater(records[1]["ip_fragment_offset"], 0)
+        self.assertTrue(all(r["ip_fragment_data_digest"] for r in records))
+
+    def test_extract_preserves_ipv6_fragment_payload_and_transport_protocol(self):
+        packet = IPv6(src="2001:db8::1", dst="2001:db8::2") / \
+            IPv6ExtHdrFragment(nh=6, id=567, offset=0, m=1) / \
+            TCP(sport=40000, dport=443, flags="PA") / Raw(load=b"B" * 250)
+        fragments = fragment6(packet, fragSize=128)
+        records = [
+            _extract(Ether(raw(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / f)), 2000 + i)
+            for i, f in enumerate(fragments)
+        ]
+        self.assertTrue(all(r["ip_fragmented"] for r in records))
+        self.assertEqual({r["ip_fragment_id"] for r in records}, {567})
+        self.assertTrue(all(r["protocol"] == "TCP" for r in records))
+        self.assertEqual(sum(r["payload_len"] for r in records), 250)
+        self.assertEqual(records[0]["dst_port"], 443)
+        self.assertTrue(all(r["dst_port"] is None for r in records[1:]))
+        self.assertTrue(all(r["ip_fragment_data_digest"] for r in records))
+
     def test_binary_pcap_replay_streams_packets_and_closes_reader(self):
         packets = [
             Ether() / IP(src="192.0.2.1", dst="192.0.2.2") / TCP(sport=40000, dport=80, flags="S"),
@@ -126,6 +186,7 @@ class TestPcapReplayAndParsing(unittest.TestCase):
         self.assertEqual(record["protocol"], "TCP")
         self.assertEqual(record["dns_query"], "xvqrztmplwbsnfhk.badactor.example.")
         self.assertEqual(record["dns_qtype"], 1)
+        self.assertEqual(record["dns_id"], 12)
         self.assertIsNone(record["src_mac"], "Missing Ethernet source must not be inferred from the host interface")
 
     def test_extract_ipv6_transport_headers(self):

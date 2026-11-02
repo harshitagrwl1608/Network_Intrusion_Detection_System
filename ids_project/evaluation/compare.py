@@ -143,6 +143,59 @@ def _scan_family(event: dict) -> str | None:
     return None
 
 
+def _semantic_family(event: dict) -> str | None:
+    """Map only event families with a defensible cross-engine interpretation."""
+    scan = _scan_family(event)
+    if scan:
+        return scan
+    rule = str(event.get("rule_name") or "").upper()
+    signature = str(event.get("signature") or "").lower()
+    port = event.get("dst_port")
+    if rule == "CLEAR_HTTP_ON_TLS_PORT":
+        return "cleartext_http_on_tls_port"
+    if port in (443, 8443) and signature.startswith("suricata http"):
+        return "cleartext_http_on_tls_port"
+    return None
+
+
+def _endpoint_correlations(netguard: list[dict], suricata: list[dict]) -> list[dict]:
+    """Summarize mapped family overlap by endpoint, deliberately ignoring time.
+
+    This is a review aid for engines that aggregate or timestamp parser findings
+    differently. It does not change exact event matches or the agreement rate.
+    """
+    def collect(events):
+        counts = {}
+        for event in events:
+            family = _semantic_family(event)
+            if not family:
+                continue
+            protocol = str(event.get("protocol") or "").upper()
+            key = (family, event.get("src_ip"), event.get("dst_ip"),
+                   event.get("dst_port"), protocol)
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    ng_counts = collect(netguard)
+    sur_counts = collect(suricata)
+    shared = []
+    for key in ng_counts.keys() & sur_counts.keys():
+        family, src_ip, dst_ip, dst_port, protocol = key
+        shared.append({
+            "family": family, "src_ip": src_ip, "dst_ip": dst_ip,
+            "dst_port": dst_port, "protocol": protocol,
+            "netguard_events": ng_counts[key],
+            "suricata_events": sur_counts[key],
+        })
+    return sorted(
+        shared,
+        key=lambda row: (
+            row["family"], str(row["src_ip"]), str(row["dst_ip"]),
+            row["dst_port"] or 0,
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Agreement mode (§3.10)
 # ---------------------------------------------------------------------------
@@ -179,6 +232,7 @@ def match_alerts_agreement(netguard: list[dict], suricata: list[dict]) -> dict:
         "both": both,
         "netguard_only": netguard_only,
         "suricata_only": suricata_only,
+        "endpoint_correlations": _endpoint_correlations(netguard, suricata),
     }
 
 
@@ -205,6 +259,18 @@ def print_agreement_report(results: dict):
     print(f"  Agreement rate:              {agreement_pct:.1f}%")
     print("-" * 65)
     print("  Match key: exact events Δt≤5s; recognized TCP scan families use host pair and rule window")
+    print("  Endpoint correlations ignore time and do not affect agreement rate.")
+    correlations = results.get("endpoint_correlations", [])
+    if correlations:
+        print("  Shared mapped endpoint families:")
+        for row in correlations[:10]:
+            print(
+                f"    [{row['family']}] {row['src_ip']} → {row['dst_ip']}:{row['dst_port']} "
+                f"({row['protocol'] or '?'}) — NetGuard {row['netguard_events']}, "
+                f"Suricata {row['suricata_events']} event(s); timestamps not matched"
+            )
+    else:
+        print("  Shared mapped endpoint families: 0")
     print("=" * 65)
 
     if results["netguard_only"]:

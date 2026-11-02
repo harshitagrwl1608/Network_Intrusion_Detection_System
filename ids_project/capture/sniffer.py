@@ -18,8 +18,9 @@ Extracted fields per packet (normalized event schema):
   tcp_seq, tcp_flags, tcp_payload_seq -- TCP sequence/flag metadata for bounded DPI stream tracking
   ip_len             -- total IP packet length in bytes (for volume tracking)
   payload            -- bytes, capped at PAYLOAD_MAX_BYTES (for DPI rule)
+  payload_len        -- full captured transport-payload length before DPI cap
   dns_query          -- str FQDN (for DNS anomaly rule, UDP or TCP port 53 queries)
-  dns_qtype          -- numeric DNS question type when present
+  dns_qtype, dns_id  -- DNS question type and transaction ID when present
 
 For ARP packets: type=ARP, src_ip, src_mac, dst_ip are set; port/flag fields are None/False.
 
@@ -33,6 +34,7 @@ import time
 import logging
 import sys
 import os
+import hashlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -40,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from scapy.all import (
-        sniff, IP, IPv6, TCP, UDP, ARP, Ether, ICMP, ICMPv6EchoRequest,
+        sniff, IP, IPv6, IPv6ExtHdrFragment, TCP, UDP, ARP, Ether, ICMP, ICMPv6EchoRequest,
         DNS, DNSQR, Raw,
     )
     SCAPY_AVAILABLE = True
@@ -101,6 +103,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             "icmp_code": None,
             "ip_len": None,
             "payload": b"",
+            "payload_len": 0,
             "dns_query": None,
         })
         return record
@@ -110,6 +113,33 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
         ip_layer = pkt[IP] if IP in pkt else pkt[IPv6]
         is_ipv6 = IPv6 in pkt and IP not in pkt
         proto_num = ip_layer.nh if is_ipv6 else ip_layer.proto
+        ip_fragment_id = None
+        ip_fragment_offset = 0
+        ip_more_fragments = False
+        ip_fragmented = False
+        ip_fragment_data_digest = None
+        ip_fragment_data_len = 0
+        if is_ipv6 and IPv6ExtHdrFragment in pkt:
+            fragment_layer = pkt[IPv6ExtHdrFragment]
+            proto_num = int(fragment_layer.nh)
+            ip_fragment_id = int(fragment_layer.id)
+            ip_fragment_offset = int(fragment_layer.offset) * 8
+            ip_more_fragments = bool(fragment_layer.m)
+            ip_fragmented = True
+            fragment_data = bytes(fragment_layer.payload)
+            ip_fragment_data_len = len(fragment_data)
+            if fragment_data:
+                ip_fragment_data_digest = hashlib.blake2s(fragment_data, digest_size=16).digest()
+        elif not is_ipv6:
+            ip_fragment_offset = int(ip_layer.frag or 0) * 8
+            ip_more_fragments = bool(int(ip_layer.flags or 0) & 0x01)
+            ip_fragmented = bool(ip_fragment_offset or ip_more_fragments)
+            if ip_fragmented:
+                ip_fragment_id = int(ip_layer.id)
+                fragment_data = bytes(ip_layer.payload)
+                ip_fragment_data_len = len(fragment_data)
+                if fragment_data:
+                    ip_fragment_data_digest = hashlib.blake2s(fragment_data, digest_size=16).digest()
         proto_map = {6: "TCP", 17: "UDP", 1: "ICMP", 58: "ICMPV6"}
         proto = proto_map.get(proto_num, str(proto_num))
 
@@ -123,8 +153,11 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
         tcp_window  = None
         tcp_payload_seq = None
         payload     = b""
+        payload_len = 0
+        tcp_payload_digest = None
         dns_query   = None
         dns_qtype   = None
+        dns_id      = None
         icmp_type   = None
         icmp_code   = None
         ip_len      = pkt[IP].len if not is_ipv6 else (
@@ -143,6 +176,13 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             syn_flag = bool(flags & 0x02)  # SYN bit
             initial_syn = bool(flags & 0x02) and not bool(flags & 0x10)  # SYN set, ACK clear
             tcp_payload_seq = (tcp_seq + int(bool(flags & 0x02))) & 0xFFFFFFFF
+            try:
+                tcp_payload = bytes(pkt[TCP].payload)
+                payload_len = len(tcp_payload)
+                if tcp_payload:
+                    tcp_payload_digest = hashlib.blake2s(tcp_payload, digest_size=16).digest()
+            except Exception:
+                payload_len = 0
             if Raw in pkt:
                 payload = bytes(pkt[Raw].load)[: _PAYLOAD_MAX_BYTES]
             if DNS in pkt and (dst_port == 53 or src_port == 53) and pkt[DNS].qr == 0:
@@ -153,12 +193,19 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
                     if question is not None:
                         dns_query = question.qname.decode("utf-8", errors="replace")
                         dns_qtype = int(question.qtype)
+                        dns_id = int(pkt[DNS].id)
                 except Exception:
                     dns_query = None
         elif UDP in pkt:
             proto = "UDP"
             dst_port = pkt[UDP].dport
             src_port = pkt[UDP].sport
+            try:
+                payload_len = len(bytes(pkt[UDP].payload))
+            except Exception:
+                payload_len = 0
+            if Raw in pkt:
+                payload = bytes(pkt[Raw].load)[: _PAYLOAD_MAX_BYTES]
             # --- DNS query extraction (for DnsRule) ---
             if DNS in pkt and (dst_port == 53 or src_port == 53) and pkt[DNS].qr == 0:
                 try:
@@ -168,17 +215,37 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
                     if question is not None:
                         dns_query = question.qname.decode("utf-8", errors="replace")
                         dns_qtype = int(question.qtype)
+                        dns_id = int(pkt[DNS].id)
                 except Exception:
                     dns_query = None
         elif ICMP in pkt:
             icmp_type = pkt[ICMP].type
             icmp_code = pkt[ICMP].code
             if Raw in pkt:
+                payload_len = len(bytes(pkt[Raw].load))
                 payload = bytes(pkt[Raw].load)[: _PAYLOAD_MAX_BYTES]
         elif ICMPv6EchoRequest in pkt:
             proto = "ICMPV6"
             icmp_type = 128
             icmp_code = pkt[ICMPv6EchoRequest].code
+            echo_data = bytes(getattr(pkt[ICMPv6EchoRequest], "data", b"") or b"")
+            payload_len = len(echo_data)
+            payload = echo_data[: _PAYLOAD_MAX_BYTES]
+
+        # A non-initial IP fragment has no transport header for Scapy to
+        # dissect. Its raw fragment bytes are still part of the original
+        # transport payload and must be available to volume rules.
+        if ip_fragment_offset > 0 and Raw in pkt:
+            fragment_payload = bytes(pkt[Raw].load)
+            payload_len = len(fragment_payload)
+            payload = fragment_payload[: _PAYLOAD_MAX_BYTES]
+
+        # Preserve payload bytes for uncommon IP protocols that Scapy leaves
+        # as Raw rather than decoding into a transport-specific layer.
+        if payload_len == 0 and Raw in pkt:
+            raw_payload = bytes(pkt[Raw].load)
+            payload_len = len(raw_payload)
+            payload = raw_payload[: _PAYLOAD_MAX_BYTES]
 
         record.update({
             "type": "IP",
@@ -201,9 +268,18 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             "icmp_type": icmp_type,
             "icmp_code": icmp_code,
             "ip_len": ip_len,
+            "ip_fragmented": ip_fragmented,
+            "ip_fragment_id": ip_fragment_id,
+            "ip_fragment_offset": ip_fragment_offset,
+            "ip_more_fragments": ip_more_fragments,
+            "ip_fragment_data_len": ip_fragment_data_len,
+            "ip_fragment_data_digest": ip_fragment_data_digest,
             "payload": payload,
+            "payload_len": payload_len,
+            "tcp_payload_digest": tcp_payload_digest,
             "dns_query": dns_query,
             "dns_qtype": dns_qtype,
+            "dns_id": dns_id,
         })
         return record
 
@@ -455,6 +531,7 @@ def _replay_text_log(log_path: str, rule_engine):
                 "payload":     b"",
                 "dns_query":   None,
                 "dns_qtype":   None,
+                "dns_id":      None,
             }
             rule_engine.check(record)
             processed += 1

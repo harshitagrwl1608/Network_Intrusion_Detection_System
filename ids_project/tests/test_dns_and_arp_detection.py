@@ -94,6 +94,91 @@ class TestDnsAndArpDetection(unittest.TestCase):
         self.assertEqual(alert["evidence"]["parent_domain"], "example.com")
         self.assertEqual(alert["evidence"]["query_count_in_window"], 3)
 
+    def test_dns_subdomain_history_is_bounded_after_threshold(self):
+        rule = DnsRule(
+            entropy_threshold=10.0, max_query_len=200, freq_threshold=0,
+            subdomain_threshold=3, subdomain_window=60)
+        alert = None
+        threshold_alert = None
+        for i in range(1000):
+            alert = rule.check({
+                "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.35",
+                "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+                "dns_query": f"chunk{i:04d}.tunnel.example.com",
+                "timestamp": 100.0 + i * 0.001,
+            })
+            if alert is not None and threshold_alert is None:
+                threshold_alert = alert
+        history = rule._subdomain_freq[("192.0.2.35", "example.com")]
+        self.assertLessEqual(len(history), 3)
+        self.assertIsNotNone(threshold_alert)
+        self.assertEqual(threshold_alert["evidence"]["distinct_subdomains"], 3)
+        self.assertTrue(threshold_alert["evidence"]["distinct_subdomains_saturated"])
+
+    def test_dns_retransmission_with_same_transaction_id_does_not_inflate_frequency(self):
+        rule = DnsRule(entropy_threshold=9.0, max_query_len=200,
+                       freq_threshold=2, freq_window=10)
+        base = {
+            "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.22",
+            "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+            "dns_query": "api.example.com", "dns_qtype": 1, "dns_id": 417,
+        }
+        self.assertIsNone(rule.check(dict(base, timestamp=100.0)))
+        self.assertIsNone(rule.check(dict(base, timestamp=101.0)))
+        self.assertEqual(len(rule._freq[("192.0.2.22", "example.com")]), 1)
+
+        # A new DNS transaction for the same question is a real query and counts.
+        alert = rule.check(dict(base, timestamp=102.0, dns_id=418))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["query_count_in_window"], 2)
+
+    def test_dns_transaction_retry_cache_expires_after_short_retry_window(self):
+        rule = DnsRule(entropy_threshold=9.0, max_query_len=200,
+                       freq_threshold=2, freq_window=10)
+        record = {
+            "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.23",
+            "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+            "dns_query": "api.example.com", "dns_qtype": 1, "dns_id": 88,
+        }
+        self.assertIsNone(rule.check(dict(record, timestamp=100.0)))
+        self.assertIsNotNone(rule.check(dict(record, timestamp=103.0)))
+
+    def test_dns_transaction_retry_cache_is_bounded(self):
+        rule = DnsRule(entropy_threshold=9.0, max_query_len=200,
+                       freq_threshold=10, freq_window=60)
+        rule._max_seen_queries = 2
+        for i in range(3):
+            record = {
+                "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.24",
+                "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+                "dns_query": f"api{i}.example.com", "dns_qtype": 1,
+                "dns_id": i, "timestamp": 100.0 + i,
+            }
+            self.assertIsNone(rule.check(record))
+        self.assertEqual(len(rule._seen_queries), 2)
+
+    def test_late_dns_query_does_not_poison_retry_cache(self):
+        rule = DnsRule(entropy_threshold=9.0, max_query_len=200,
+                       freq_threshold=10, freq_window=10)
+        def query(domain, dns_id, timestamp):
+            return {
+                "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.26",
+                "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+                "dns_query": domain, "dns_qtype": 1, "dns_id": dns_id,
+                "timestamp": timestamp,
+            }
+
+        rule.check(query("one.example.com", 1, 100.0))
+        rule.check(query("two.example.com", 2, 102.0))
+        # Reordered input is rejected and must not mark the transaction as seen.
+        rule.check(query("three.example.com", 3, 101.0))
+        self.assertIsNone(rule._seen_queries.get((
+            "192.0.2.26", "192.0.2.53", 53000, 53, 3, 1,
+            "three.example.com")))
+
+        rule.check(query("three.example.com", 3, 103.0))
+        self.assertEqual(len(rule._freq[("192.0.2.26", "example.com")]), 3)
+
     def test_dns_frequency_cooldown_groups_randomized_names_by_parent(self):
         rule = DnsRule(entropy_threshold=9.0, max_query_len=200,
                        freq_threshold=3, freq_window=10)
@@ -108,6 +193,34 @@ class TestDnsAndArpDetection(unittest.TestCase):
         self.assertIsNotNone(rule.check(query("three.example.com", 102)))
         self.assertIsNone(rule.check(query("four.example.com", 103)))
         self.assertEqual(len(rule._seen), 1)
+
+    def test_active_dns_alert_cooldown_survives_key_churn(self):
+        rule = DnsRule(entropy_threshold=3.0, max_query_len=200,
+                       freq_threshold=0, subdomain_threshold=0,
+                       max_seen_keys=2)
+
+        def query(label, parent, timestamp):
+            return {
+                "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.45",
+                "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+                "dns_query": f"{label}.{parent}", "timestamp": timestamp,
+            }
+
+        self.assertIsNotNone(rule.check(query(
+            "xvqrztmplwbsnfhk", "example.com", 100)))  # alert A
+        self.assertIsNotNone(rule.check(query(
+            "qzmxncvbplokihgf", "example.net", 101)))  # alert B
+        self.assertIsNone(rule.check(query(
+            "asdfghjklqwertyu", "example.com", 102)))  # refresh A
+        self.assertIsNotNone(rule.check(query(
+            "plmoknijbuhvygct", "example.org", 103)))  # evict B
+
+        a_key = ("192.0.2.45", "example.com", "DNS_DGA")
+        b_key = ("192.0.2.45", "example.net", "DNS_DGA")
+        self.assertIn(a_key, rule._seen)
+        self.assertNotIn(b_key, rule._seen)
+        self.assertIsNone(rule.check(query(
+            "lkjhgfdsapoiuytr", "example.com", 104)))
 
     def test_dns_frequency_state_is_bounded_and_reports_saturation(self):
         rule = DnsRule(entropy_threshold=9.0, max_query_len=200,
@@ -140,7 +253,7 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "dns_query": "api.xvqrztmplwbsnfhk.example.com", "timestamp": 100,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["evidence"]["subdomain"], "api")
+        self.assertEqual(alert["evidence"]["subdomain"], "api.xvqrztmplwbsnfhk")
         self.assertEqual(alert["evidence"]["entropy_label"], "xvqrztmplwbsnfhk")
 
     def test_dns_entropy_does_not_flag_nested_human_readable_names(self):
@@ -212,6 +325,34 @@ class TestDnsAndArpDetection(unittest.TestCase):
         alert = dns_rule.check(tunnel_record)
         self.assertIsNotNone(alert, "Excessive length under CDN suffix must not be suppressed")
         self.assertEqual(alert.get("evidence", {}).get("sub_type"), "DNS_TUNNEL")
+
+    def test_long_fqdn_with_normal_length_labels_is_not_flagged_by_length(self):
+        rule = DnsRule(max_query_len=60, freq_threshold=0, subdomain_threshold=0)
+        qname = "static-content-delivery.asset-management.googleusercontent.com"
+        self.assertGreater(len(qname), 60)
+        self.assertLessEqual(max(map(len, qname.split("."))), 60)
+        alert = rule.check({
+            "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.24",
+            "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+            "dns_query": qname, "timestamp": 100,
+        })
+        self.assertIsNone(alert, "Total dotted QNAME length alone should not flag ordinary labels")
+
+    def test_overlong_individual_label_is_reported_in_evidence(self):
+        rule = DnsRule(max_query_len=60, freq_threshold=0, subdomain_threshold=0)
+        qname = "a" * 61 + ".example.net"
+        alert = rule.check({
+            "type": "IP", "protocol": "UDP", "src_ip": "192.0.2.25",
+            "dst_ip": "192.0.2.53", "src_port": 53000, "dst_port": 53,
+            "dns_query": qname, "timestamp": 100,
+        })
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_version"], "1.13")
+        self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
+        self.assertEqual(alert["evidence"]["longest_label"], "a" * 61)
+        self.assertEqual(alert["evidence"]["longest_label_length"], 61)
+        self.assertEqual(alert["evidence"]["max_label_length"], 60)
+        self.assertIn("label_length=61", alert["detail"])
 
     def test_arp_spoof_cooldown_prevents_alert_storm(self):
         """ARP spoofing alerts should have cooldown for the same IP to prevent alert storms."""

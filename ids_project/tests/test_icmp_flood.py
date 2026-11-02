@@ -23,14 +23,14 @@ from engine.rules import IcmpFloodRule
 
 
 def _icmp_pkt(src="10.0.0.1", dst="10.0.0.2", icmp_type=8,
-              protocol="ICMP", timestamp=None):
+              protocol="ICMP", icmp_code=0, timestamp=None):
     return {
         "type": "IP",
         "src_ip": src,
         "dst_ip": dst,
         "protocol": protocol,
         "icmp_type": icmp_type,
-        "icmp_code": 0,
+        "icmp_code": icmp_code,
         "timestamp": timestamp or time.time(),
         "event_timestamp": timestamp or time.time(),
     }
@@ -65,6 +65,28 @@ class TestIcmpFloodRule(unittest.TestCase):
         for i in range(20):
             alert = self.rule.check(_icmp_pkt(icmp_type=0, timestamp=base + i * 0.1))
             self.assertIsNone(alert)
+
+    def test_ignores_nonzero_echo_codes_for_ipv4_and_ipv6(self):
+        for protocol, icmp_type, src, dst in (
+            ("ICMP", 8, "192.0.2.10", "192.0.2.20"),
+            ("ICMPV6", 128, "2001:db8::10", "2001:db8::20"),
+        ):
+            with self.subTest(protocol=protocol):
+                rule = IcmpFloodRule(threshold=2, window=5)
+                base = 100.0
+                for i in range(3):
+                    self.assertIsNone(rule.check(_icmp_pkt(
+                        src=src, dst=dst, protocol=protocol, icmp_type=icmp_type,
+                        icmp_code=1, timestamp=base + i * 0.1)))
+                self.assertEqual(rule._history, {})
+
+                self.assertIsNone(rule.check(_icmp_pkt(
+                    src=src, dst=dst, protocol=protocol, icmp_type=icmp_type,
+                    icmp_code=0, timestamp=base + 1)))
+                alert = rule.check(_icmp_pkt(
+                    src=src, dst=dst, protocol=protocol, icmp_type=icmp_type,
+                    icmp_code=0, timestamp=base + 1.1))
+                self.assertIsNotNone(alert)
 
     def test_ipv6_echo_request_detected(self):
         base = time.time()
@@ -104,6 +126,25 @@ class TestIcmpFloodRule(unittest.TestCase):
         for i in range(10):
             a = self.rule.check(_icmp_pkt(timestamp=base + 1.0 + i * 0.05))
             self.assertIsNone(a)
+
+    def test_cooldown_state_is_bounded_and_preserves_active_keys(self):
+        rule = IcmpFloodRule(threshold=1, window=5, max_flows=2, cooldown=10)
+        self.assertIsNotNone(rule.check(_icmp_pkt(
+            src="192.0.2.40", dst="192.0.2.80", timestamp=100)))
+        self.assertIsNotNone(rule.check(_icmp_pkt(
+            src="192.0.2.41", dst="192.0.2.81", timestamp=101)))
+        self.assertIsNone(rule.check(_icmp_pkt(
+            src="192.0.2.40", dst="192.0.2.80", timestamp=102)))
+        self.assertIsNotNone(rule.check(_icmp_pkt(
+            src="192.0.2.42", dst="192.0.2.82", timestamp=103)))
+
+        key_a = ("192.0.2.40", "192.0.2.80")
+        key_b = ("192.0.2.41", "192.0.2.81")
+        self.assertLessEqual(len(rule._cooldown), rule.max_flows)
+        self.assertIn(key_a, rule._cooldown)
+        self.assertNotIn(key_b, rule._cooldown)
+        self.assertIsNone(rule.check(_icmp_pkt(
+            src="192.0.2.40", dst="192.0.2.80", timestamp=104)))
 
     def test_prune_stale(self):
         base = time.time()

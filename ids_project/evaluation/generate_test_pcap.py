@@ -1100,6 +1100,35 @@ def gen_benign_tcp_normal_window(base: float) -> list:
         pkts.append(pkt)
     return pkts
 
+def gen_benign_two_flow_zero_window_backpressure(base: float) -> list:
+    """Twenty zero-window ACKs split across two flows stay below corroboration."""
+    pkts = []
+    server_ip, client_ip = "192.168.1.47", "192.168.1.46"
+    client_ports = (50620, 50621)
+
+    for i, client_port in enumerate(client_ports):
+        offset = base + 23.0 + i * 0.03
+        handshake = [
+            (_make_eth() / IP(src=client_ip, dst=server_ip) /
+             TCP(sport=client_port, dport=443, flags="S", window=65535)),
+            (_make_eth() / IP(src=server_ip, dst=client_ip) /
+             TCP(sport=443, dport=client_port, flags="SA", window=65535)),
+            (_make_eth() / IP(src=client_ip, dst=server_ip) /
+             TCP(sport=client_port, dport=443, flags="A", window=65535)),
+        ]
+        for j, pkt in enumerate(handshake):
+            pkt.time = offset + j * 0.01
+            pkts.append(pkt)
+
+    for j in range(10):
+        for i, client_port in enumerate(client_ports):
+            pkt = (_make_eth() /
+                   IP(src=server_ip, dst=client_ip) /
+                   TCP(sport=443, dport=client_port, flags="A", window=0))
+            pkt.time = base + 24.0 + j * 0.05 + i * 0.01
+            pkts.append(pkt)
+    return pkts
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -1182,6 +1211,7 @@ def generate_all():
     benign_pkts += gen_benign_tls_legitimate_sni(base)
     benign_pkts += gen_benign_rest_verbs(base)
     benign_pkts += gen_benign_tcp_normal_window(base)
+    benign_pkts += gen_benign_two_flow_zero_window_backpressure(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")

@@ -126,6 +126,18 @@ class TestTcpFlagAnomalyRule(unittest.TestCase):
         self.rule.prune_stale(base + 1000)
         self.assertEqual(len(self.rule._cooldown), 0)
 
+    def test_active_cooldown_survives_key_churn(self):
+        rule = TcpFlagAnomalyRule(cooldown=30, max_states=2)
+        first = rule.check(_tcp_pkt(src="192.0.2.1", flags=0x03, timestamp=100))
+        second = rule.check(_tcp_pkt(src="192.0.2.2", flags=0x03, timestamp=100))
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertIsNone(rule.check(_tcp_pkt(src="192.0.2.1", flags=0x03, timestamp=101)))
+        self.assertIsNotNone(rule.check(_tcp_pkt(src="192.0.2.3", flags=0x03, timestamp=102)))
+        self.assertIn(("192.0.2.1", "SYN_FIN"), rule._cooldown)
+        self.assertNotIn(("192.0.2.2", "SYN_FIN"), rule._cooldown)
+        self.assertLessEqual(len(rule._cooldown), rule.max_states)
+
 
 if __name__ == "__main__":
     unittest.main()

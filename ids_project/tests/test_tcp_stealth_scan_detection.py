@@ -37,6 +37,15 @@ class TestTcpStealthScanRule(unittest.TestCase):
             self.assertIsNone(self.rule.check(self.packet(2000 + i, 100 + i, flags)))
         self.assertEqual(self.rule._probes, {})
 
+    def test_malformed_flags_and_ports_are_ignored_without_state(self):
+        for flags in ("invalid", None, float("inf")):
+            record = self.packet(2000, 100, flags)
+            self.assertIsNone(self.rule.check(record))
+        for port in ("invalid", -1, 65536):
+            record = self.packet(port, 100, 0x01)
+            self.assertIsNone(self.rule.check(record))
+        self.assertEqual(self.rule._probes, {})
+
     def test_duplicate_ports_are_not_extra_scan_evidence(self):
         for ts in range(20):
             self.assertIsNone(self.rule.check(self.packet(80, 100 + ts * 0.1, 0x01)))

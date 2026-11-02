@@ -115,6 +115,17 @@ class TestTlsAnomalyRule(unittest.TestCase):
         self.rule.prune_stale(now=200.0)
         self.assertEqual(len(self.rule._seen), 0)
 
+    def test_active_cooldown_survives_flow_key_churn(self):
+        self.rule.MAX_TRACKED_FLOWS = 2
+        payload = make_tls_client_hello("198.51.100.42")
+        self.assertIsNotNone(self.rule.check(self._pkt(src="192.0.2.1", payload=payload, ts=100.0)))
+        self.assertIsNotNone(self.rule.check(self._pkt(src="192.0.2.2", payload=payload, ts=100.0)))
+        self.assertIsNone(self.rule.check(self._pkt(src="192.0.2.1", payload=payload, ts=101.0)))
+        self.assertIsNotNone(self.rule.check(self._pkt(src="192.0.2.3", payload=payload, ts=102.0)))
+        self.assertIn(("192.0.2.1", "198.51.100.42", "DIRECT_IP_SNI"), self.rule._seen)
+        self.assertNotIn(("192.0.2.2", "198.51.100.42", "DIRECT_IP_SNI"), self.rule._seen)
+        self.assertLessEqual(len(self.rule._seen), self.rule.MAX_TRACKED_FLOWS)
+
 
 if __name__ == "__main__":
     unittest.main()
