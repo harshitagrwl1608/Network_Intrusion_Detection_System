@@ -963,6 +963,13 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Added regressions for invalid values and one-packet no-alert behavior while asserting valid threshold-one behavior.
 - Verification: focused UDP/ICMP flood tests **23 passed**; full suite **349 tests passed** in 46.32s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios** across all 19 rule families, with zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
 
+## Follow-up: 2026-11-02 scan threshold and state-cap validation
+
+- `TCP_STEALTH_SCAN`, `ICMP_SWEEP`, and `DISTRIBUTED_SYN_FLOOD` each coerced a zero threshold to `1`; this could report one probe or one target as a scan/flood. Their window, cardinality, or distributed-source settings also accepted invalid values via clamping or raised during construction.
+- Versions `TCP_STEALTH_SCAN` 1.2, `ICMP_SWEEP` 1.2, and `DISTRIBUTED_SYN_FLOOD` 1.4 now use each rule's existing documented threshold, window, and state-cap defaults when settings are invalid. Positive values including intentional threshold-one configurations remain unchanged.
+- Added regressions for invalid thresholds, windows, and state caps, including the one-packet/one-target false-alert case. Existing positive threshold-one distributed and stealth/flood unit cases remain passing.
+- Verification: focused scan tests **39 passed**; full suite **352 tests passed** in 45.49s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios** across all 19 rule families, with zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
 ## Follow-up: 2026-11-02 malformed TCP sequence metadata in PAYLOAD_HIT
 
 - `PayloadRule._update_stream` converted `tcp_payload_seq` without handling malformed input. Reproduction with a valid SQL injection payload and `tcp_payload_seq="malformed"` raised `ValueError` before packet-level matching, losing that detection.

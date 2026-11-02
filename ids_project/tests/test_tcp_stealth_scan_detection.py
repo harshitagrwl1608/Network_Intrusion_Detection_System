@@ -74,6 +74,14 @@ class TestTcpStealthScanRule(unittest.TestCase):
         rule.prune_stale(200)
         self.assertEqual(rule._probes, {})
 
+    def test_invalid_settings_use_defaults_without_one_probe_alerts(self):
+        rule = TcpStealthScanRule(threshold=0, window=0, max_states="invalid")
+        self.assertEqual(rule.threshold, 15)
+        self.assertEqual(rule.window, 10)
+        self.assertEqual(rule.max_states, 10_000)
+        self.assertIsNone(rule.check(self.packet(80, 100, 0x01)))
+        self.assertEqual(len(rule._probes[("203.0.113.44", "203.0.113.80")]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

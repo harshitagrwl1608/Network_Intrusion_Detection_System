@@ -685,16 +685,18 @@ class TcpStealthScanRule:
     """Detect vertical FIN, NULL, and Xmas TCP probes."""
 
     name = "TCP_STEALTH_SCAN"
-    rule_version = "1.1"
+    rule_version = "1.2"
     _FIN, _SYN, _RST, _PSH, _ACK, _URG, _ECE, _CWR = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80
     _XMAS_FLAGS = _FIN | _PSH | _URG
     _DISALLOWED_FLAGS = _SYN | _RST | _ACK | _ECE | _CWR
 
     def __init__(self, threshold: int = 15, window: int = 10,
                  max_states: int = 10_000):
-        self.threshold = max(1, int(threshold))
-        self.window = max(1, int(window))
-        self.max_states = max(1, int(max_states))
+        self.threshold = _positive_setting(
+            threshold, 15, "TCP_STEALTH_SCAN_THRESHOLD")
+        self.window = _positive_setting(window, 10, "TIME_WINDOW")
+        self.max_states = _positive_setting(
+            max_states, 10_000, "TCP_STEALTH_SCAN_MAX_STATES")
         self._lock = threading.RLock()
         self._probes: dict[tuple, list[tuple[float, int, str]]] = {}
 
@@ -1231,15 +1233,18 @@ class DistributedSynFloodRule:
     """Detect high-volume initial-SYN bursts to one service from many sources."""
 
     name = "DISTRIBUTED_SYN_FLOOD"
-    rule_version = "1.3"
+    rule_version = "1.4"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 500, min_sources: int = 20,
                  window: int = 10, max_targets: int = 2048):
-        self.threshold = max(1, int(threshold))
-        self.min_sources = max(1, int(min_sources))
-        self.window = max(1, int(window))
-        self.max_targets = max(1, int(max_targets))
+        self.threshold = _positive_setting(
+            threshold, 500, "DISTRIBUTED_SYN_FLOOD_THRESHOLD")
+        self.min_sources = _positive_setting(
+            min_sources, 20, "DISTRIBUTED_SYN_FLOOD_MIN_SOURCES")
+        self.window = _positive_setting(window, 10, "TIME_WINDOW")
+        self.max_targets = _positive_setting(
+            max_targets, 2048, "DISTRIBUTED_SYN_FLOOD_MAX_TARGETS")
         self._lock = threading.RLock()
         # (dst_ip, dst_port) → (last threshold packet times, recent source map).
         # Packet count is exact as a threshold predicate: if the newest
@@ -1364,13 +1369,14 @@ class IcmpSweepRule:
     """Detect a source probing distinct IPv4/IPv6 destinations with echo requests."""
 
     name = "ICMP_SWEEP"
-    rule_version = "1.1"
+    rule_version = "1.2"
 
     def __init__(self, threshold: int = 12, window: int = 10,
                  max_sources: int = 4096):
-        self.threshold = max(1, int(threshold))
-        self.window = max(1, int(window))
-        self.max_sources = max(1, int(max_sources))
+        self.threshold = _positive_setting(threshold, 12, "ICMP_SWEEP_THRESHOLD")
+        self.window = _positive_setting(window, 10, "TIME_WINDOW")
+        self.max_sources = _positive_setting(
+            max_sources, 4096, "ICMP_SWEEP_MAX_SOURCES")
         self._lock = threading.RLock()
         self._history: dict[str, list[tuple[float, str]]] = defaultdict(list)
 

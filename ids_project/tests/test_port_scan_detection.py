@@ -440,6 +440,21 @@ class TestPortScanDetection(unittest.TestCase):
         self.assertLessEqual(len(rule._history), 2)
         self.assertLessEqual(len(rule._cooldown), 2)
 
+    def test_distributed_syn_invalid_settings_use_defaults(self):
+        rule = DistributedSynFloodRule(
+            threshold=0, min_sources=0, window=0, max_targets="invalid")
+        self.assertEqual(rule.threshold, 500)
+        self.assertEqual(rule.min_sources, 20)
+        self.assertEqual(rule.window, 10)
+        self.assertEqual(rule.max_targets, 2048)
+        alert = rule.check({
+            "type": "IP", "src_ip": "198.51.100.10", "dst_ip": "203.0.113.80",
+            "protocol": "TCP", "dst_port": 443, "initial_syn": True,
+            "timestamp": 100,
+        })
+        self.assertIsNone(alert)
+        self.assertEqual(len(rule._history[("203.0.113.80", 443)][0]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

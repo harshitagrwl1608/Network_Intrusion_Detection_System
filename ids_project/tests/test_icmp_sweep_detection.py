@@ -84,6 +84,14 @@ class TestIcmpSweepRule(unittest.TestCase):
         self.rule.prune_stale(111)
         self.assertNotIn("192.0.2.10", self.rule._history)
 
+    def test_invalid_settings_use_defaults_without_one_target_alerts(self):
+        rule = IcmpSweepRule(threshold=0, window=-1, max_sources="invalid")
+        self.assertEqual(rule.threshold, 12)
+        self.assertEqual(rule.window, 10)
+        self.assertEqual(rule.max_sources, 4096)
+        self.assertIsNone(rule.check(self.record("198.51.100.1", 100)))
+        self.assertEqual(len(rule._history["192.0.2.10"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
