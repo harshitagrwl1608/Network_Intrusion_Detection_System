@@ -108,6 +108,18 @@ from collections import defaultdict, Counter, deque, OrderedDict
 
 logger = logging.getLogger(__name__)
 
+
+def _positive_setting(value, default: int, setting_name: str) -> int:
+    """Parse a positive integer rule setting, falling back to its safe default."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = 0
+    if parsed <= 0:
+        logger.warning("%s must be a positive integer; using default %d", setting_name, default)
+        return default
+    return parsed
+
 # ---------------------------------------------------------------------------
 # Ports that servers legitimately respond FROM — if a host's SOURCE port
 # is in this set, it is a server replying to clients, NOT a scanner.
@@ -252,17 +264,17 @@ class BlocklistRule:
 
 class PortScanRule:
     name = "PORT_SCAN"
-    rule_version = "1.6"
+    rule_version = "1.7"
 
     def __init__(self, threshold: int = 15, window: int = 10, protocol: str = "TCP",
                  max_states: int = 10_000):
-        self.threshold = threshold
-        self.window = window
+        self.threshold = _positive_setting(threshold, 15, "PORT_SCAN_THRESHOLD")
+        self.window = _positive_setting(window, 10, "TIME_WINDOW")
         self.protocol = protocol
         self.max_states = max(1, int(max_states))
         # Retain enough distinct targets to preserve both the alert threshold
         # and the existing high-severity (2x threshold) boundary.
-        self._max_evidence = max(2, int(threshold) * 2)
+        self._max_evidence = max(2, self.threshold * 2)
         self._lock = threading.RLock()
 
         # Vertical scan: (src_ip, dst_ip) → ordered dst_port → last timestamp.
@@ -280,7 +292,7 @@ class PortScanRule:
         self._vert_saturated: set[tuple] = set()
         self._horiz_saturated: set[tuple] = set()
         # Re-fire cooldown = one full window (avoids alerting every packet once over threshold)
-        self._alert_cooldown: float = float(window)
+        self._alert_cooldown: float = float(self.window)
 
     def prune_stale(self, now: float):
         cutoff = now - self.window
@@ -889,7 +901,7 @@ class SynFloodRule:
     """Detect SYN/RST floods while excluding normal closed-port RST replies."""
 
     name = "SYN_FLOOD"
-    rule_version = "1.5"
+    rule_version = "1.6"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 100, window: int = 10,
@@ -898,8 +910,8 @@ class SynFloodRule:
                  max_rst_flows: int = 4096,
                  rst_response_grace: float = 5.0,
                  max_syn_contexts: int = 32768):
-        self.threshold = threshold
-        self.window = window
+        self.threshold = _positive_setting(threshold, 100, "SYN_FLOOD_THRESHOLD")
+        self.window = _positive_setting(window, 10, "TIME_WINDOW")
         self.max_flows = max(1, int(max_flows))
         # RST flood parameters: RSTs from one src to one dst (any port)
         self.rst_threshold = max(1, int(rst_threshold))

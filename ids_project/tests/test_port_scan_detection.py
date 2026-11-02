@@ -119,6 +119,33 @@ class TestPortScanDetection(unittest.TestCase):
         self.assertGreaterEqual(len(alerts), 1, "Initial SYN probes should trigger PORT_SCAN")
         self.assertEqual(alerts[0]["rule_name"], "PORT_SCAN")
 
+    def test_invalid_port_scan_threshold_and_window_fall_back_to_defaults(self):
+        for invalid in (0, -1, "invalid"):
+            with self.subTest(value=invalid):
+                rule = PortScanRule(threshold=invalid, window=invalid)
+                self.assertEqual(rule.threshold, 15)
+                self.assertEqual(rule.window, 10)
+                self.assertIsNone(rule.check({
+                    "type": "IP", "src_ip": "198.51.100.10",
+                    "dst_ip": "203.0.113.10", "protocol": "TCP",
+                    "src_port": 50000, "dst_port": 443,
+                    "initial_syn": True, "timestamp": 100.0,
+                }))
+
+    def test_invalid_syn_flood_threshold_and_window_fall_back_to_defaults(self):
+        for invalid in (0, -1, "invalid"):
+            with self.subTest(value=invalid):
+                rule = SynFloodRule(threshold=invalid, window=invalid)
+                self.assertEqual(rule.threshold, 100)
+                self.assertEqual(rule.window, 10)
+                self.assertIsNone(rule.check({
+                    "type": "IP", "src_ip": "198.51.100.11",
+                    "dst_ip": "203.0.113.11", "protocol": "TCP",
+                    "src_port": 50000, "dst_port": 443,
+                    "initial_syn": True, "syn_flag": True,
+                    "tcp_flags": 0x02, "timestamp": 100.0,
+                }))
+
     def test_late_packet_cannot_corrupt_scan_window(self):
         rule = PortScanRule(threshold=3, window=10)
         def packet(port, ts):

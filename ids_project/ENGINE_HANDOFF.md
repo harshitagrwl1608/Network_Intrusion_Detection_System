@@ -913,3 +913,10 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Version 1.6 treats non-integer TCP flag values as unavailable telemetry and returns no alert. Valid packet behavior and the zero-window predicate are unchanged; no rule was added.
 - Regression comparison: the new malformed-input test would raise `ValueError` at the old direct conversion and now returns `None` with no history mutation.
 - Verification: focused TCP zero-window tests **20 passed**; full suite **329 passed, 2 subtests passed** in 48.73s. `git diff --check` passed after the code, test, and documentation edits.
+
+## Follow-up: 2026-11-02 nonpositive scan and flood settings
+
+- `PORT_SCAN` and `SYN_FLOOD` stored constructor threshold/window values without validation. A zero threshold made a single SYN satisfy the trigger; negative values could do the same, and non-integer direct constructor arguments could fail during packet checks.
+- Both existing rules now use their documented defaults when a supplied threshold or window cannot be parsed as a positive integer, and emit a warning. Their rule versions are `PORT_SCAN` 1.7 and `SYN_FLOOD` 1.6. Valid settings preserve the existing detection predicates and coverage.
+- Regressions compare zero, negative, and nonnumeric constructor values: all fall back to defaults and an isolated SYN does not alert. On the previous code, zero alerted on the first SYN and nonnumeric values failed at threshold comparison.
+- Verification: focused scan/flood tests **80 passed, 6 subtests passed**; full suite **331 passed, 8 subtests passed** in 48.67s. Synthetic replay processed 1,159 attack and 832 benign packets: **37/37 labelled attack scenarios detected, 0 unmatched attack alerts, 0 benign alerts, 0 dropped alerts, and no shutdown timeout**. These are synthetic-fixture results only.
