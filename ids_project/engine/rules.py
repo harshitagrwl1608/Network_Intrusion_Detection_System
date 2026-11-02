@@ -53,7 +53,7 @@ RuleEngine execution order (all rules run; no early exit):
        REVERSE_SHELL_CRADLE — curl|sh, wget|sh, PowerShell cradles, socat exec shells
        HTTP_METHOD_TAMPERING — TRACE/TRACK/DEBUG/WebDAV methods
        WEBSHELL_INJECTION   — PHP/JSP/ASP/Python web shell execution markers
- 13.  DnsRule (v1.13)       — Shannon entropy + length + frequency + subdomain exfil
+ 13.  DnsRule (v1.15)       — Shannon entropy + length + frequency + subdomain exfil
                               + hex/base64/base32 DNS tunnel chunk detection
                               mDNS (port 5353) and LLMNR (port 5355) are explicitly exempt.
  14.  BruteForceRule        — repeated auth-port SYNs per (src,dst,port); covers SSH,
@@ -117,6 +117,18 @@ def _positive_setting(value, default: int, setting_name: str) -> int:
         parsed = 0
     if parsed <= 0:
         logger.warning("%s must be a positive integer; using default %d", setting_name, default)
+        return default
+    return parsed
+
+
+def _nonnegative_setting(value, default: int, setting_name: str) -> int:
+    """Parse a non-negative integer setting, preserving zero as an opt-out."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = -1
+    if parsed < 0:
+        logger.warning("%s must be a non-negative integer; using default %d", setting_name, default)
         return default
     return parsed
 
@@ -2466,7 +2478,7 @@ def _shannon_entropy(s: str) -> float:
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.14"
+    rule_version = "1.15"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -2491,13 +2503,19 @@ class DnsRule:
         self.max_query_len = _positive_setting(
             max_query_len, 60, "DNS_QUERY_MAX_LEN")
         # Frequency detection parameters — wired from config via RuleEngine (P1)
-        self._freq_threshold   = freq_threshold
-        self._freq_window      = freq_window
-        self._max_frequency_keys = max(1, int(max_frequency_keys))
-        self._max_seen_keys = max(1, int(max_seen_keys))
+        self._freq_threshold = _nonnegative_setting(
+            freq_threshold, 20, "DNS_FREQ_THRESHOLD")
+        self._freq_window = _positive_setting(
+            freq_window, 60, "DNS_FREQ_WINDOW")
+        self._max_frequency_keys = _positive_setting(
+            max_frequency_keys, 10_000, "DNS_MAX_FREQUENCY_KEYS")
+        self._max_seen_keys = _positive_setting(
+            max_seen_keys, 10_000, "DNS_MAX_SEEN_KEYS")
         # Subdomain exfiltration parameters
-        self._subdomain_threshold = max(0, int(subdomain_threshold))
-        self._subdomain_window = max(1, int(subdomain_window))
+        self._subdomain_threshold = _nonnegative_setting(
+            subdomain_threshold, 20, "DNS_SUBDOMAIN_THRESHOLD")
+        self._subdomain_window = _positive_setting(
+            subdomain_window, 60, "DNS_SUBDOMAIN_WINDOW")
         self._lock = threading.RLock()
 
         # (src_ip, parent_domain, anomaly_type) → last_alert_time (dedup)

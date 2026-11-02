@@ -70,6 +70,54 @@ class TestDnsAndArpDetection(unittest.TestCase):
         self.assertEqual(length_rule.max_query_len, 60)
         self.assertIsNone(length_alert)
 
+    def test_invalid_dns_thresholds_use_defaults_while_zero_still_disables(self):
+        rule = DnsRule(
+            freq_threshold="invalid", subdomain_threshold=-1,
+            max_frequency_keys="invalid", max_seen_keys=0,
+        )
+        self.assertEqual(rule._freq_threshold, 20)
+        self.assertEqual(rule._subdomain_threshold, 20)
+        self.assertEqual(rule._max_frequency_keys, 10_000)
+        self.assertEqual(rule._max_seen_keys, 10_000)
+        disabled = DnsRule(freq_threshold=0, subdomain_threshold=0)
+        self.assertEqual(disabled._freq_threshold, 0)
+        self.assertEqual(disabled._subdomain_threshold, 0)
+
+    def test_invalid_dns_windows_fall_back_without_losing_frequency_coverage(self):
+        rule = DnsRule(
+            entropy_threshold=9.0, max_query_len=60,
+            freq_threshold=2, freq_window=0,
+            subdomain_threshold=0,
+        )
+        self.assertEqual(rule._freq_window, 60)
+        def query(ts):
+            return {
+                "type": "IP", "protocol": "UDP", "src_ip": "203.0.113.45",
+                "dst_ip": "192.0.2.53", "src_port": 40000, "dst_port": 53,
+                "dns_query": "api.example.com", "timestamp": ts,
+            }
+        self.assertIsNone(rule.check(query(100.0)))
+        alert = rule.check(query(101.0))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["sub_type"], "DNS_FREQ")
+
+    def test_invalid_subdomain_window_falls_back_and_keeps_distinct_query_detection(self):
+        rule = DnsRule(
+            entropy_threshold=9.0, max_query_len=60,
+            freq_threshold=0, subdomain_threshold=2, subdomain_window="invalid",
+        )
+        self.assertEqual(rule._subdomain_window, 60)
+        def query(label, ts):
+            return {
+                "type": "IP", "protocol": "UDP", "src_ip": "203.0.113.46",
+                "dst_ip": "192.0.2.53", "src_port": 40001, "dst_port": 53,
+                "dns_query": f"{label}.example.com", "timestamp": ts,
+            }
+        self.assertIsNone(rule.check(query("one", 100.0)))
+        alert = rule.check(query("two", 101.0))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
+
     def test_dns_over_tcp_preserves_transport_in_alert(self):
         dns_rule = DnsRule(
             entropy_threshold=3.5,
@@ -370,7 +418,7 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "dns_query": qname, "timestamp": 100,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.14")
+        self.assertEqual(alert["rule_version"], "1.15")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
         self.assertEqual(alert["evidence"]["longest_label"], "a" * 61)
         self.assertEqual(alert["evidence"]["longest_label_length"], 61)
