@@ -3804,7 +3804,7 @@ class CleartextHttpOnTlsPortRule:
     """Flag repeated plaintext HTTP requests sent to conventional TLS ports."""
 
     name = "CLEAR_HTTP_ON_TLS_PORT"
-    rule_version = "1.3"
+    rule_version = "1.4"
     MAX_REQUEST_LINE_BYTES = 2064
     STREAM_TIMEOUT_S = 30.0
     _METHOD_PREFIXES = (b"GET ", b"POST ", b"PUT ", b"DELETE ",
@@ -3825,7 +3825,10 @@ class CleartextHttpOnTlsPortRule:
         self._saturated: set[tuple[str, str, int]] = set()
         # Incomplete request-line prefixes, keyed by directional TCP 4-tuple.
         # State is capped separately from service-level request history.
-        self._tcp_prefixes: OrderedDict[tuple[str, int, str, int], tuple[int, int, bytes, float]] = OrderedDict()
+        self._tcp_prefixes: OrderedDict[
+            tuple[str, int, str, int],
+            tuple[int, int, bytes, float, dict[int, bytes]],
+        ] = OrderedDict()
 
     def _extract_request_line(self, record: dict, payload: bytes, now: float) -> bytes | None:
         match = self._REQUEST_LINE.match(payload)
@@ -3856,7 +3859,7 @@ class CleartextHttpOnTlsPortRule:
         with self._lock:
             state = self._tcp_prefixes.get(key)
             if state is not None:
-                start_seq, expected_seq, prefix, last_seen = state
+                start_seq, expected_seq, prefix, last_seen, pending = state
                 if now < last_seen:
                     return None  # late segments cannot replace active prefix state
                 if now - last_seen > self.STREAM_TIMEOUT_S:
@@ -3865,26 +3868,51 @@ class CleartextHttpOnTlsPortRule:
                 elif seq == start_seq and payload == prefix:
                     # An exact retransmission of the partial segment is not a
                     # second request and must not replace its continuation state.
-                    self._tcp_prefixes[key] = (start_seq, expected_seq, prefix, now)
+                    self._tcp_prefixes[key] = (
+                        start_seq, expected_seq, prefix, now, pending)
                     self._tcp_prefixes.move_to_end(key)
                     return None
                 elif seq == expected_seq:
                     combined = prefix + payload
+                    next_seq = (seq + len(payload)) & 0xFFFFFFFF
+                    pending = dict(pending)
+                    while next_seq in pending:
+                        next_payload = pending.pop(next_seq)
+                        combined += next_payload
+                        next_seq = (next_seq + len(next_payload)) & 0xFFFFFFFF
                     match = self._REQUEST_LINE.match(combined)
-                    self._tcp_prefixes.pop(key, None)
                     if match:
+                        self._tcp_prefixes.pop(key, None)
                         return match.group(0).strip()
                     if (len(combined) <= self.MAX_REQUEST_LINE_BYTES
                             and b"\n" not in combined
                             and any(method.startswith(combined) or combined.startswith(method)
                                     for method in self._METHOD_PREFIXES)):
                         self._tcp_prefixes[key] = (
-                            start_seq, (seq + len(payload)) & 0xFFFFFFFF,
-                            combined, now)
+                            start_seq, next_seq, combined, now, pending)
                         self._tcp_prefixes.move_to_end(key)
+                    else:
+                        self._tcp_prefixes.pop(key, None)
                     return None
                 else:
-                    self._tcp_prefixes.pop(key, None)
+                    delta = ((seq - expected_seq + (1 << 31)) % (1 << 32)) - (1 << 31)
+                    if delta <= 0:
+                        self._tcp_prefixes.pop(key, None)
+                        state = None
+                    else:
+                        # Keep a few bounded future segments so capture
+                        # reordering does not discard an observed request prefix.
+                        buffered_bytes = sum(len(part) for part in pending.values())
+                        if (payload and delta <= self.MAX_REQUEST_LINE_BYTES
+                                and len(pending) < 4
+                                and len(prefix) + buffered_bytes + len(payload)
+                                <= self.MAX_REQUEST_LINE_BYTES):
+                            pending.setdefault(seq, payload)
+                            self._tcp_prefixes[key] = (
+                                start_seq, expected_seq, prefix, now, pending)
+                            self._tcp_prefixes.move_to_end(key)
+                            return None
+                        self._tcp_prefixes.pop(key, None)
 
             # Buffer only plausible partial method/request prefixes, not
             # arbitrary application data from every flow to port 443.
@@ -3895,7 +3923,7 @@ class CleartextHttpOnTlsPortRule:
                 if key not in self._tcp_prefixes and len(self._tcp_prefixes) >= self.max_states:
                     self._tcp_prefixes.popitem(last=False)
                 self._tcp_prefixes[key] = (
-                    seq, (seq + len(payload)) & 0xFFFFFFFF, payload, now)
+                    seq, (seq + len(payload)) & 0xFFFFFFFF, payload, now, {})
                 self._tcp_prefixes.move_to_end(key)
         return None
 
@@ -3904,7 +3932,7 @@ class CleartextHttpOnTlsPortRule:
         history_cutoff = now - self.window
         with self._lock:
             stream_cutoff = now - self.STREAM_TIMEOUT_S
-            for key, (_, _, _, last_seen) in list(self._tcp_prefixes.items()):
+            for key, (_, _, _, last_seen, _) in list(self._tcp_prefixes.items()):
                 if last_seen < stream_cutoff or last_seen > now:
                     del self._tcp_prefixes[key]
             for key, times in list(self._history.items()):

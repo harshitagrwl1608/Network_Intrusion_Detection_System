@@ -768,7 +768,7 @@ def gen_cleartext_http_on_tls_port(base: float) -> list:
         dst_port="443", protocol="TCP",
     )
     first_request = b"GET /health HTTP/1.1\r\nHost: example.test\r\n\r\n"
-    split_at = 10
+    split_at, reorder_at = 10, 20
     first_segment = (_make_eth() /
                      IP(src="192.168.1.104", dst="203.0.113.104") /
                      TCP(sport=54370, dport=443, flags="PA", seq=1000) /
@@ -776,15 +776,20 @@ def gen_cleartext_http_on_tls_port(base: float) -> list:
     continuation = (_make_eth() /
                     IP(src="192.168.1.104", dst="203.0.113.104") /
                     TCP(sport=54370, dport=443, flags="PA", seq=1000 + split_at) /
-                    Raw(load=first_request[split_at:]))
+                    Raw(load=first_request[split_at:reorder_at]))
+    reordered_segment = (_make_eth() /
+                         IP(src="192.168.1.104", dst="203.0.113.104") /
+                         TCP(sport=54370, dport=443, flags="PA", seq=1000 + reorder_at) /
+                         Raw(load=first_request[reorder_at:]))
     second_request = (_make_eth() /
                       IP(src="192.168.1.104", dst="203.0.113.104") /
                       TCP(sport=54371, dport=443, flags="PA", seq=2000) /
                       Raw(load=b"POST /status HTTP/1.1\r\nHost: example.test\r\n\r\n"))
     first_segment.time = base + 320.0
-    continuation.time = base + 320.05
+    reordered_segment.time = base + 320.05
+    continuation.time = base + 320.10
     second_request.time = base + 320.25
-    return [first_segment, continuation, second_request]
+    return [first_segment, reordered_segment, continuation, second_request]
 
 
 

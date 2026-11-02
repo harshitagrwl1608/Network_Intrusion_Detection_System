@@ -932,8 +932,15 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 
 - The existing rule matched an HTTP request line only at the beginning of one captured TCP payload. A request line split across segments could therefore evade `CLEAR_HTTP_ON_TLS_PORT` even though the traffic was plaintext HTTP on TCP/443 or TCP/8443.
 - Version 1.3 keeps bounded directional prefix state (at most 2,064 bytes per prefix, 30-second expiry, and `max_states` keys). It joins only sequence-adjacent TCP payloads, suppresses an exact retransmission of an incomplete segment, drops mismatched continuations, and ignores late segments without replacing newer state. It preserves the existing method, port, repeat-count, and cooldown conditions.
-- S38 now splits its first request line across two TCP segments and sends a second request on another client port. The rule still emits one matching service alert, proving reassembly contributes exactly one request before the second request reaches the threshold.
+- S38 splits its first request line across TCP segments and sends a second request on another client port. The follow-up below expands this to include out-of-order delivery.
 - Verification: focused cleartext tests **10 passed**; full suite **337 passed, 8 subtests passed** in 51.77s. Synthetic replay: **38/38 scenarios**, all 19 rule families covered, zero unmatched attack alerts, zero benign alerts, zero dropped alerts, no shutdown timeout; 1,162 attack and 832 benign packets processed. These remain fixture-only results.
+
+## Follow-up: 2026-11-02 out-of-order request segments in CLEAR_HTTP_ON_TLS_PORT
+
+- The initial segmented-request fix joined adjacent segments in capture order but discarded a continuation that arrived ahead of a missing segment. This could still miss plaintext HTTP if packet capture observed TCP reordering.
+- Version 1.4 buffers at most four future segments per already identified request prefix, within a 2,064-byte aggregate bound and the existing state cap and 30-second expiry. It joins buffered segments only when the missing sequence range arrives, then applies the unchanged request-line pattern and request threshold. Unrelated payloads and large gaps remain excluded.
+- Added a unit regression that sends the last segment before the middle segment and verifies the request is counted exactly once. Existing S38 now exercises the same three-segment reordering in the replay PCAP.
+- Verification: focused cleartext tests **11 passed**; full suite **342 tests passed** in 46.02s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios** across all 19 rule families, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. These remain fixture-only results.
 
 ## Follow-up: 2026-11-02 malformed TCP sequence metadata in PAYLOAD_HIT
 

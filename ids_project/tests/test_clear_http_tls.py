@@ -144,6 +144,28 @@ class TestCleartextHttpOnTlsPortRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["request_count"], 2)
 
+    def test_out_of_order_continuation_is_joined_when_gap_fills(self):
+        rule = CleartextHttpOnTlsPortRule(cooldown=10, window=10, min_requests=2)
+        request = b"GET /reordered HTTP/1.1\r\nHost: example.test\r\n\r\n"
+        first_end, second_end = 9, 17
+        self.assertIsNone(rule.check(self.packet(
+            request[:first_end], src_port=51500,
+            tcp_payload_seq=1000, event_timestamp=100.0)))
+        self.assertIsNone(rule.check(self.packet(
+            request[second_end:], src_port=51500,
+            tcp_payload_seq=1000 + second_end, event_timestamp=100.1)))
+        self.assertIsNone(rule.check(self.packet(
+            request[first_end:second_end], src_port=51500,
+            tcp_payload_seq=1000 + first_end, event_timestamp=100.2)))
+        service_key = ("192.0.2.10", "198.51.100.20", 443)
+        self.assertEqual(len(rule._history[service_key]), 1)
+
+        alert = rule.check(self.packet(
+            b"POST /next HTTP/1.1\r\nHost: example.test\r\n\r\n",
+            src_port=51501, tcp_payload_seq=4000, event_timestamp=100.3))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["request_count"], 2)
+
     def test_partial_stream_state_is_bounded_and_expires(self):
         rule = CleartextHttpOnTlsPortRule(max_states=2, min_requests=2)
         for i in range(3):
