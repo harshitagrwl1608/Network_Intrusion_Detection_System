@@ -265,6 +265,18 @@ class TestRstFloodDetection(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["flood_type"], "RST")
 
+    def test_malformed_rst_sequence_metadata_skips_dedup_but_still_counts(self):
+        for field, value in (("tcp_seq", "bad-sequence"), ("tcp_ack", float("nan"))):
+            with self.subTest(field=field):
+                rule = SynFloodRule(threshold=1000, rst_threshold=1)
+                record = self._rst(
+                    "192.0.2.40", "198.51.100.40", 443, timestamp=100.0)
+                record[field] = value
+                alert = rule.check(record)
+                self.assertIsNotNone(alert)
+                self.assertEqual(alert["evidence"]["rst_count"], 1)
+                self.assertEqual(rule._rst_seen, {})
+
     def test_closed_port_scan_rst_replies_do_not_count_as_rst_flood(self):
         rule = SynFloodRule(threshold=1000, rst_threshold=10, rst_window=5,
                             rst_response_grace=2)

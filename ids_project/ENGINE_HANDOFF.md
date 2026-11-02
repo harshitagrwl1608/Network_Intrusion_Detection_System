@@ -32,11 +32,17 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **396 passed** (`python -m unittest discover -s tests`).
+- Full test suite: **397 passed** (`python -m unittest discover -s tests`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
 - All 1,163 synthetic attack packets and 832 benign packets were replayed; alert persistence checks reported no dropped alerts or shutdown timeout.
 - `git diff --check` was clean at inspection.
 - Scapy's local interface enumeration required an approved elevated process; validation used offline tests and PCAP replay only, not live capture.
+
+## Follow-up: 2026-11-03 malformed RST sequence metadata in SYN_FLOOD
+
+- `SYN_FLOOD` converted optional RST `tcp_seq`/`tcp_ack` fields to integers without handling malformed telemetry. A direct reproduction with `tcp_seq="bad-sequence"` raised `ValueError` before the RST threshold logic ran.
+- Version 1.9 skips only retransmission deduplication when either identity field is malformed; the RST packet still reaches the existing rate counter. Valid exact retransmissions remain deduplicated.
+- A regression covers invalid sequence and non-finite acknowledgment values. Focused RST tests: **13 passed**; full suite: **397 passed**. Offline synthetic evaluation remained **38/38** labelled scenarios with zero unmatched attack alerts, zero benign alerts, no dropped alerts, and no shutdown timeout. Fixture-only results.
 
 ## Follow-up: 2026-11-03 BLOCKLIST rule regression coverage
 

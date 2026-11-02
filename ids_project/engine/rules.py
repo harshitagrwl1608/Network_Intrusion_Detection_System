@@ -1007,7 +1007,7 @@ class SynFloodRule:
     """Detect SYN/RST floods while excluding normal closed-port RST replies."""
 
     name = "SYN_FLOOD"
-    rule_version = "1.8"
+    rule_version = "1.9"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 100, window: int = 10,
@@ -1144,22 +1144,26 @@ class SynFloodRule:
                 tcp_seq = record.get("tcp_seq")
                 tcp_ack = record.get("tcp_ack")
                 if tcp_seq is not None or tcp_ack is not None:
-                    segment_key = (
-                        src, src_port, dst, dst_port,
-                        int(tcp_seq or 0) & 0xFFFFFFFF,
-                        int(tcp_ack or 0) & 0xFFFFFFFF,
-                    )
-                    with self._lock:
-                        seen_at = self._rst_seen.get(segment_key)
-                        if seen_at is not None and now >= seen_at \
-                                and now - seen_at <= self.rst_window:
-                            return None
-                        if seen_at is not None and now < seen_at:
-                            return None
-                        if seen_at is None and len(self._rst_seen) >= self.max_rst_flows * 32:
-                            self._rst_seen.popitem(last=False)
-                        self._rst_seen[segment_key] = now
-                        self._rst_seen.move_to_end(segment_key)
+                    try:
+                        segment_key = (
+                            src, src_port, dst, dst_port,
+                            int(tcp_seq or 0) & 0xFFFFFFFF,
+                            int(tcp_ack or 0) & 0xFFFFFFFF,
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        segment_key = None  # malformed metadata cannot identify a retransmission
+                    if segment_key is not None:
+                        with self._lock:
+                            seen_at = self._rst_seen.get(segment_key)
+                            if seen_at is not None and now >= seen_at \
+                                    and now - seen_at <= self.rst_window:
+                                return None
+                            if seen_at is not None and now < seen_at:
+                                return None
+                            if seen_at is None and len(self._rst_seen) >= self.max_rst_flows * 32:
+                                self._rst_seen.popitem(last=False)
+                            self._rst_seen[segment_key] = now
+                            self._rst_seen.move_to_end(segment_key)
             rkey = (src, dst)
             with self._lock:
                 if rkey not in self._rst_history and len(self._rst_history) >= self.max_rst_flows:
