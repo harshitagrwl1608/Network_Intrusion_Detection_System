@@ -32,11 +32,17 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **399 passed** (`python -m unittest discover -s tests`).
+- Full test suite: **400 passed** (`python -m unittest discover -s tests`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
 - All 1,163 synthetic attack packets and 832 benign packets were replayed; alert persistence checks reported no dropped alerts or shutdown timeout.
 - `git diff --check` was clean at inspection.
 - Scapy's local interface enumeration required an approved elevated process; validation used offline tests and PCAP replay only, not live capture.
+
+## Follow-up: 2026-11-03 malformed SYN_FLOOD timestamps
+
+- `SYN_FLOOD` used raw timestamps for both initial-SYN and RST rate windows. A malformed value raised `ValueError`; NaN/infinity could be stored in histories and handshake context.
+- Version 1.10 rejects only records with malformed or non-finite timestamps before either rate path mutates state. Valid SYN and RST handling, thresholds, deduplication, and cooldown are unchanged.
+- Regressions cover bad strings, NaN, and infinity on both paths and verify subsequent valid traffic still reaches the threshold. Focused RST suite: **14 passed**; full suite: **400 passed**. Offline synthetic replay remained **38/38** labelled detections, with zero unmatched attack alerts, benign alerts, drops, or shutdown timeout. Fixture-only results.
 
 ## Follow-up: 2026-11-03 malformed scan-event timestamps
 

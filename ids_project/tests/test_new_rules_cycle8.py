@@ -277,6 +277,36 @@ class TestRstFloodDetection(unittest.TestCase):
                 self.assertEqual(alert["evidence"]["rst_count"], 1)
                 self.assertEqual(rule._rst_seen, {})
 
+    def test_malformed_syn_and_rst_timestamps_do_not_corrupt_rate_windows(self):
+        for invalid_time in ("bad-time", float("nan"), float("inf")):
+            with self.subTest(kind="SYN", timestamp=invalid_time):
+                rule = SynFloodRule(threshold=3, rst_threshold=3, window=10, rst_window=10)
+                def syn(ts, port):
+                    return _ip_record(
+                        src="192.0.2.70", dst="198.51.100.70", src_port=50000,
+                        dst_port=port, timestamp=ts, initial_syn=True, tcp_flags=0x02)
+                self.assertIsNone(rule.check(syn(100.0, 80)))
+                self.assertIsNone(rule.check(syn(101.0, 80)))
+                self.assertIsNone(rule.check(syn(invalid_time, 80)))
+                alert = rule.check(syn(102.0, 80))
+                self.assertIsNotNone(alert)
+                self.assertEqual(alert["rule_version"], "1.10")
+
+            with self.subTest(kind="RST", timestamp=invalid_time):
+                rule = SynFloodRule(threshold=1000, rst_threshold=3,
+                                    window=10, rst_window=10)
+                def rst(ts, seq):
+                    record = self._rst(
+                        "192.0.2.71", "198.51.100.71", 443, timestamp=ts)
+                    record.update(tcp_seq=seq, tcp_ack=1)
+                    return record
+                self.assertIsNone(rule.check(rst(100.0, 1)))
+                self.assertIsNone(rule.check(rst(101.0, 2)))
+                self.assertIsNone(rule.check(rst(invalid_time, 3)))
+                alert = rule.check(rst(102.0, 4))
+                self.assertIsNotNone(alert)
+                self.assertEqual(alert["rule_version"], "1.10")
+
     def test_closed_port_scan_rst_replies_do_not_count_as_rst_flood(self):
         rule = SynFloodRule(threshold=1000, rst_threshold=10, rst_window=5,
                             rst_response_grace=2)

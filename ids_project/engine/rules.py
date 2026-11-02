@@ -1012,7 +1012,7 @@ class SynFloodRule:
     """Detect SYN/RST floods while excluding normal closed-port RST replies."""
 
     name = "SYN_FLOOD"
-    rule_version = "1.9"
+    rule_version = "1.10"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 100, window: int = 10,
@@ -1096,8 +1096,12 @@ class SynFloodRule:
         if _is_trusted(src):
             return None
 
-        now = record.get("timestamp", time.time())
-        now = float(now)
+        try:
+            now = float(record.get("timestamp", time.time()))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(now):
+            return None
         try:
             tcp_flags = int(record.get("tcp_flags") or 0)
         except (TypeError, ValueError, OverflowError):
