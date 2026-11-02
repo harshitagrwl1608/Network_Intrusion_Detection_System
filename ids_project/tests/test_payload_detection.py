@@ -28,6 +28,19 @@ class TestPayloadRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertIn("SQL_INJECTION", [h["signature"] for h in alert["evidence"]["hits"]])
 
+    def test_invalid_buffer_and_cooldown_settings_use_safe_defaults(self):
+        rule = PayloadRule(
+            max_bytes=0, stream_timeout="invalid", max_streams=-1,
+            alert_cooldown=float("nan"),
+        )
+        self.assertEqual(rule.max_bytes, 512)
+        self.assertEqual(rule.stream_timeout, 30)
+        self.assertEqual(rule.max_streams, 2048)
+        self.assertEqual(rule.alert_cooldown, 60.0)
+        alert = rule.check(self.packet(b"GET /?q=UNION SELECT", 1000))
+        self.assertIsNotNone(alert)
+        self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
+
     def test_malformed_sequence_skips_reassembly_but_still_inspects_packet(self):
         record = self.packet(b"GET /?q=UNION SELECT password", 1000)
         record["tcp_payload_seq"] = "malformed"
@@ -142,7 +155,7 @@ class TestPayloadRule(unittest.TestCase):
         suffix.update(tcp_flags=0x18, tcp_seq=1018)
         alert = self.rule.check(suffix)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.14")
+        self.assertEqual(alert["rule_version"], "1.15")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):

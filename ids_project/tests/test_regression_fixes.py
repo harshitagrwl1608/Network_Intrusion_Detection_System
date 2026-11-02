@@ -14,6 +14,8 @@ Each test class documents which original defect it catches.
 
 import os
 import sys
+import json
+import subprocess
 import tempfile
 import threading
 import time
@@ -47,6 +49,7 @@ class TestEvalExitCodes(unittest.TestCase):
             sys.path.insert(0, eval_dir)
         from run_eval import _match, _report, _determine_exit_code
         return _match, _report, _determine_exit_code
+
 
     # ------------------------------------------------------------------
     # Helper: build a minimal scenario label dict
@@ -791,6 +794,40 @@ class TestDashboardBindingDefault(unittest.TestCase):
                         f"DASHBOARD_HOST default in config table must be 127.0.0.1, "
                         f"got: {default_value!r} (line: {line})",
                     )
+
+
+class TestDetectionEnvironmentParsing(unittest.TestCase):
+    def test_malformed_detection_environment_values_do_not_abort_import(self):
+        env = os.environ.copy()
+        env.update({
+            "PORT_SCAN_THRESHOLD": "not-an-int",
+            "TLS_COOLDOWN_S": "NaN",
+            "DATA_EXFIL_BYTE_THRESHOLD": "broken",
+            "PAYLOAD_MAX_BYTES": "0",
+            "DNS_FREQ_THRESHOLD": "0",
+        })
+        script = (
+            "import json, config; from engine.rules import PayloadRule; "
+            "print(json.dumps({"
+            "'port_scan': config.PORT_SCAN_THRESHOLD, "
+            "'tls_cooldown': config.TLS_COOLDOWN_S, "
+            "'data_exfil': config.DATA_EXFIL_BYTE_THRESHOLD, "
+            "'payload_config': config.PAYLOAD_MAX_BYTES, "
+            "'payload_effective': PayloadRule(max_bytes=config.PAYLOAD_MAX_BYTES).max_bytes, "
+            "'dns_frequency': config.DNS_FREQ_THRESHOLD}))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], cwd=PROJECT_DIR, env=env,
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        values = json.loads(result.stdout)
+        self.assertEqual(values["port_scan"], 15)
+        self.assertEqual(values["tls_cooldown"], 60.0)
+        self.assertEqual(values["data_exfil"], 50000)
+        self.assertEqual(values["payload_config"], 0)
+        self.assertEqual(values["payload_effective"], 512)
+        self.assertEqual(values["dns_frequency"], 0)
 
 
 if __name__ == "__main__":

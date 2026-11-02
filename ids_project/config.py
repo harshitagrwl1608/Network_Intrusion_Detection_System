@@ -4,6 +4,38 @@
 # =============================================================================
 
 import os
+import math
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _detection_int(name: str, default: int) -> int:
+    """Read an integer detection setting without aborting module startup."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("Invalid %s value; using default %s", name, default)
+        return default
+
+
+def _detection_float(name: str, default: float) -> float:
+    """Read a finite floating-point detection setting without startup failure."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("Invalid %s value; using default %s", name, default)
+        return default
+    if not math.isfinite(value):
+        logger.warning("Invalid non-finite %s value; using default %s", name, default)
+        return default
+    return value
 
 # Load .env file if present (requires python-dotenv, listed in requirements.txt)
 try:
@@ -31,21 +63,21 @@ ARP_TABLE_PATH = "data/arp_table.json"
 # --- Detection Thresholds ---
 # After each change, replay a known-benign PCAP and verify FP rate stays low.
 # Then replay a known-attack PCAP and verify TPs still fire.
-PORT_SCAN_THRESHOLD = int(os.getenv("PORT_SCAN_THRESHOLD", 15))   # distinct ports OR hosts in window
-TCP_STEALTH_SCAN_THRESHOLD = int(os.getenv("TCP_STEALTH_SCAN_THRESHOLD", 15))  # FIN/NULL/Xmas destination ports
-UDP_SCAN_THRESHOLD = int(os.getenv("UDP_SCAN_THRESHOLD", 15))     # distinct UDP ports OR hosts in window
-UDP_FLOOD_THRESHOLD = int(os.getenv("UDP_FLOOD_THRESHOLD", 50))   # UDP packets to single target
-UDP_FLOOD_WINDOW = int(os.getenv("UDP_FLOOD_WINDOW", 5))         # seconds in flood window
-UDP_FLOOD_WEB_THRESHOLD = int(os.getenv("UDP_FLOOD_WEB_THRESHOLD", 500))  # QUIC/UDP 443 burst threshold
-SYN_FLOOD_THRESHOLD = int(os.getenv("SYN_FLOOD_THRESHOLD", 100))  # SYN packets in window
-RST_FLOOD_THRESHOLD = int(os.getenv("RST_FLOOD_THRESHOLD", 100))  # RST packets in window
-RST_RESPONSE_GRACE_SECONDS = float(os.getenv("RST_RESPONSE_GRACE_SECONDS", 5.0))  # Match SYN → closed-port RST
-DISTRIBUTED_SYN_FLOOD_THRESHOLD = int(os.getenv("DISTRIBUTED_SYN_FLOOD_THRESHOLD", 500))
-DISTRIBUTED_SYN_FLOOD_MIN_SOURCES = int(os.getenv("DISTRIBUTED_SYN_FLOOD_MIN_SOURCES", 20))
-TIME_WINDOW = int(os.getenv("TIME_WINDOW", 10))                    # seconds
-ICMP_SWEEP_THRESHOLD = int(os.getenv("ICMP_SWEEP_THRESHOLD", 12))  # distinct echo targets in window
-ICMP_FLOOD_THRESHOLD = int(os.getenv("ICMP_FLOOD_THRESHOLD", 50))  # echo requests to single target
-ICMP_FLOOD_WINDOW    = int(os.getenv("ICMP_FLOOD_WINDOW", 5))      # seconds in flood window
+PORT_SCAN_THRESHOLD = _detection_int("PORT_SCAN_THRESHOLD", 15)   # distinct ports OR hosts in window
+TCP_STEALTH_SCAN_THRESHOLD = _detection_int("TCP_STEALTH_SCAN_THRESHOLD", 15)  # FIN/NULL/Xmas destination ports
+UDP_SCAN_THRESHOLD = _detection_int("UDP_SCAN_THRESHOLD", 15)     # distinct UDP ports OR hosts in window
+UDP_FLOOD_THRESHOLD = _detection_int("UDP_FLOOD_THRESHOLD", 50)   # UDP packets to single target
+UDP_FLOOD_WINDOW = _detection_int("UDP_FLOOD_WINDOW", 5)         # seconds in flood window
+UDP_FLOOD_WEB_THRESHOLD = _detection_int("UDP_FLOOD_WEB_THRESHOLD", 500)  # QUIC/UDP 443 burst threshold
+SYN_FLOOD_THRESHOLD = _detection_int("SYN_FLOOD_THRESHOLD", 100)  # SYN packets in window
+RST_FLOOD_THRESHOLD = _detection_int("RST_FLOOD_THRESHOLD", 100)  # RST packets in window
+RST_RESPONSE_GRACE_SECONDS = _detection_float("RST_RESPONSE_GRACE_SECONDS", 5.0)  # Match SYN → closed-port RST
+DISTRIBUTED_SYN_FLOOD_THRESHOLD = _detection_int("DISTRIBUTED_SYN_FLOOD_THRESHOLD", 500)
+DISTRIBUTED_SYN_FLOOD_MIN_SOURCES = _detection_int("DISTRIBUTED_SYN_FLOOD_MIN_SOURCES", 20)
+TIME_WINDOW = _detection_int("TIME_WINDOW", 10)                    # seconds
+ICMP_SWEEP_THRESHOLD = _detection_int("ICMP_SWEEP_THRESHOLD", 12)  # distinct echo targets in window
+ICMP_FLOOD_THRESHOLD = _detection_int("ICMP_FLOOD_THRESHOLD", 50)  # echo requests to single target
+ICMP_FLOOD_WINDOW    = _detection_int("ICMP_FLOOD_WINDOW", 5)      # seconds in flood window
 
 # --- Trusted Hosts (exempt from scan, SYN-flood, and ICMP sweep rules) ---
 # Add your gateway, local DNS server, CDN ranges, or CIDR blocks.
@@ -68,27 +100,27 @@ FEEDBACK_PATH = os.getenv("FEEDBACK_PATH", "data/feedback.jsonl")
 
 # --- Deep Packet Inspection (bounded packet and TCP stream inspection) ---
 PAYLOAD_INSPECTION  = os.getenv("PAYLOAD_INSPECTION", "true").lower() == "true"
-PAYLOAD_MAX_BYTES   = int(os.getenv("PAYLOAD_MAX_BYTES", 512))   # per-packet and per-flow TCP buffer cap
+PAYLOAD_MAX_BYTES   = _detection_int("PAYLOAD_MAX_BYTES", 512)   # per-packet and per-flow TCP buffer cap
 
 # --- DNS / DGA Detection (DnsRule) ---
 # entropy_threshold: raise if too many FPs on random-looking but legit names.
 # DGA-like labels often reach 3.8; short human-readable labels are ~2.5–3.2.
-DNS_ENTROPY_THRESHOLD = float(os.getenv("DNS_ENTROPY_THRESHOLD", 3.8))  # bits/char
-DNS_QUERY_MAX_LEN     = int(os.getenv("DNS_QUERY_MAX_LEN", 60))         # longest DNS label in chars
+DNS_ENTROPY_THRESHOLD = _detection_float("DNS_ENTROPY_THRESHOLD", 3.8)  # bits/char
+DNS_QUERY_MAX_LEN     = _detection_int("DNS_QUERY_MAX_LEN", 60)         # longest DNS label in chars
 # Query-frequency detection: alert if src queries same parent domain >= N times in T seconds.
-DNS_FREQ_THRESHOLD    = int(os.getenv("DNS_FREQ_THRESHOLD", 20))         # queries in window
-DNS_FREQ_WINDOW       = int(os.getenv("DNS_FREQ_WINDOW", 60))            # seconds
+DNS_FREQ_THRESHOLD    = _detection_int("DNS_FREQ_THRESHOLD", 20)         # queries in window
+DNS_FREQ_WINDOW       = _detection_int("DNS_FREQ_WINDOW", 60)            # seconds
 # Subdomain exfiltration: alert if src uses >= N distinct subdomains under same parent in window.
 # Attackers encode data in subdomains (e.g. aGVsbG8=.evil.com). Set 0 to disable.
-DNS_SUBDOMAIN_THRESHOLD = int(os.getenv("DNS_SUBDOMAIN_THRESHOLD", 20))  # distinct subdomains
-DNS_SUBDOMAIN_WINDOW    = int(os.getenv("DNS_SUBDOMAIN_WINDOW", 60))     # seconds
+DNS_SUBDOMAIN_THRESHOLD = _detection_int("DNS_SUBDOMAIN_THRESHOLD", 20)  # distinct subdomains
+DNS_SUBDOMAIN_WINDOW    = _detection_int("DNS_SUBDOMAIN_WINDOW", 60)     # seconds
 
 # --- TLS Inspection (TlsAnomalyRule) ---
 TLS_INSPECTION = os.getenv("TLS_INSPECTION", "true").lower() in ("true", "1")
-TLS_COOLDOWN_S = float(os.getenv("TLS_COOLDOWN_S", 60.0))
-CLEAR_HTTP_TLS_COOLDOWN_S = float(os.getenv("CLEAR_HTTP_TLS_COOLDOWN_S", 600.0))
-CLEAR_HTTP_TLS_WINDOW_S = float(os.getenv("CLEAR_HTTP_TLS_WINDOW_S", 600.0))
-CLEAR_HTTP_TLS_MIN_REQUESTS = int(os.getenv("CLEAR_HTTP_TLS_MIN_REQUESTS", 2))
+TLS_COOLDOWN_S = _detection_float("TLS_COOLDOWN_S", 60.0)
+CLEAR_HTTP_TLS_COOLDOWN_S = _detection_float("CLEAR_HTTP_TLS_COOLDOWN_S", 600.0)
+CLEAR_HTTP_TLS_WINDOW_S = _detection_float("CLEAR_HTTP_TLS_WINDOW_S", 600.0)
+CLEAR_HTTP_TLS_MIN_REQUESTS = _detection_int("CLEAR_HTTP_TLS_MIN_REQUESTS", 2)
 
 # --- Analysis ---
 ANALYSIS_INTERVAL = int(os.getenv("ANALYSIS_INTERVAL", 30))       # seconds between runs
@@ -111,8 +143,8 @@ HISTORY_DAYS = int(os.getenv("HISTORY_DAYS", 7))
 # Fires when a source makes >= N SYN attempts to the same auth port in the window.
 # Auth ports: SSH(22), RDP(3389), SMB(445), MySQL(3306), VNC(5900), etc.
 # Raise threshold or increase window to reduce FPs on legitimate retry-heavy services.
-BRUTE_FORCE_THRESHOLD = int(os.getenv("BRUTE_FORCE_THRESHOLD", 20))  # SYN attempts in window
-BRUTE_FORCE_WINDOW    = int(os.getenv("BRUTE_FORCE_WINDOW", 60))     # seconds
+BRUTE_FORCE_THRESHOLD = _detection_int("BRUTE_FORCE_THRESHOLD", 20)  # SYN attempts in window
+BRUTE_FORCE_WINDOW    = _detection_int("BRUTE_FORCE_WINDOW", 60)     # seconds
 # Optional nonstandard auth/admin ports. Avoid generic web ports by default;
 # add deployment-specific admin endpoints explicitly, e.g. 8443,9443.
 BRUTE_FORCE_EXTRA_PORTS = tuple(
@@ -123,20 +155,20 @@ BRUTE_FORCE_EXTRA_PORTS = tuple(
 # --- Slow (Low-and-Slow) Port Scan Detection (SlowPortScanRule) ---
 # Catches scanners that evade the 10s PortScanRule by spreading probes over a longer window.
 # Higher threshold than PortScanRule because the long window accumulates more incidental traffic.
-SLOW_SCAN_THRESHOLD = int(os.getenv("SLOW_SCAN_THRESHOLD", 30))  # distinct ports/hosts in window
-SLOW_SCAN_WINDOW    = int(os.getenv("SLOW_SCAN_WINDOW", 120))    # seconds (default: 2 minutes)
-SLOW_SCAN_COOLDOWN_S = float(os.getenv("SLOW_SCAN_COOLDOWN_S", 120.0))
+SLOW_SCAN_THRESHOLD = _detection_int("SLOW_SCAN_THRESHOLD", 30)  # distinct ports/hosts in window
+SLOW_SCAN_WINDOW    = _detection_int("SLOW_SCAN_WINDOW", 120)    # seconds (default: 2 minutes)
+SLOW_SCAN_COOLDOWN_S = _detection_float("SLOW_SCAN_COOLDOWN_S", 120.0)
 
 # --- Outbound Data Exfiltration Detection (DataExfiltrationRule) ---
 # Detects high-volume outbound data transfers or raw database/archive dumps to external IPs.
-DATA_EXFIL_BYTE_THRESHOLD = int(os.getenv("DATA_EXFIL_BYTE_THRESHOLD", 50000))  # bytes in window
-DATA_EXFIL_WINDOW         = int(os.getenv("DATA_EXFIL_WINDOW", 30))              # seconds in window
-DATA_EXFIL_WEB_BYTE_THRESHOLD = int(os.getenv("DATA_EXFIL_WEB_BYTE_THRESHOLD", 1000000))
+DATA_EXFIL_BYTE_THRESHOLD = _detection_int("DATA_EXFIL_BYTE_THRESHOLD", 50000)  # bytes in window
+DATA_EXFIL_WINDOW         = _detection_int("DATA_EXFIL_WINDOW", 30)              # seconds in window
+DATA_EXFIL_WEB_BYTE_THRESHOLD = _detection_int("DATA_EXFIL_WEB_BYTE_THRESHOLD", 1000000)
 
 # --- TCP Zero-Window / Sockstress DoS Detection (TcpZeroWindowRule) ---
 # Detects persistent zero-window advertisements aimed at exhausting socket buffers / memory.
-TCP_ZERO_WINDOW_THRESHOLD = int(os.getenv("TCP_ZERO_WINDOW_THRESHOLD", 20))  # zero-window pkts in window
-TCP_ZERO_WINDOW_WINDOW    = int(os.getenv("TCP_ZERO_WINDOW_WINDOW", 10))     # seconds
-TCP_ZERO_WINDOW_COOLDOWN  = float(os.getenv("TCP_ZERO_WINDOW_COOLDOWN", 60.0))  # per-pair cooldown seconds
-TCP_ZERO_WINDOW_MIN_FLOWS = int(os.getenv("TCP_ZERO_WINDOW_MIN_FLOWS", 3))  # multi-flow corroboration
-PAYLOAD_ALERT_COOLDOWN_S = float(os.getenv("PAYLOAD_ALERT_COOLDOWN_S", 60.0))
+TCP_ZERO_WINDOW_THRESHOLD = _detection_int("TCP_ZERO_WINDOW_THRESHOLD", 20)  # zero-window pkts in window
+TCP_ZERO_WINDOW_WINDOW    = _detection_int("TCP_ZERO_WINDOW_WINDOW", 10)     # seconds
+TCP_ZERO_WINDOW_COOLDOWN  = _detection_float("TCP_ZERO_WINDOW_COOLDOWN", 60.0)  # per-pair cooldown seconds
+TCP_ZERO_WINDOW_MIN_FLOWS = _detection_int("TCP_ZERO_WINDOW_MIN_FLOWS", 3)  # multi-flow corroboration
+PAYLOAD_ALERT_COOLDOWN_S = _detection_float("PAYLOAD_ALERT_COOLDOWN_S", 60.0)

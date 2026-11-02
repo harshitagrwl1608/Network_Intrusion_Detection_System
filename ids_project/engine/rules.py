@@ -2122,16 +2122,19 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.14"
+    rule_version = "1.15"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048,
                  alert_cooldown: float = 60.0):
-        self.max_bytes = max(1, int(max_bytes))
+        self.max_bytes = _positive_setting(max_bytes, 512, "PAYLOAD_MAX_BYTES")
         self.enabled   = enabled
-        self.stream_timeout = max(1, int(stream_timeout))
-        self.max_streams = max(1, int(max_streams))
-        self.alert_cooldown = max(0.0, float(alert_cooldown))
+        self.stream_timeout = _positive_setting(
+            stream_timeout, 30, "PAYLOAD_STREAM_TIMEOUT")
+        self.max_streams = _positive_setting(
+            max_streams, 2048, "PAYLOAD_MAX_STREAMS")
+        self.alert_cooldown = _nonnegative_float_setting(
+            alert_cooldown, 60.0, "PAYLOAD_ALERT_COOLDOWN_S")
         self._stream_lock = threading.RLock()
         # Directional 4-tuples keep client requests and server responses apart.
         # Each value is (next expected sequence, bounded bytes, last event time,
