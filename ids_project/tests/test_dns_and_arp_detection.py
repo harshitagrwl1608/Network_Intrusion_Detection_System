@@ -485,6 +485,19 @@ class TestDnsAndArpDetection(unittest.TestCase):
         self.assertIsNotNone(claim("192.0.2.2", "00:11:22:33:44:98", 102))
         self.assertLessEqual(len(rule._cooldown), 1)
 
+    def test_invalid_arp_capacities_use_defaults_and_keep_learning_mappings(self):
+        rule = ArpSpoofRule(
+            self.arp_table_path, max_entries=0, max_cooldowns="invalid")
+        self.assertEqual(rule.max_entries, 65_536)
+        self.assertEqual(rule.max_cooldowns, 10_000)
+        for index in range(2):
+            rule.check({
+                "type": "ARP", "src_ip": f"192.0.2.{index + 1}",
+                "src_mac": f"00:11:22:33:44:{index + 1:02x}",
+                "timestamp": 100.0,
+            })
+        self.assertEqual(len(rule._table), 2)
+
     def test_low_entropy_hex_chunk_dns_tunneling_detected(self):
         # 28-char hex chunk: entropy is ~3.08 (well below 3.8), length is 39 (well below 50).
         rule = DnsRule(entropy_threshold=3.8, max_query_len=50, freq_threshold=20)

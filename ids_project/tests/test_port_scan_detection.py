@@ -250,6 +250,23 @@ class TestPortScanDetection(unittest.TestCase):
         self.assertEqual(alert["evidence"]["scan_type"], "vertical")
         self.assertEqual(alert["evidence"]["distinct_ports"], 3)
 
+    def test_invalid_state_limit_uses_default_and_preserves_scan_history(self):
+        rule = PortScanRule(threshold=2, window=60, max_states=0)
+        self.assertEqual(rule.max_states, 10_000)
+
+        def packet(src, dst, port, timestamp):
+            return {
+                "type": "IP", "src_ip": src, "dst_ip": dst,
+                "protocol": "TCP", "src_port": 50000, "dst_port": port,
+                "initial_syn": True, "timestamp": timestamp,
+            }
+
+        self.assertIsNone(rule.check(packet("198.51.100.60", "203.0.113.60", 22, 100)))
+        self.assertIsNone(rule.check(packet("198.51.100.61", "203.0.113.61", 22, 101)))
+        alert = rule.check(packet("198.51.100.60", "203.0.113.60", 23, 102))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["distinct_ports"], 2)
+
     def test_active_horizontal_scan_history_is_not_evicted_by_new_keys(self):
         rule = PortScanRule(threshold=3, window=60, max_states=2)
 

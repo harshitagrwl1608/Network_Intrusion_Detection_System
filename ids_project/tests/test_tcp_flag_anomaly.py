@@ -144,6 +144,20 @@ class TestTcpFlagAnomalyRule(unittest.TestCase):
         self.assertNotIn(("192.0.2.2", "SYN_FIN"), rule._cooldown)
         self.assertLessEqual(len(rule._cooldown), rule.max_states)
 
+    def test_invalid_cooldown_and_state_limit_use_defaults(self):
+        rule = TcpFlagAnomalyRule(cooldown=float("nan"), max_states=0)
+        self.assertEqual(rule.cooldown, 60.0)
+        self.assertEqual(rule.max_states, 5000)
+        first = rule.check(_tcp_pkt(src="192.0.2.40", flags=0x03, timestamp=100))
+        repeated = rule.check(_tcp_pkt(src="192.0.2.40", flags=0x03, timestamp=101))
+        self.assertIsNotNone(first)
+        self.assertIsNone(repeated)
+
+    def test_zero_cooldown_still_allows_immediate_repeat_alerts(self):
+        rule = TcpFlagAnomalyRule(cooldown=0)
+        self.assertIsNotNone(rule.check(_tcp_pkt(src="192.0.2.41", flags=0x03, timestamp=100)))
+        self.assertIsNotNone(rule.check(_tcp_pkt(src="192.0.2.41", flags=0x03, timestamp=101)))
+
 
 if __name__ == "__main__":
     unittest.main()

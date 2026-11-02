@@ -301,14 +301,15 @@ class BlocklistRule:
 
 class PortScanRule:
     name = "PORT_SCAN"
-    rule_version = "1.7"
+    rule_version = "1.8"
 
     def __init__(self, threshold: int = 15, window: int = 10, protocol: str = "TCP",
                  max_states: int = 10_000):
         self.threshold = _positive_setting(threshold, 15, "PORT_SCAN_THRESHOLD")
         self.window = _positive_setting(window, 10, "TIME_WINDOW")
         self.protocol = protocol
-        self.max_states = max(1, int(max_states))
+        self.max_states = _positive_setting(
+            max_states, 10_000, "PORT_SCAN_MAX_STATES")
         # Retain enough distinct targets to preserve both the alert threshold
         # and the existing high-severity (2x threshold) boundary.
         self._max_evidence = max(2, self.threshold * 2)
@@ -814,12 +815,14 @@ class TcpFlagAnomalyRule:
     """
 
     name = "TCP_FLAG_ANOMALY"
-    rule_version = "1.2"
+    rule_version = "1.3"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, cooldown: float = 60.0, max_states: int = 5000):
-        self.cooldown = max(0.0, float(cooldown))
-        self.max_states = max(1, int(max_states))
+        self.cooldown = _nonnegative_float_setting(
+            cooldown, 60.0, "TCP_FLAG_ANOMALY_COOLDOWN")
+        self.max_states = _positive_setting(
+            max_states, 5000, "TCP_FLAG_ANOMALY_MAX_STATES")
         self._lock = threading.RLock()
         # (src_ip, anomaly_type) → last_alert_timestamp
         self._cooldown: OrderedDict[tuple, float] = OrderedDict()
@@ -1590,7 +1593,7 @@ class IcmpFloodRule:
 # =============================================================================
 class ArpSpoofRule:
     name = "ARP_SPOOF"
-    rule_version = "1.3"
+    rule_version = "1.4"
 
     # Per-IP cooldown: once an alert fires for a given IP, suppress repeats
     # for this many seconds to avoid alert storms. Set to 0 to disable.
@@ -1599,8 +1602,10 @@ class ArpSpoofRule:
     def __init__(self, table_path: str, max_entries: int = 65_536,
                  max_cooldowns: int = 10_000):
         self.table_path = table_path
-        self.max_entries = max(1, int(max_entries))
-        self.max_cooldowns = max(1, int(max_cooldowns))
+        self.max_entries = _positive_setting(
+            max_entries, 65_536, "ARP_MAX_ENTRIES")
+        self.max_cooldowns = _positive_setting(
+            max_cooldowns, 10_000, "ARP_MAX_COOLDOWNS")
         self._lock = threading.RLock()
         self._table: dict[str, str] = {}    # ip → mac
         self._cooldown: dict[str, float] = {}  # ip → last_alert_time
