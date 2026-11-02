@@ -2984,7 +2984,8 @@ class BruteForceRule:
       - Fires when a source makes >= threshold SYN attempts to the same (dst, port)
         pair within the window.
       - Only fires on known authentication ports (see _BRUTE_FORCE_AUTH_PORTS).
-      - Trusted sources and common service reply ports are exempted.
+      - Trusted sources are exempted; TCP SYN direction distinguishes new
+        attempts from ordinary SYN-ACK replies.
 
     False Positive Mitigations:
       - Only auth ports are counted (not arbitrary services).
@@ -2994,7 +2995,7 @@ class BruteForceRule:
     """
 
     name = "BRUTE_FORCE"
-    rule_version = "1.4"
+    rule_version = "1.5"
 
     # Per-(src, dst, port) cooldown after firing. Prevents re-alerting for the
     # same ongoing brute-force burst; renewed bursts after the cooldown will fire.
@@ -3086,11 +3087,7 @@ class BruteForceRule:
         if _is_trusted(src):
             return None
 
-        # Ignore servers replying from known service ports
         src_port = record.get("src_port")
-        if src_port and src_port in WELL_KNOWN_SERVICE_PORTS:
-            return None
-
         now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
         key = (src, dst, dst_port)
 

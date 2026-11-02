@@ -606,6 +606,29 @@ class TestBruteForceRule(unittest.TestCase):
         self.assertEqual(alert["severity"], "high")
         self.assertEqual(alert["evidence"]["auth_port"], 22)
 
+    def test_common_source_port_does_not_hide_authentication_syn_attempts(self):
+        rule = BruteForceRule(threshold=2, window=60)
+        first = self._syn("203.0.113.44", "203.0.113.80", dst_port=22,
+                          timestamp=100.0)
+        first["src_port"] = 80
+        self.assertIsNone(rule.check(first))
+        second = dict(first, timestamp=100.1, tcp_seq=200)
+        first["tcp_seq"] = 100
+        alert = rule.check(second)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_version"], "1.5")
+        self.assertEqual(alert["evidence"]["attempt_count"], 2)
+
+    def test_syn_ack_from_auth_service_port_is_not_counted(self):
+        rule = BruteForceRule(threshold=2, window=60)
+        for i in range(3):
+            record = self._syn("203.0.113.80", "203.0.113.44", dst_port=22,
+                               timestamp=100 + i)
+            record.update(src_port=22, initial_syn=False, syn_flag=True,
+                          tcp_flags=0x12)
+            self.assertIsNone(rule.check(record))
+        self.assertEqual(rule._history, {})
+
     def test_retransmitted_syn_is_not_counted_as_a_second_login_attempt(self):
         rule = BruteForceRule(threshold=2, window=60)
         base = time.time()
