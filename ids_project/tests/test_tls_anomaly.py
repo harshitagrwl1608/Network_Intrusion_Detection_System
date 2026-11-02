@@ -10,13 +10,17 @@ from engine.rules import TlsAnomalyRule
 import engine.rules as rules_mod
 
 
-def make_tls_client_hello(sni_hostname: str) -> bytes:
+def make_tls_client_hello(sni_hostname: str, padding_bytes: int = 0) -> bytes:
     """Helper to construct a realistic TLS 1.2 Client Hello packet with SNI."""
     sni = sni_hostname.encode("utf-8")
     ext_data = b"\x00" + len(sni).to_bytes(2, "big") + sni
     ext_list = len(ext_data).to_bytes(2, "big") + ext_data
     sni_ext = (0).to_bytes(2, "big") + len(ext_list).to_bytes(2, "big") + ext_list
-    extensions = len(sni_ext).to_bytes(2, "big") + sni_ext
+    padding_ext = b""
+    if padding_bytes:
+        padding_ext = (21).to_bytes(2, "big") + padding_bytes.to_bytes(2, "big") + b"P" * padding_bytes
+    extensions_data = padding_ext + sni_ext
+    extensions = len(extensions_data).to_bytes(2, "big") + extensions_data
 
     client_hello_body = (
         b"\x03\x03" +   # TLS 1.2
@@ -39,8 +43,8 @@ class TestTlsAnomalyRule(unittest.TestCase):
     def tearDown(self):
         rules_mod.TRUSTED_HOSTS = self.orig_trusted
 
-    def _pkt(self, src="192.168.1.50", dst="198.51.100.42", dport=443, payload=b"", ts=100.0):
-        return {
+    def _pkt(self, src="192.168.1.50", dst="198.51.100.42", dport=443, payload=b"", ts=100.0, **extra):
+        record = {
             "type": "IP",
             "protocol": "TCP",
             "src_ip": src,
@@ -51,6 +55,29 @@ class TestTlsAnomalyRule(unittest.TestCase):
             "event_timestamp": ts,
             "timestamp": ts,
         }
+        record.update(extra)
+        return record
+
+    def test_sni_after_generic_payload_cap_is_detected_from_tls_sample(self):
+        hello = make_tls_client_hello("c2-node.ngrok-free.app", padding_bytes=600)
+        self.assertGreater(len(hello), 512)
+        self.assertIsNone(rules_mod._extract_tls_sni(hello[:512]))
+        alert = self.rule.check(self._pkt(payload=hello[:512], tls_payload=hello, ts=100.0))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["sni"], "c2-node.ngrok-free.app")
+
+    def test_segmented_client_hello_detects_sni_when_gap_arrives(self):
+        hello = make_tls_client_hello("c2-node.ngrok-free.app", padding_bytes=600)
+        seq = 4000
+        first, middle, last = hello[:220], hello[220:470], hello[470:]
+        self.assertIsNone(self.rule.check(self._pkt(payload=first, tcp_payload_seq=seq, ts=100.0)))
+        # Hold the later bytes until the missing middle segment arrives.
+        self.assertIsNone(self.rule.check(self._pkt(
+            payload=last, tcp_payload_seq=seq + len(first) + len(middle), ts=100.2)))
+        alert = self.rule.check(self._pkt(
+            payload=middle, tcp_payload_seq=seq + len(first), ts=100.3))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["sni"], "c2-node.ngrok-free.app")
 
     def test_literal_ipv4_sni_triggers_direct_ip_alert(self):
         payload = make_tls_client_hello("198.51.100.42")

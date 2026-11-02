@@ -26,6 +26,15 @@ class DummyEngine:
 
 
 class TestPcapReplayAndParsing(unittest.TestCase):
+    def test_extract_keeps_bounded_tls_sample_beyond_generic_dpi_cap(self):
+        payload = b"\x16\x03\x01\x02\x80\x01" + b"T" * 634
+        packet = Ether() / IP(src="192.0.2.1", dst="203.0.113.2") / \
+            TCP(sport=40000, dport=443, flags="PA") / Raw(load=payload)
+        record = _extract(packet, capture_ts=1000.0)
+        self.assertEqual(record["payload_len"], len(payload))
+        self.assertEqual(len(record["payload"]), 512)
+        self.assertEqual(record["tls_payload"], payload)
+
     def test_extract_preserves_full_payload_length_when_dpi_sample_is_capped(self):
         payload = b"X" * 2000
         for transport in (

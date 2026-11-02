@@ -57,6 +57,11 @@ try:
 except Exception:
     _PAYLOAD_MAX_BYTES = 512
 
+# Preserve a bounded TCP payload sample for the existing TLS SNI detector.
+# ClientHello extensions can occur beyond the smaller DPI payload sample.
+_TLS_INSPECTION_PORTS = frozenset({443, 4443, 8443, 9443, 5223, 8083})
+_TLS_INSPECTION_MAX_BYTES = 16_389  # maximum TLS record payload plus header
+
 
 def _extract(pkt, capture_ts: float | None = None) -> dict | None:
     """
@@ -153,6 +158,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
         tcp_window  = None
         tcp_payload_seq = None
         payload     = b""
+        tls_payload = b""
         payload_len = 0
         tcp_payload_digest = None
         dns_query   = None
@@ -179,6 +185,8 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             try:
                 tcp_payload = bytes(pkt[TCP].payload)
                 payload_len = len(tcp_payload)
+                if dst_port in _TLS_INSPECTION_PORTS:
+                    tls_payload = tcp_payload[:_TLS_INSPECTION_MAX_BYTES]
                 if tcp_payload:
                     tcp_payload_digest = hashlib.blake2s(tcp_payload, digest_size=16).digest()
             except Exception:
@@ -275,6 +283,7 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             "ip_fragment_data_len": ip_fragment_data_len,
             "ip_fragment_data_digest": ip_fragment_data_digest,
             "payload": payload,
+            "tls_payload": tls_payload,
             "payload_len": payload_len,
             "tcp_payload_digest": tcp_payload_digest,
             "dns_query": dns_query,

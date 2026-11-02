@@ -4166,9 +4166,12 @@ class TlsAnomalyRule:
     Port expansion covers: XMPP-SSL (5223), MQTT-TLS (8083), alternative HTTPS C2 (4443, 9443).
     """
     name = "TLS_ANOMALY"
-    rule_version = "1.2"
+    rule_version = "1.3"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
+    MAX_CLIENT_HELLO_BYTES = 16_389
+    STREAM_TIMEOUT_S = 30.0
+    TLS_PORTS = frozenset({443, 4443, 8443, 9443, 5223, 8083})
 
     def __init__(self, cooldown: float = 60.0, enabled: bool = True):
         self.cooldown = float(cooldown)
@@ -4176,6 +4179,110 @@ class TlsAnomalyRule:
         self._lock = threading.Lock()
         # Key: (src_ip, dst_ip, anomaly_type) -> float (last alert timestamp)
         self._seen: OrderedDict[tuple, float] = OrderedDict()
+        # Directional 4-tuple -> (start seq, next seq, ClientHello prefix,
+        # last-seen time, nearby future segments). Independent of alert state.
+        self._hello_prefixes: OrderedDict[
+            tuple[str, int, str, int],
+            tuple[int, int, bytes, float, dict[int, bytes]],
+        ] = OrderedDict()
+
+    @classmethod
+    def _is_client_hello_prefix(cls, data: bytes) -> bool:
+        if not data or data[0] != 0x16:
+            return False
+        if len(data) == 1:
+            return True
+        if data[1] != 0x03:
+            return False
+        if len(data) >= 3 and data[2] > 0x04:
+            return False
+        if len(data) >= 5:
+            record_len = int.from_bytes(data[3:5], "big")
+            if not 4 <= record_len <= cls.MAX_CLIENT_HELLO_BYTES - 5:
+                return False
+        if len(data) >= 6 and data[5] != 0x01:
+            return False
+        return True
+
+    def _extract_sni(self, record: dict, payload: bytes, now: float) -> str | None:
+        sni = _extract_tls_sni(payload)
+        try:
+            src_port, dst_port = int(record["src_port"]), int(record["dst_port"])
+            seq = int(record["tcp_payload_seq"]) & 0xFFFFFFFF
+            key = (str(record["src_ip"]), src_port,
+                   str(record["dst_ip"]), dst_port)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return sni
+        if not 1 <= src_port <= 65535 or dst_port not in self.TLS_PORTS:
+            return sni
+
+        if sni:
+            with self._lock:
+                state = self._hello_prefixes.get(key)
+                if state is not None and now >= state[3]:
+                    self._hello_prefixes.pop(key, None)
+            return sni
+
+        if not payload:
+            return None
+        with self._lock:
+            state = self._hello_prefixes.get(key)
+            if state is not None:
+                start_seq, expected_seq, prefix, last_seen, pending = state
+                if now < last_seen:
+                    return None
+                if now - last_seen > self.STREAM_TIMEOUT_S:
+                    self._hello_prefixes.pop(key, None)
+                    state = None
+                elif seq == start_seq and payload == prefix:
+                    self._hello_prefixes[key] = (
+                        start_seq, expected_seq, prefix, now, pending)
+                    self._hello_prefixes.move_to_end(key)
+                    return None
+                elif seq == expected_seq:
+                    combined = prefix + payload
+                    next_seq = (seq + len(payload)) & 0xFFFFFFFF
+                    pending = dict(pending)
+                    while next_seq in pending:
+                        next_payload = pending.pop(next_seq)
+                        combined += next_payload
+                        next_seq = (next_seq + len(next_payload)) & 0xFFFFFFFF
+                    sni = _extract_tls_sni(combined)
+                    if sni:
+                        self._hello_prefixes.pop(key, None)
+                        return sni
+                    if (len(combined) <= self.MAX_CLIENT_HELLO_BYTES
+                            and self._is_client_hello_prefix(combined)):
+                        self._hello_prefixes[key] = (
+                            start_seq, next_seq, combined, now, pending)
+                        self._hello_prefixes.move_to_end(key)
+                    else:
+                        self._hello_prefixes.pop(key, None)
+                    return None
+                else:
+                    delta = ((seq - expected_seq + (1 << 31)) % (1 << 32)) - (1 << 31)
+                    if delta > 0:
+                        pending_bytes = sum(len(part) for part in pending.values())
+                        if (delta <= self.MAX_CLIENT_HELLO_BYTES
+                                and len(pending) < 4
+                                and len(prefix) + pending_bytes + len(payload)
+                                <= self.MAX_CLIENT_HELLO_BYTES):
+                            pending.setdefault(seq, payload)
+                            self._hello_prefixes[key] = (
+                                start_seq, expected_seq, prefix, now, pending)
+                            self._hello_prefixes.move_to_end(key)
+                            return None
+                    self._hello_prefixes.pop(key, None)
+
+            if self._is_client_hello_prefix(payload):
+                if len(payload) > self.MAX_CLIENT_HELLO_BYTES:
+                    return None
+                if key not in self._hello_prefixes and len(self._hello_prefixes) >= self.MAX_TRACKED_FLOWS:
+                    self._hello_prefixes.popitem(last=False)
+                self._hello_prefixes[key] = (
+                    seq, (seq + len(payload)) & 0xFFFFFFFF, payload, now, {})
+                self._hello_prefixes.move_to_end(key)
+        return None
 
     def prune_stale(self, now: float):
         cutoff = now - self.cooldown
@@ -4183,6 +4290,10 @@ class TlsAnomalyRule:
             for k in list(self._seen):
                 if self._seen[k] < cutoff:
                     del self._seen[k]
+            stream_cutoff = now - self.STREAM_TIMEOUT_S
+            for key, (_, _, _, last_seen, _) in list(self._hello_prefixes.items()):
+                if last_seen < stream_cutoff or last_seen > now:
+                    del self._hello_prefixes[key]
 
     def check(self, record: dict) -> dict | None:
         if not self.enabled:
@@ -4196,20 +4307,15 @@ class TlsAnomalyRule:
         if not src_ip or not dst_ip or _is_trusted(src_ip):
             return None
 
-        # Inspect TLS traffic on all common encrypted service ports.
-        # Expanded beyond 443/8443 to catch C2 using non-standard HTTPS ports:
-        #   5222/5223 — XMPP/Jabber (used by some C2 frameworks)
-        #   9443/4443  — alternative HTTPS admin and C2 ports
-        #   8083       — MQTT TLS (IoT C2 channel)
-        _TLS_PORTS = (443, 4443, 8443, 9443, 5223, 8083)
-        if dst_port not in _TLS_PORTS:
+        if dst_port not in self.TLS_PORTS:
             return None
 
-        payload: bytes = record.get("payload", b"")
-        if not payload:
+        payload = record.get("tls_payload") or record.get("payload", b"")
+        if not isinstance(payload, bytes) or not payload:
             return None
 
-        sni = _extract_tls_sni(payload)
+        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        sni = self._extract_sni(record, payload, now)
         if not sni:
             return None
 
@@ -4235,7 +4341,6 @@ class TlsAnomalyRule:
         if not anomaly_type:
             return None
 
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
         key = (src_ip, dst_ip, anomaly_type)
 
         with self._lock:
