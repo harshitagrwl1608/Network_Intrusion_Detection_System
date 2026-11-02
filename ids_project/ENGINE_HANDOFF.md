@@ -912,4 +912,4 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - The existing `TCP_ZERO_WINDOW` rule converted `tcp_flags` directly with `int()`. A malformed normalized record raised from the rule and was caught by the engine's outer guard, which logged an error and skipped this rule for that record.
 - Version 1.6 treats non-integer TCP flag values as unavailable telemetry and returns no alert. Valid packet behavior and the zero-window predicate are unchanged; no rule was added.
 - Regression comparison: the new malformed-input test would raise `ValueError` at the old direct conversion and now returns `None` with no history mutation.
-- Verification: focused TCP zero-window tests **20 passed**; full suite **329 passed, 2 subtests passed** in 48.73s. `git diff --check` was clean before the documentation update; rerun it before commit.
+- Verification: focused TCP zero-window tests **20 passed**; full suite **329 passed, 2 subtests passed** in 48.73s. `git diff --check` passed after the code, test, and documentation edits.
