@@ -32,7 +32,7 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **403 passed** (`python -m unittest discover -s tests`).
+- Full test suite: **408 passed, 92 subtests passed** (`python -m pytest -q`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
 - All 1,163 synthetic attack packets and 832 benign packets were replayed; alert persistence checks reported no dropped alerts or shutdown timeout.
 - `git diff --check` was clean at inspection.
@@ -1224,3 +1224,9 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - `DNS_ANOMALY` validates timestamps before updating frequency, distinct-subdomain, or cooldown state. Invalid timestamps disable only those temporal signals; direct entropy, long-label, and encoded-chunk detections continue without temporal-state mutation. Rule version: **1.18**.
 - `DATA_EXFIL` validates event timestamps before updating TCP generations, stream joins, duplicate suppression, flow totals, or cooldowns. An invalid-time record can still trigger a direct packet-local archive/database signature; volumetric detection and stream-reassembled signatures require valid time. Rule version: **1.15**.
 - Regressions cover malformed strings, NaN, and infinity, direct-signal retention, and the absence of temporal-state mutation. Focused DNS/data-exfiltration tests: **74 passed, 13 subtests passed**. Full suite: **407 passed, 92 subtests passed** (`python -m pytest -q`). Offline synthetic replay retained **38/38** labelled detections with zero unmatched attack alerts and zero benign alerts. These fixtures do not estimate real-world accuracy.
+
+## Follow-up: 2026-11-03 finite timestamps at alert persistence boundary
+
+- `RuleEngine` previously copied raw event time into the alert object even when existing packet-local rules intentionally emitted an alert with malformed time. SQLite and dashboard consumers could receive `NaN` or nonnumeric timestamps.
+- The engine now stamps alerts with the finite event timestamp when available, or local receipt time when packet time is invalid. Detection decisions and rule state are unchanged.
+- A regression drives malformed strings, NaN, and infinity through the existing BLOCKLIST rule and verifies all three alerts persist with finite timestamps. Full suite: **408 passed, 92 subtests passed** (`python -m pytest -q`). Offline synthetic replay remained **38/38** labelled scenarios, zero unmatched attack alerts, and zero benign alerts. Fixture results only.

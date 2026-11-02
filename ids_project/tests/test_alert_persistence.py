@@ -3,6 +3,7 @@ import sys
 import tempfile
 import time
 import sqlite3
+import math
 import unittest
 from unittest.mock import patch
 
@@ -118,7 +119,6 @@ class TestAlertPersistence(unittest.TestCase):
                 engine._alert_queue.put(("alert", self._make_alert()))
 
             engine.flush()
-
             conn = get_connection()
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM alerts WHERE rule_name='PORT_SCAN'")
@@ -128,6 +128,28 @@ class TestAlertPersistence(unittest.TestCase):
             self.assertEqual(count, 50, f"Expected 50 alerts persisted, but found {count}")
             self.assertEqual(engine._stats["alerts_dropped"], 0)
             self.assertGreater(engine._stats["devices_dropped"], 0)
+        finally:
+            engine.flush()
+
+    def test_rule_engine_persists_finite_time_for_direct_alerts_with_invalid_event_time(self):
+        conn = get_connection()
+        engine = RuleEngine(conn, {"198.51.100.42"}, config)
+        try:
+            for invalid_time in ("bad-time", float("nan"), float("inf")):
+                engine.check({
+                    "type": "IP", "protocol": "TCP",
+                    "src_ip": "192.168.1.50", "dst_ip": "198.51.100.42",
+                    "src_port": 50000, "dst_port": 443,
+                    "timestamp": invalid_time, "event_timestamp": invalid_time,
+                })
+            engine.flush()
+
+            cur = conn.cursor()
+            cur.execute("SELECT timestamp FROM alerts WHERE rule_name='BLOCKLIST'")
+            timestamps = [row[0] for row in cur.fetchall()]
+            cur.close()
+            self.assertEqual(len(timestamps), 3)
+            self.assertTrue(all(math.isfinite(float(ts)) for ts in timestamps))
         finally:
             engine.flush()
 

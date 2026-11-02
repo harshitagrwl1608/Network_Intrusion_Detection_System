@@ -5503,10 +5503,13 @@ class RuleEngine:
             try:
                 alert = rule.check(record)
                 if alert:
-                    # Stamp with event_timestamp from the packet record
-                    alert["timestamp"] = record.get(
-                        "event_timestamp",
-                        record.get("timestamp", time.time()),
+                    # Persist only finite event times. A few packet-local
+                    # detections intentionally survive malformed timestamps;
+                    # use receipt time for those alerts so SQLite and dashboard
+                    # consumers never receive NaN or non-numeric time values.
+                    alert_timestamp = _finite_record_timestamp(record)
+                    alert["timestamp"] = (
+                        alert_timestamp if alert_timestamp is not None else time.time()
                     )
                     # Serialise evidence dict to JSON string for DB persistence
                     if "evidence" in alert:
