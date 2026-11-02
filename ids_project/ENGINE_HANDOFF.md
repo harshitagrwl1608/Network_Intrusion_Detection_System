@@ -32,7 +32,7 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **408 passed, 92 subtests passed** (`python -m pytest -q`).
+- Full test suite: **409 passed, 92 subtests passed** (`python -m pytest -q`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
 - All 1,163 synthetic attack packets and 832 benign packets were replayed; alert persistence checks reported no dropped alerts or shutdown timeout.
 - `git diff --check` was clean at inspection.
@@ -1230,3 +1230,9 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - `RuleEngine` previously copied raw event time into the alert object even when existing packet-local rules intentionally emitted an alert with malformed time. SQLite and dashboard consumers could receive `NaN` or nonnumeric timestamps.
 - The engine now stamps alerts with the finite event timestamp when available, or local receipt time when packet time is invalid. Detection decisions and rule state are unchanged.
 - A regression drives malformed strings, NaN, and infinity through the existing BLOCKLIST rule and verifies all three alerts persist with finite timestamps. Full suite: **408 passed, 92 subtests passed** (`python -m pytest -q`). Offline synthetic replay remained **38/38** labelled scenarios, zero unmatched attack alerts, and zero benign alerts. Fixture results only.
+
+## Follow-up: 2026-11-03 trusted CIDR matching hot path
+
+- `_is_trusted` runs in many existing rules and reparsed every configured CIDR for each packet/rule call. The helper now compiles the configured network set once and atomically refreshes its cache when `TRUSTED_HOSTS` changes; exact-host matches and CIDR semantics are preserved.
+- A local microbenchmark with eight configured host/network entries measured 30,000 untrusted-address checks at **3.40s before / 0.27s after**, and 30,000 matching-CIDR checks at **1.52s before / 0.22s after**. This is a local comparison, not a production throughput claim.
+- Regression verifies cache invalidation when the trusted-host set changes. Focused data-exfiltration and persistence suites: **52 passed, 7 subtests passed**. Full suite: **409 passed, 92 subtests passed**; offline replay preserved **38/38** labelled detections and zero benign alerts.

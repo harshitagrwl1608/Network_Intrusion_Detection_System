@@ -576,6 +576,12 @@ class TestDataExfiltrationRule(unittest.TestCase):
             alert = self.rule.check(self._pkt("192.168.1.50", "203.0.113.10", payload=chunk, ts=100.0 + i))
             self.assertIsNone(alert)
 
+    def test_trusted_cidr_cache_refreshes_after_configuration_changes(self):
+        rules_mod.TRUSTED_HOSTS.add("198.51.100.0/24")
+        self.assertTrue(rules_mod._is_trusted("198.51.100.42"))
+        rules_mod.TRUSTED_HOSTS.clear()
+        self.assertFalse(rules_mod._is_trusted("198.51.100.42"))
+
     def test_cooldown_prevents_duplicate_alerts(self):
         chunk = b"A" * 30000
         # First two chunks hit threshold (60,000 >= 50,000)

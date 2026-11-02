@@ -207,18 +207,43 @@ WELL_KNOWN_SERVICE_PORTS = {
 # Trusted hosts/IPs that should never be flagged by scan, SYN-flood, or ICMP rules.
 # Add your gateway, DNS server, trusted CDN IPs here.
 TRUSTED_HOSTS: set = set()  # populated from config by RuleEngine
+_TRUSTED_NETWORKS_CACHE_LOCK = threading.Lock()
+_TRUSTED_NETWORKS_CACHE_STATE: tuple[frozenset[str] | None, tuple] = (None, ())
+
+
+def _trusted_networks(entries: frozenset[str]) -> tuple:
+    """Compile configured CIDRs once, refreshing when the trusted set changes."""
+    global _TRUSTED_NETWORKS_CACHE_STATE
+    cached_key, networks = _TRUSTED_NETWORKS_CACHE_STATE
+    if entries == cached_key:
+        return networks
+    with _TRUSTED_NETWORKS_CACHE_LOCK:
+        cached_key, networks = _TRUSTED_NETWORKS_CACHE_STATE
+        if entries != cached_key:
+            compiled = []
+            for entry in entries:
+                try:
+                    compiled.append(ipaddress.ip_network(entry, strict=False))
+                except (TypeError, ValueError):
+                    continue
+            networks = tuple(compiled)
+            _TRUSTED_NETWORKS_CACHE_STATE = (entries, networks)
+    return networks
+
 
 def _is_trusted(ip: str) -> bool:
     """Return True if ip matches any trusted host or CIDR range."""
-    if ip in TRUSTED_HOSTS:
-        return True
-    for entry in TRUSTED_HOSTS:
-        try:
-            if ipaddress.ip_address(ip) in ipaddress.ip_network(entry, strict=False):
-                return True
-        except ValueError:
-            pass
-    return False
+    entries = frozenset(TRUSTED_HOSTS)
+    try:
+        if ip in entries:
+            return True
+    except TypeError:
+        return False
+    try:
+        address = ipaddress.ip_address(ip)
+    except (TypeError, ValueError):
+        return False
+    return any(address in network for network in _trusted_networks(entries))
 
 
 _INTERNAL_NETWORKS = (
