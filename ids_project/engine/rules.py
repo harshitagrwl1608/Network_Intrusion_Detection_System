@@ -1619,7 +1619,7 @@ class IcmpFloodRule:
 # =============================================================================
 class ArpSpoofRule:
     name = "ARP_SPOOF"
-    rule_version = "1.4"
+    rule_version = "1.5"
 
     # Per-IP cooldown: once an alert fires for a given IP, suppress repeats
     # for this many seconds to avoid alert storms. Set to 0 to disable.
@@ -1759,13 +1759,14 @@ class ArpSpoofRule:
                     "src_port": None,
                     "dst_port": None,
                     "protocol": "ARP",
-                    "severity": "high",
-                    "confidence": "high",
+                    "severity": "medium",
+                    "confidence": "heuristic",
                     "detail": (
-                        f"IP {ip} previously answered as {known_mac}, "
-                        f"now claims to be {mac} — possible ARP spoofing"
+                        f"IP {ip} changed its observed MAC from {known_mac} "
+                        f"to {mac} — possible ARP spoofing or a legitimate host change"
                     ),
                     "evidence": {
+                        "classification": "ARP_IDENTITY_CHANGE",
                         "ip": ip,
                         "previous_mac": known_mac,
                         "new_mac": mac,
