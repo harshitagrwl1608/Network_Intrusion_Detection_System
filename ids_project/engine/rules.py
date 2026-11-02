@@ -3834,7 +3834,7 @@ class CleartextHttpOnTlsPortRule:
     """Flag repeated plaintext HTTP requests sent to conventional TLS ports."""
 
     name = "CLEAR_HTTP_ON_TLS_PORT"
-    rule_version = "1.4"
+    rule_version = "1.5"
     MAX_REQUEST_LINE_BYTES = 2064
     STREAM_TIMEOUT_S = 30.0
     _METHOD_PREFIXES = (b"GET ", b"POST ", b"PUT ", b"DELETE ",
@@ -3845,10 +3845,14 @@ class CleartextHttpOnTlsPortRule:
 
     def __init__(self, cooldown: float = 600.0, window: float = 600.0,
                  min_requests: int = 2, max_states: int = 4096):
-        self.cooldown = max(0.0, float(cooldown))
-        self.window = max(1.0, float(window))
-        self.min_requests = max(1, int(min_requests))
-        self.max_states = max(1, int(max_states))
+        self.cooldown = _nonnegative_float_setting(
+            cooldown, 600.0, "CLEAR_HTTP_TLS_COOLDOWN_S")
+        self.window = _positive_float_setting(
+            window, 600.0, "CLEAR_HTTP_TLS_WINDOW_S")
+        self.min_requests = _positive_setting(
+            min_requests, 2, "CLEAR_HTTP_TLS_MIN_REQUESTS")
+        self.max_states = _positive_setting(
+            max_states, 4096, "CLEAR_HTTP_TLS_MAX_STATES")
         self._lock = threading.Lock()
         self._seen: OrderedDict[tuple[str, str, int], float] = OrderedDict()
         self._history: OrderedDict[tuple[str, str, int], list[float]] = OrderedDict()

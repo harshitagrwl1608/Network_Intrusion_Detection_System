@@ -23,6 +23,20 @@ class TestCleartextHttpOnTlsPortRule(unittest.TestCase):
         record.update(overrides)
         return record
 
+    def test_invalid_settings_preserve_repeated_request_requirement(self):
+        rule = CleartextHttpOnTlsPortRule(
+            cooldown=float("nan"), window=0, min_requests=0,
+            max_states="invalid",
+        )
+        self.assertEqual(rule.cooldown, 600.0)
+        self.assertEqual(rule.window, 600.0)
+        self.assertEqual(rule.min_requests, 2)
+        self.assertEqual(rule.max_states, 4096)
+        payload = b"GET /health HTTP/1.1\r\nHost: example.test\r\n\r\n"
+        self.assertIsNone(rule.check(self.packet(payload, event_timestamp=100)))
+        service_key = ("192.0.2.10", "198.51.100.20", 443)
+        self.assertEqual(len(rule._history[service_key]), 1)
+
     def test_repeated_plain_http_requests_to_tls_port_alert_once_per_service(self):
         payload = b"POST /fakeurl.htm HTTP/1.1\r\nHost: c2.example\r\n\r\n"
         first_request = self.rule.check(self.packet(payload))

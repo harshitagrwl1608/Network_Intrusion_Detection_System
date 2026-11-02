@@ -970,6 +970,13 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Added regressions for invalid thresholds, windows, and state caps, including the one-packet/one-target false-alert case. Existing positive threshold-one distributed and stealth/flood unit cases remain passing.
 - Verification: focused scan tests **39 passed**; full suite **352 tests passed** in 45.49s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios** across all 19 rule families, with zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
 
+## Follow-up: 2026-11-02 CLEAR_HTTP_ON_TLS_PORT setting validation
+
+- `CLEAR_HTTP_ON_TLS_PORT` coerced `min_requests=0` to `1`, allowing one ordinary plaintext request to trigger a detector whose intent is repeated requests. Invalid window/state settings could also raise, while a non-finite cooldown could produce unreliable suppression.
+- Version 1.5 now falls back to the existing defaults for invalid minimum-request, window, and state-cap settings. Cooldown must be finite and non-negative; `0` remains supported. Valid fractional windows and positive custom thresholds are preserved.
+- Added a regression for zero minimum requests and malformed companion settings. One request remains below the default repeat threshold.
+- Verification: focused cleartext tests **12 passed**; full suite **353 tests passed** in 45.66s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 scenarios**, with zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
 ## Follow-up: 2026-11-02 malformed TCP sequence metadata in PAYLOAD_HIT
 
 - `PayloadRule._update_stream` converted `tcp_payload_seq` without handling malformed input. Reproduction with a valid SQL injection payload and `tcp_payload_seq="malformed"` raised `ValueError` before packet-level matching, losing that detection.
