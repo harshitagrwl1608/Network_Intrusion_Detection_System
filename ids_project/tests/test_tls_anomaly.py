@@ -140,6 +140,20 @@ class TestTlsAnomalyRule(unittest.TestCase):
         third = self.rule.check(self._pkt(payload=payload, ts=165.0))
         self.assertIsNotNone(third)
 
+    def test_invalid_cooldowns_fall_back_while_zero_remains_supported(self):
+        for invalid in (float("nan"), float("inf"), -1, "invalid"):
+            with self.subTest(cooldown=invalid):
+                rule = TlsAnomalyRule(cooldown=invalid)
+                self.assertEqual(rule.cooldown, 60.0)
+                payload = make_tls_client_hello("198.51.100.42")
+                self.assertIsNotNone(rule.check(self._pkt(payload=payload, ts=100.0)))
+                self.assertIsNone(rule.check(self._pkt(payload=payload, ts=101.0)))
+
+        no_cooldown = TlsAnomalyRule(cooldown=0)
+        payload = make_tls_client_hello("198.51.100.42")
+        self.assertIsNotNone(no_cooldown.check(self._pkt(payload=payload, ts=100.0)))
+        self.assertIsNotNone(no_cooldown.check(self._pkt(payload=payload, ts=101.0)))
+
     def test_trusted_host_exemption(self):
         rules_mod.TRUSTED_HOSTS.add("192.168.1.50")
         payload = make_tls_client_hello("198.51.100.42")

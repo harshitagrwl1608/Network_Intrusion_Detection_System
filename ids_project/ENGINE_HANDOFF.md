@@ -1039,3 +1039,10 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Version 1.7 now applies the existing documented defaults to invalid/nonpositive capacities, thresholds, and windows. The response grace period must be finite and non-negative; zero remains an intentional opt-out. Positive threshold 1 remains valid for explicit single-RST configurations.
 - Regressions cover invalid settings and no alert from one RST under fallback defaults, plus valid threshold-one and zero-grace behavior.
 - Verification: focused RST tests **12 passed**; full suite **367 tests passed** in 48.42s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
+## Follow-up: 2026-11-02 TLS cooldown setting validation
+
+- `TLS_ANOMALY` directly converted its cooldown to `float`. With `NaN`, the cooldown comparison is always false, so repeated identical alerts fired without suppression; negative cooldowns similarly bypassed suppression, while malformed strings could break construction.
+- Version 1.5 uses the documented 60-second default for malformed, negative, or non-finite cooldowns. `0` remains a valid explicit opt-out; valid positive cooldowns are unchanged.
+- Regressions cover NaN, infinity, negative, and malformed values, verify repeated alerts are suppressed after fallback, and confirm zero still allows immediate repeats.
+- Verification: TLS tests **13 passed**; full suite **368 tests passed** in 46.83s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.

@@ -4243,7 +4243,7 @@ class TlsAnomalyRule:
     Port expansion covers: XMPP-SSL (5223), MQTT-TLS (8083), alternative HTTPS C2 (4443, 9443).
     """
     name = "TLS_ANOMALY"
-    rule_version = "1.4"
+    rule_version = "1.5"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
     MAX_CLIENT_HELLO_BYTES = 16_389
@@ -4251,7 +4251,8 @@ class TlsAnomalyRule:
     TLS_PORTS = frozenset({443, 4443, 8443, 9443, 5223, 8083})
 
     def __init__(self, cooldown: float = 60.0, enabled: bool = True):
-        self.cooldown = float(cooldown)
+        self.cooldown = _nonnegative_float_setting(
+            cooldown, 60.0, "TLS_COOLDOWN_S")
         self.enabled = bool(enabled)
         self._lock = threading.Lock()
         # Key: (src_ip, dst_ip, anomaly_type) -> float (last alert timestamp)
