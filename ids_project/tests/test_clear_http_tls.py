@@ -104,6 +104,75 @@ class TestCleartextHttpOnTlsPortRule(unittest.TestCase):
     def test_server_response_is_not_mistaken_for_client_request(self):
         self.assertIsNone(self.rule.check(self.packet(b"HTTP/1.1 200 OK\r\n")))
 
+    def test_split_request_line_is_reassembled_before_counting(self):
+        rule = CleartextHttpOnTlsPortRule(cooldown=10, window=10, min_requests=2)
+        request = b"GET /split HTTP/1.1\r\nHost: example.test\r\n\r\n"
+        split_at = 9
+        self.assertIsNone(rule.check(self.packet(
+            request[:split_at], src_port=51000, tcp_payload_seq=1000,
+            event_timestamp=100.0)))
+        self.assertIsNone(rule.check(self.packet(
+            request[split_at:], src_port=51000,
+            tcp_payload_seq=1000 + split_at, event_timestamp=100.1)))
+        service_key = ("192.0.2.10", "198.51.100.20", 443)
+        self.assertEqual(len(rule._history[service_key]), 1)
+
+        alert = rule.check(self.packet(
+            b"POST /status HTTP/1.1\r\nHost: example.test\r\n\r\n",
+            src_port=51001, tcp_payload_seq=3000, event_timestamp=100.2))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["request_line"],
+                         "POST /status HTTP/1.1")
+        self.assertEqual(alert["evidence"]["request_count"], 2)
+
+    def test_retransmitted_partial_segment_does_not_count_as_another_request(self):
+        rule = CleartextHttpOnTlsPortRule(cooldown=10, window=10, min_requests=2)
+        first = b"GET /split "
+        remainder = b"HTTP/1.1\r\nHost: example.test\r\n\r\n"
+        self.assertIsNone(rule.check(self.packet(
+            first, src_port=52000, tcp_payload_seq=2000,
+            event_timestamp=100.0)))
+        self.assertIsNone(rule.check(self.packet(
+            first, src_port=52000, tcp_payload_seq=2000,
+            event_timestamp=100.05)))
+        self.assertIsNone(rule.check(self.packet(
+            remainder, src_port=52000,
+            tcp_payload_seq=2000 + len(first), event_timestamp=100.1)))
+        alert = rule.check(self.packet(
+            b"GET /other HTTP/1.1\r\nHost: example.test\r\n\r\n",
+            src_port=52001, tcp_payload_seq=4000, event_timestamp=100.2))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["request_count"], 2)
+
+    def test_partial_stream_state_is_bounded_and_expires(self):
+        rule = CleartextHttpOnTlsPortRule(max_states=2, min_requests=2)
+        for i in range(3):
+            self.assertIsNone(rule.check(self.packet(
+                b"GET /partial", src_port=53000 + i,
+                tcp_payload_seq=5000, event_timestamp=100.0 + i)))
+        self.assertEqual(len(rule._tcp_prefixes), 2)
+        rule.prune_stale(100.0 + rule.STREAM_TIMEOUT_S + 5)
+        self.assertEqual(rule._tcp_prefixes, {})
+
+    def test_late_segment_does_not_replace_a_current_partial_request(self):
+        rule = CleartextHttpOnTlsPortRule(cooldown=10, window=10, min_requests=2)
+        prefix = b"GET /split "
+        remainder = b"HTTP/1.1\r\nHost: example.test\r\n\r\n"
+        self.assertIsNone(rule.check(self.packet(
+            prefix, src_port=54000, tcp_payload_seq=6000,
+            event_timestamp=100.0)))
+        self.assertIsNone(rule.check(self.packet(
+            b"POST /late ", src_port=54000, tcp_payload_seq=7000,
+            event_timestamp=99.0)))
+        self.assertEqual(len(rule._tcp_prefixes), 1)
+        self.assertIsNone(rule.check(self.packet(
+            remainder, src_port=54000,
+            tcp_payload_seq=6000 + len(prefix), event_timestamp=101.0)))
+        alert = rule.check(self.packet(
+            b"GET /next HTTP/1.1\r\nHost: example.test\r\n\r\n",
+            src_port=54001, tcp_payload_seq=8000, event_timestamp=102.0))
+        self.assertIsNotNone(alert)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -767,16 +767,24 @@ def gen_cleartext_http_on_tls_port(base: float) -> list:
         src_ip="192.168.1.104", dst_ip="203.0.113.104",
         dst_port="443", protocol="TCP",
     )
-    pkts = []
-    for i, path in enumerate(("/health", "/status")):
-        payload = f"GET {path} HTTP/1.1\r\nHost: example.test\r\n\r\n".encode()
-        pkt = (_make_eth() /
-               IP(src="192.168.1.104", dst="203.0.113.104") /
-               TCP(sport=54370 + i, dport=443, flags="PA") /
-               Raw(load=payload))
-        pkt.time = base + 320.0 + i * 0.25
-        pkts.append(pkt)
-    return pkts
+    first_request = b"GET /health HTTP/1.1\r\nHost: example.test\r\n\r\n"
+    split_at = 10
+    first_segment = (_make_eth() /
+                     IP(src="192.168.1.104", dst="203.0.113.104") /
+                     TCP(sport=54370, dport=443, flags="PA", seq=1000) /
+                     Raw(load=first_request[:split_at]))
+    continuation = (_make_eth() /
+                    IP(src="192.168.1.104", dst="203.0.113.104") /
+                    TCP(sport=54370, dport=443, flags="PA", seq=1000 + split_at) /
+                    Raw(load=first_request[split_at:]))
+    second_request = (_make_eth() /
+                      IP(src="192.168.1.104", dst="203.0.113.104") /
+                      TCP(sport=54371, dport=443, flags="PA", seq=2000) /
+                      Raw(load=b"POST /status HTTP/1.1\r\nHost: example.test\r\n\r\n"))
+    first_segment.time = base + 320.0
+    continuation.time = base + 320.05
+    second_request.time = base + 320.25
+    return [first_segment, continuation, second_request]
 
 
 

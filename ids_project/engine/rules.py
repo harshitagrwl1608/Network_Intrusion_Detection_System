@@ -3778,10 +3778,14 @@ class DataExfiltrationRule:
 # =============================================================================
 
 class CleartextHttpOnTlsPortRule:
-    """Flag plaintext HTTP request lines sent to conventional TLS ports."""
+    """Flag repeated plaintext HTTP requests sent to conventional TLS ports."""
 
     name = "CLEAR_HTTP_ON_TLS_PORT"
-    rule_version = "1.2"
+    rule_version = "1.3"
+    MAX_REQUEST_LINE_BYTES = 2064
+    STREAM_TIMEOUT_S = 30.0
+    _METHOD_PREFIXES = (b"GET ", b"POST ", b"PUT ", b"DELETE ",
+                        b"PATCH ", b"OPTIONS ", b"HEAD ")
     _REQUEST_LINE = re.compile(
         rb"(?i)^(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s+[^\r\n]{1,2048}\s+HTTP/1\.[01]\r?\n"
     )
@@ -3796,11 +3800,90 @@ class CleartextHttpOnTlsPortRule:
         self._seen: OrderedDict[tuple[str, str, int], float] = OrderedDict()
         self._history: OrderedDict[tuple[str, str, int], list[float]] = OrderedDict()
         self._saturated: set[tuple[str, str, int]] = set()
+        # Incomplete request-line prefixes, keyed by directional TCP 4-tuple.
+        # State is capped separately from service-level request history.
+        self._tcp_prefixes: OrderedDict[tuple[str, int, str, int], tuple[int, int, bytes, float]] = OrderedDict()
+
+    def _extract_request_line(self, record: dict, payload: bytes, now: float) -> bytes | None:
+        match = self._REQUEST_LINE.match(payload)
+        if match:
+            try:
+                direct_key = (str(record["src_ip"]), int(record["src_port"]),
+                              str(record["dst_ip"]), int(record["dst_port"]))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                direct_key = None
+            if direct_key is not None:
+                with self._lock:
+                    state = self._tcp_prefixes.get(direct_key)
+                    if state is not None and now >= state[3]:
+                        self._tcp_prefixes.pop(direct_key, None)
+            return match.group(0).strip()
+
+        try:
+            src_port = int(record["src_port"])
+            dst_port = int(record["dst_port"])
+            seq = int(record["tcp_payload_seq"]) & 0xFFFFFFFF
+            src, dst = str(record["src_ip"]), str(record["dst_ip"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if not 1 <= src_port <= 65535 or dst_port not in (443, 8443):
+            return None
+
+        key = (src, src_port, dst, dst_port)
+        with self._lock:
+            state = self._tcp_prefixes.get(key)
+            if state is not None:
+                start_seq, expected_seq, prefix, last_seen = state
+                if now < last_seen:
+                    return None  # late segments cannot replace active prefix state
+                if now - last_seen > self.STREAM_TIMEOUT_S:
+                    self._tcp_prefixes.pop(key, None)
+                    state = None
+                elif seq == start_seq and payload == prefix:
+                    # An exact retransmission of the partial segment is not a
+                    # second request and must not replace its continuation state.
+                    self._tcp_prefixes[key] = (start_seq, expected_seq, prefix, now)
+                    self._tcp_prefixes.move_to_end(key)
+                    return None
+                elif seq == expected_seq:
+                    combined = prefix + payload
+                    match = self._REQUEST_LINE.match(combined)
+                    self._tcp_prefixes.pop(key, None)
+                    if match:
+                        return match.group(0).strip()
+                    if (len(combined) <= self.MAX_REQUEST_LINE_BYTES
+                            and b"\n" not in combined
+                            and any(method.startswith(combined) or combined.startswith(method)
+                                    for method in self._METHOD_PREFIXES)):
+                        self._tcp_prefixes[key] = (
+                            start_seq, (seq + len(payload)) & 0xFFFFFFFF,
+                            combined, now)
+                        self._tcp_prefixes.move_to_end(key)
+                    return None
+                else:
+                    self._tcp_prefixes.pop(key, None)
+
+            # Buffer only plausible partial method/request prefixes, not
+            # arbitrary application data from every flow to port 443.
+            if (payload and len(payload) <= self.MAX_REQUEST_LINE_BYTES
+                    and b"\n" not in payload
+                    and any(method.startswith(payload) or payload.startswith(method)
+                            for method in self._METHOD_PREFIXES)):
+                if key not in self._tcp_prefixes and len(self._tcp_prefixes) >= self.max_states:
+                    self._tcp_prefixes.popitem(last=False)
+                self._tcp_prefixes[key] = (
+                    seq, (seq + len(payload)) & 0xFFFFFFFF, payload, now)
+                self._tcp_prefixes.move_to_end(key)
+        return None
 
     def prune_stale(self, now: float):
         cutoff = now - self.cooldown
         history_cutoff = now - self.window
         with self._lock:
+            stream_cutoff = now - self.STREAM_TIMEOUT_S
+            for key, (_, _, _, last_seen) in list(self._tcp_prefixes.items()):
+                if last_seen < stream_cutoff or last_seen > now:
+                    del self._tcp_prefixes[key]
             for key, times in list(self._history.items()):
                 active = [ts for ts in times if history_cutoff <= ts <= now]
                 if active:
@@ -3822,11 +3905,13 @@ class CleartextHttpOnTlsPortRule:
         if not src or not dst or dst_port not in (443, 8443) or _is_trusted(src):
             return None
         payload = record.get("payload", b"")
-        match = self._REQUEST_LINE.match(payload) if isinstance(payload, bytes) else None
-        if not match:
+        if not isinstance(payload, bytes):
             return None
 
         now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        request_line_bytes = self._extract_request_line(record, payload, now)
+        if request_line_bytes is None:
+            return None
         key = (src, dst, int(dst_port))
         with self._lock:
             times = self._history.get(key, [])
@@ -3856,7 +3941,7 @@ class CleartextHttpOnTlsPortRule:
             self._seen.move_to_end(key)
             self._history.move_to_end(key)
 
-        request_line = match.group(0).strip().decode("ascii", errors="replace")
+        request_line = request_line_bytes.decode("ascii", errors="replace")
         return {
             "rule_name": self.name,
             "rule_version": self.rule_version,
