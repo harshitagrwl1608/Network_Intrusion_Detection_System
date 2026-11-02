@@ -158,6 +158,40 @@ class TestCleartextHttpOnTlsPortRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["request_count"], 2)
 
+    def test_retransmitted_complete_request_does_not_satisfy_repeat_threshold(self):
+        rule = CleartextHttpOnTlsPortRule(cooldown=10, window=10, min_requests=2)
+        request = b"GET /health HTTP/1.1\r\nHost: example.test\r\n\r\n"
+        first = self.packet(request, src_port=52500, tcp_payload_seq=9000,
+                            event_timestamp=100.0)
+        self.assertIsNone(rule.check(first))
+        self.assertIsNone(rule.check(dict(first, event_timestamp=100.1)))
+        service_key = ("192.0.2.10", "198.51.100.20", 443)
+        self.assertEqual(len(rule._history[service_key]), 1)
+
+        # A new request with the same line but advanced TCP sequence is real.
+        alert = rule.check(self.packet(
+            request, src_port=52500, tcp_payload_seq=9000 + len(request),
+            event_timestamp=100.2))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["request_count"], 2)
+
+    def test_late_complete_request_does_not_poison_retransmission_cache(self):
+        rule = CleartextHttpOnTlsPortRule(cooldown=10, window=10, min_requests=2)
+        request = b"GET /health HTTP/1.1\r\nHost: example.test\r\n\r\n"
+        first_seq = 9000
+        self.assertIsNone(rule.check(self.packet(
+            request, src_port=52600, tcp_payload_seq=first_seq,
+            event_timestamp=100.0)))
+        next_seq = first_seq + len(request)
+        self.assertIsNone(rule.check(self.packet(
+            request, src_port=52600, tcp_payload_seq=next_seq,
+            event_timestamp=99.0)))
+        alert = rule.check(self.packet(
+            request, src_port=52600, tcp_payload_seq=next_seq,
+            event_timestamp=100.1))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["request_count"], 2)
+
     def test_out_of_order_continuation_is_joined_when_gap_fills(self):
         rule = CleartextHttpOnTlsPortRule(cooldown=10, window=10, min_requests=2)
         request = b"GET /reordered HTTP/1.1\r\nHost: example.test\r\n\r\n"

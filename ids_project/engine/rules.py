@@ -96,6 +96,7 @@ Thread safety:
 """
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -3863,9 +3864,10 @@ class CleartextHttpOnTlsPortRule:
     """Flag repeated plaintext HTTP requests sent to conventional TLS ports."""
 
     name = "CLEAR_HTTP_ON_TLS_PORT"
-    rule_version = "1.5"
+    rule_version = "1.6"
     MAX_REQUEST_LINE_BYTES = 2064
     STREAM_TIMEOUT_S = 30.0
+    MAX_SEEN_REQUEST_IDENTITIES = 32_768
     _METHOD_PREFIXES = (b"GET ", b"POST ", b"PUT ", b"DELETE ",
                         b"PATCH ", b"OPTIONS ", b"HEAD ")
     _REQUEST_LINE = re.compile(
@@ -3892,6 +3894,8 @@ class CleartextHttpOnTlsPortRule:
             tuple[str, int, str, int],
             tuple[int, int, bytes, float, dict[int, bytes]],
         ] = OrderedDict()
+        # Exact full-segment retransmissions do not count as separate HTTP requests.
+        self._seen_requests: OrderedDict[tuple, float] = OrderedDict()
 
     def _extract_request_line(self, record: dict, payload: bytes, now: float) -> bytes | None:
         match = self._REQUEST_LINE.match(payload)
@@ -4007,6 +4011,9 @@ class CleartextHttpOnTlsPortRule:
                 else:
                     del self._history[key]
                     self._saturated.discard(key)
+            for key, seen_at in list(self._seen_requests.items()):
+                if seen_at < history_cutoff or seen_at > now:
+                    del self._seen_requests[key]
             for key, seen_at in list(self._seen.items()):
                 if seen_at < cutoff or seen_at > now:
                     del self._seen[key]
@@ -4031,6 +4038,32 @@ class CleartextHttpOnTlsPortRule:
             times = self._history.get(key, [])
             if times and now < times[-1]:
                 return None
+            # A retransmission repeats the same bytes at the same sequence
+            # position. A fresh keep-alive request advances sequence even when
+            # its request line is identical, so it remains countable.
+            if record.get("tcp_payload_seq") is not None and record.get("src_port") is not None:
+                try:
+                    seq = int(record["tcp_payload_seq"]) & 0xFFFFFFFF
+                    src_port = int(record["src_port"])
+                    if 1 <= src_port <= 65535:
+                        digest = record.get("tcp_payload_digest")
+                        if not isinstance(digest, bytes) or len(digest) != 16:
+                            digest = hashlib.blake2s(payload, digest_size=16).digest()
+                        identity = (
+                            src, src_port, dst, int(dst_port), seq, digest
+                        )
+                        seen_at = self._seen_requests.get(identity)
+                        if seen_at is not None and 0 <= now - seen_at <= self.window:
+                            self._seen_requests.move_to_end(identity)
+                            return None
+                        self._seen_requests[identity] = now
+                        self._seen_requests.move_to_end(identity)
+                        while len(self._seen_requests) > self.MAX_SEEN_REQUEST_IDENTITIES:
+                            self._seen_requests.popitem(last=False)
+                except (TypeError, ValueError, OverflowError):
+                    # Request counting remains available when TCP metadata is
+                    # malformed, but this packet cannot be deduplicated safely.
+                    pass
             times = [ts for ts in times if 0 <= now - ts <= self.window]
             if len(times) < self.min_requests:
                 self._saturated.discard(key)
