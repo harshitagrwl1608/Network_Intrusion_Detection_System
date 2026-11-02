@@ -41,7 +41,7 @@ class TestTcpStealthScanRule(unittest.TestCase):
             if alert:
                 alerts.append(alert)
         self.assertEqual(len(alerts), 1)
-        self.assertEqual(alerts[0]["rule_version"], "1.4")
+        self.assertEqual(alerts[0]["rule_version"], "1.5")
         self.assertLessEqual(len(rule._fired), rule.max_states)
 
         later = None

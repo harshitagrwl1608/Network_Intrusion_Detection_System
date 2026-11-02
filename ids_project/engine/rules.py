@@ -158,6 +158,19 @@ def _nonnegative_float_setting(value, default: float, setting_name: str) -> floa
     return parsed
 
 
+def _finite_record_timestamp(record: dict, prefer_event_timestamp: bool = True) -> float | None:
+    """Return the selected finite packet timestamp, or None for invalid telemetry."""
+    if prefer_event_timestamp:
+        raw = record.get("event_timestamp", record.get("timestamp", time.time()))
+    else:
+        raw = record.get("timestamp", time.time())
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
 def _is_initial_syn(record: dict) -> bool:
     """Classify a new TCP SYN consistently when derived metadata is absent."""
     if "initial_syn" in record:
@@ -405,11 +418,8 @@ class PortScanRule:
         if dst_port is None:
             return None
 
-        try:
-            now = float(record.get("timestamp", time.time()))
-        except (TypeError, ValueError, OverflowError):
-            return None  # malformed event time cannot safely update scan windows
-        if not math.isfinite(now):
+        now = _finite_record_timestamp(record, prefer_event_timestamp=False)
+        if now is None:
             return None
         vkey = (src, dst_ip)
         hkey = (src, dst_port)
@@ -592,7 +602,7 @@ class UdpFloodRule:
     """
 
     name = "UDP_FLOOD"
-    rule_version = "1.4"
+    rule_version = "1.5"
     ALERT_COOLDOWN_S: float = 60.0
     _EXEMPT_SRC_PORTS: set[int] = {53, 67, 68, 123}
 
@@ -654,7 +664,9 @@ class UdpFloodRule:
             self.web_threshold if 443 in (src_port, dst_port) else self.threshold
         )
 
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
         key = (src, dst)
 
         with self._lock:
@@ -718,7 +730,7 @@ class TcpStealthScanRule:
     """Detect vertical FIN, NULL, and Xmas TCP probes."""
 
     name = "TCP_STEALTH_SCAN"
-    rule_version = "1.4"
+    rule_version = "1.5"
     _FIN, _SYN, _RST, _PSH, _ACK, _URG, _ECE, _CWR = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80
     _XMAS_FLAGS = _FIN | _PSH | _URG
     _DISALLOWED_FLAGS = _SYN | _RST | _ACK | _ECE | _CWR
@@ -768,7 +780,9 @@ class TcpStealthScanRule:
         if probe_type is None:
             return None
 
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
         key = (src, dst)
         cutoff = now - self.window
         with self._lock:
@@ -867,7 +881,7 @@ class TcpFlagAnomalyRule:
     """
 
     name = "TCP_FLAG_ANOMALY"
-    rule_version = "1.4"
+    rule_version = "1.5"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, cooldown: float = 60.0, max_states: int = 5000):
@@ -957,7 +971,9 @@ class TcpFlagAnomalyRule:
         if not anomaly_type:
             return None
 
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
         key = (src, anomaly_type)
 
         with self._lock:
@@ -1096,11 +1112,8 @@ class SynFloodRule:
         if _is_trusted(src):
             return None
 
-        try:
-            now = float(record.get("timestamp", time.time()))
-        except (TypeError, ValueError, OverflowError):
-            return None
-        if not math.isfinite(now):
+        now = _finite_record_timestamp(record, prefer_event_timestamp=False)
+        if now is None:
             return None
         try:
             tcp_flags = int(record.get("tcp_flags") or 0)
@@ -1304,7 +1317,7 @@ class DistributedSynFloodRule:
     """Detect high-volume initial-SYN bursts to one service from many sources."""
 
     name = "DISTRIBUTED_SYN_FLOOD"
-    rule_version = "1.5"
+    rule_version = "1.6"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 500, min_sources: int = 20,
@@ -1356,7 +1369,9 @@ class DistributedSynFloodRule:
         if _is_trusted(src):
             return None
 
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
         key = (dst, dst_port)
         with self._lock:
             state = self._history.get(key)
@@ -1437,7 +1452,7 @@ class IcmpSweepRule:
     """Detect a source probing distinct IPv4/IPv6 destinations with echo requests."""
 
     name = "ICMP_SWEEP"
-    rule_version = "1.3"
+    rule_version = "1.4"
 
     def __init__(self, threshold: int = 12, window: int = 10,
                  max_sources: int = 4096):
@@ -1475,7 +1490,9 @@ class IcmpSweepRule:
         if not src or not dst or src == dst or _is_trusted(src):
             return None
 
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
         with self._lock:
             # PCAPs are expected to be ordered; reject a late/reordered event
             # instead of letting it erase newer window state.
@@ -1545,7 +1562,7 @@ class IcmpFloodRule:
     """
 
     name = "ICMP_FLOOD"
-    rule_version = "1.4"
+    rule_version = "1.5"
     ALERT_COOLDOWN_S: float = 60.0
 
     def __init__(self, threshold: int = 50, window: int = 5,
@@ -1593,7 +1610,9 @@ class IcmpFloodRule:
         if not src or not dst or _is_trusted(src):
             return None
 
-        now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
         key = (src, dst)
 
         with self._lock:
