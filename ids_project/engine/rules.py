@@ -4114,49 +4114,77 @@ _SUSPICIOUS_TLS_SUFFIXES: tuple[str, ...] = (
 
 def _extract_tls_sni(payload: bytes) -> str | None:
     """
-    Safely parse Server Name Indication (SNI) from a TLS Client Hello record.
-    Returns the decoded SNI string if present, or None.
+    Parse SNI only from a complete, length-consistent TLS ClientHello record.
+    Returns the decoded hostname if present, or None for incomplete/malformed data.
     """
-    if len(payload) < 44 or payload[0] != 0x16 or payload[5] != 0x01:
+    if len(payload) < 9 or payload[0] != 0x16 or payload[5] != 0x01:
         return None
 
-    pos = 43
-    if pos >= len(payload):
+    record_end = 5 + int.from_bytes(payload[3:5], "big")
+    if record_end > len(payload):
+        return None
+    handshake_end = 9 + int.from_bytes(payload[6:9], "big")
+    if handshake_end > record_end:
+        return None
+
+    pos = 43  # record header + handshake header + legacy version + random
+    if pos >= handshake_end:
         return None
     session_id_len = payload[pos]
     pos += 1 + session_id_len
 
-    if pos + 2 > len(payload):
+    if pos + 2 > handshake_end:
         return None
     cipher_suites_len = int.from_bytes(payload[pos:pos+2], "big")
+    if cipher_suites_len < 2 or cipher_suites_len % 2:
+        return None
     pos += 2 + cipher_suites_len
 
-    if pos + 1 > len(payload):
+    if pos + 1 > handshake_end:
         return None
     compression_len = payload[pos]
     pos += 1 + compression_len
 
-    if pos + 2 > len(payload):
+    if pos + 2 > handshake_end:
         return None
     extensions_len = int.from_bytes(payload[pos:pos+2], "big")
     pos += 2
+    extensions_end = pos + extensions_len
+    if extensions_end != handshake_end:
+        return None
 
-    end = min(len(payload), pos + extensions_len)
-    while pos + 4 <= end:
+    while pos + 4 <= extensions_end:
         ext_type = int.from_bytes(payload[pos:pos+2], "big")
         ext_len = int.from_bytes(payload[pos+2:pos+4], "big")
         pos += 4
-        if ext_type == 0:  # Server Name Indication (SNI)
-            if pos + 5 <= end:
-                name_type = payload[pos+2]
-                name_len = int.from_bytes(payload[pos+3:pos+5], "big")
-                if name_type == 0 and pos + 5 + name_len <= end:
-                    try:
-                        return payload[pos+5:pos+5+name_len].decode("utf-8", errors="replace")
-                    except Exception:
-                        return None
+        ext_end = pos + ext_len
+        if ext_end > extensions_end:
             return None
-        pos += ext_len
+        if ext_type == 0:  # Server Name Indication (SNI)
+            if ext_len < 2:
+                return None
+            names_end = pos + 2 + int.from_bytes(payload[pos:pos+2], "big")
+            if names_end != ext_end:
+                return None
+            name_pos = pos + 2
+            while name_pos + 3 <= names_end:
+                name_type = payload[name_pos]
+                name_len = int.from_bytes(payload[name_pos+1:name_pos+3], "big")
+                name_pos += 3
+                if name_pos + name_len > names_end:
+                    return None
+                if name_type == 0:
+                    if name_len == 0:
+                        return None
+                    try:
+                        return payload[name_pos:name_pos+name_len].decode("ascii")
+                    except UnicodeDecodeError:
+                        return None
+                name_pos += name_len
+            return None
+        pos = ext_end
+    if pos != extensions_end:
+        return None
     return None
 
 
@@ -4169,7 +4197,7 @@ class TlsAnomalyRule:
     Port expansion covers: XMPP-SSL (5223), MQTT-TLS (8083), alternative HTTPS C2 (4443, 9443).
     """
     name = "TLS_ANOMALY"
-    rule_version = "1.3"
+    rule_version = "1.4"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
     MAX_CLIENT_HELLO_BYTES = 16_389

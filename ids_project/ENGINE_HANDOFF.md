@@ -1011,3 +1011,10 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - The heuristic now applies its three-label grouping only when the final TLD has exactly two alphabetic characters, retaining the existing common country-code suffix behavior (for example, `example.co.uk`) while grouping ordinary `.com` registrations such as `bad.com` correctly. Detection thresholds and other DNS anomaly predicates are unchanged. The DNS rule is version 1.16; no rule was added.
 - Regressions cover detection under short-label `.com` registrations and retained `co.uk` grouping.
 - Verification: focused DNS tests **39 passed**; full suite **361 tests passed** in 45.15s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
+## Follow-up: 2026-11-02 TLS ClientHello record-boundary validation
+
+- `_extract_tls_sni` previously ignored TLS record and handshake lengths. A reproducible record declaring a four-byte payload but carrying 78 trailing bytes containing a suspicious SNI still returned that hostname, allowing malformed data to trigger an alert as though it were a valid ClientHello.
+- `TLS_ANOMALY` version 1.4 now requires a complete, length-consistent record and handshake, bounds extension and server-name parsing to their declared containers, checks the cipher-suite vector, and accepts only ASCII host names as required by TLS SNI. Existing detection predicates and port coverage are unchanged.
+- Regression cases cover a record length shorter than its appended data, a handshake length beyond the record, and a truncated record. Existing valid literal-IP, tunnel-SNI, long ClientHello, and reordered segment cases continue to pass.
+- Verification: TLS tests **12 passed**; full suite **362 tests passed** in 48.63s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.

@@ -66,6 +66,18 @@ class TestTlsAnomalyRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["sni"], "c2-node.ngrok-free.app")
 
+    def test_malformed_record_length_cannot_supply_sni_from_trailing_bytes(self):
+        valid = make_tls_client_hello("c2-node.ngrok-free.app")
+        malformed_records = (
+            b"\x16\x03\x01\x00\x04" + valid[5:],
+            valid[:6] + (len(valid).to_bytes(3, "big")) + valid[9:],
+            valid[:-1],
+        )
+        for malformed in malformed_records:
+            with self.subTest(payload_length=len(malformed)):
+                self.assertIsNone(rules_mod._extract_tls_sni(malformed))
+                self.assertIsNone(self.rule.check(self._pkt(payload=malformed, ts=100.0)))
+
     def test_segmented_client_hello_detects_sni_when_gap_arrives(self):
         hello = make_tls_client_hello("c2-node.ngrok-free.app", padding_bytes=600)
         seq = 4000
