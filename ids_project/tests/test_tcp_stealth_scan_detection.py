@@ -32,6 +32,34 @@ class TestTcpStealthScanRule(unittest.TestCase):
         self.assertEqual(alert["evidence"]["probe_types"], ["FIN", "NULL", "XMAS"])
         self.assertEqual(alert["evidence"]["scan_type"], "stealth_vertical")
 
+    def test_continuous_scan_alerts_once_per_window_and_recovers_after_cooldown(self):
+        rule = TcpStealthScanRule(threshold=3, window=10)
+        alerts = []
+        for i in range(9):
+            alert = rule.check(self.packet(
+                1000 + i, 100 + i * 0.1, (0x01, 0x00, 0x29)[i % 3]))
+            if alert:
+                alerts.append(alert)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["rule_version"], "1.4")
+        self.assertLessEqual(len(rule._fired), rule.max_states)
+
+        later = None
+        for i in range(3):
+            later = rule.check(self.packet(
+                2000 + i, 111 + i * 0.1, (0x01, 0x00, 0x29)[i]))
+        self.assertIsNotNone(later)
+        self.assertEqual(later["evidence"]["distinct_ports"], 3)
+
+    def test_fired_cooldown_state_is_bounded_and_prunable(self):
+        rule = TcpStealthScanRule(threshold=1, window=5, max_states=2)
+        for i in range(3):
+            self.assertIsNotNone(rule.check(self.packet(
+                1000, 100 + i, 0x01, src=f"198.51.100.{i + 1}")))
+        self.assertLessEqual(len(rule._fired), 2)
+        rule.prune_stale(110)
+        self.assertEqual(rule._fired, {})
+
     def test_normal_and_mixed_flags_do_not_accumulate(self):
         for i, flags in enumerate((0x02, 0x12, 0x10, 0x04, 0x05, 0x11, 0x09, 0x21)):
             self.assertIsNone(self.rule.check(self.packet(2000 + i, 100 + i, flags)))

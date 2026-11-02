@@ -32,7 +32,7 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-02 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **389 passed** (`python -m unittest discover -s tests`).
+- Full test suite: **391 passed** (`python -m unittest discover -s tests`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
 - All 1,163 synthetic attack packets and 832 benign packets were replayed; alert persistence checks reported no dropped alerts or shutdown timeout.
 - `git diff --check` was clean at inspection.
@@ -1152,3 +1152,9 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - `BRUTE_FORCE` alerts after repeated initial SYNs to authentication-service ports, but does not observe credentials or authentication outcomes. Its prior high severity could overstate a rate-based connection signal.
 - Version 1.7 retains the auth-port filter, initial-SYN predicate, retransmission deduplication, threshold, window, cooldown, and trigger. Alerts are now medium severity with explicit SYN-rate and missing-auth-outcome context; detection coverage is unchanged.
 - Tests verify the threshold signal and calibrated fields while preserving port, SYN-ACK, retransmission, and cooldown behavior. Focused brute-force tests: **19 passed**; full suite: **389 passed** in 47.86s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
+## Follow-up: 2026-11-02 TCP stealth-scan alert storm control
+
+- A reproduction with a threshold of three and nine distinct FIN/NULL/Xmas probes from one source to one target emitted three alerts in 0.8 seconds. `TCP_STEALTH_SCAN` cleared its history after each threshold and had no cooldown.
+- Version 1.4 keeps the same probe classifier and threshold, but tracks bounded per-key fired timestamps and suppresses repeat alerts for one scan window. A later scan can alert after that window; cooldown state is bounded and pruned with stale records.
+- Regressions verify one alert for a continuous nine-port scan, a later alert after cooldown, and bounded/prunable fired state. Focused stealth-scan tests: **10 passed**; full suite: **391 passed** in 45.44s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.

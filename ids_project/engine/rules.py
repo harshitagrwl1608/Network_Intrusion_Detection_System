@@ -713,7 +713,7 @@ class TcpStealthScanRule:
     """Detect vertical FIN, NULL, and Xmas TCP probes."""
 
     name = "TCP_STEALTH_SCAN"
-    rule_version = "1.3"
+    rule_version = "1.4"
     _FIN, _SYN, _RST, _PSH, _ACK, _URG, _ECE, _CWR = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80
     _XMAS_FLAGS = _FIN | _PSH | _URG
     _DISALLOWED_FLAGS = _SYN | _RST | _ACK | _ECE | _CWR
@@ -727,6 +727,8 @@ class TcpStealthScanRule:
             max_states, 10_000, "TCP_STEALTH_SCAN_MAX_STATES")
         self._lock = threading.RLock()
         self._probes: dict[tuple, list[tuple[float, int, str]]] = {}
+        self._fired: OrderedDict[tuple, float] = OrderedDict()
+        self._alert_cooldown = float(self.window)
 
     @classmethod
     def _probe_type(cls, flags: int) -> str | None:
@@ -779,6 +781,19 @@ class TcpStealthScanRule:
             if distinct_ports < self.threshold:
                 return None
 
+            last_fired = self._fired.get(key)
+            if last_fired is not None and now - last_fired < self._alert_cooldown:
+                # A long scan is one continuing event; don't emit an alert for
+                # every threshold-sized batch from the same source/target.
+                self._probes.pop(key, None)
+                self._fired.move_to_end(key)
+                return None
+
+            if key not in self._fired and len(self._fired) >= self.max_states:
+                self._fired.popitem(last=False)
+            self._fired[key] = now
+            self._fired.move_to_end(key)
+
             kinds = sorted({kind for _, _, kind in active})
             window_start = min(ts for ts, _, _ in active)
             self._probes.pop(key, None)
@@ -818,6 +833,9 @@ class TcpStealthScanRule:
                     self._probes[key] = active
                 else:
                     del self._probes[key]
+            for key, fired_at in list(self._fired.items()):
+                if fired_at <= cutoff or fired_at > now:
+                    del self._fired[key]
 
 
 # =============================================================================
