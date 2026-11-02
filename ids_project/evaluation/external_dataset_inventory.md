@@ -34,8 +34,8 @@ names.
 | `BLOCKLIST` | IP addresses and configured indicators | 0 | No matching indicator alert |
 | `TCP_FLAG_ANOMALY` | TCP flags and packet direction | 0 | Parser and checksum diagnostics are not flag-anomaly equivalents |
 | `PORT_SCAN` | TCP SYNs, ports, hosts and timestamps | 0 | No NetGuard alert to compare |
-| `UDP_SCAN` | UDP destinations and timestamps | 184 | No comparable UDP scan behavior alert in the loaded ruleset |
-| `UDP_FLOOD` | UDP packet counts by destination and time | 79 | No comparable UDP flood behavior alert in the loaded ruleset |
+| `UDP_SCAN` | UDP destinations and timestamps | 184 | No behavior alert; all 184 alert windows independently align with at least the reported DNS destination cardinality in EVE |
+| `UDP_FLOOD` | UDP packet counts by destination and time | 79 | No behavior alert; EVE records 50–52 DNS requests per alert window, with 25–47 distinct query identities |
 | `TCP_STEALTH_SCAN` | TCP flags, destinations and timestamps | 0 | No NetGuard alert to compare |
 | `SYN_FLOOD` | TCP SYN rates by destination | 0 | No NetGuard alert to compare |
 | `DISTRIBUTED_SYN_FLOOD` | TCP SYN rates grouped across sources | 0 | No NetGuard alert to compare |
@@ -43,8 +43,8 @@ names.
 | `ICMP_FLOOD` | ICMP packet rates | 0 | No NetGuard alert to compare |
 | `ARP_SPOOF` | ARP sender IP/MAC pairs and time | 0 | No NetGuard alert to compare |
 | `PAYLOAD_HIT` | Application payload and bounded TCP reassembly | 20 | Suricata's emitted parser/integrity alerts do not match these content signatures |
-| `DNS_ANOMALY` | DNS labels, queries and timestamps | 81 | Suricata recorded DNS telemetry; no corresponding DNS frequency/DGA behavior alert fired |
-| `BRUTE_FORCE` | TCP attempts to configured authentication ports | 2 | No corresponding brute-force alert; packet telemetry cannot establish credential submission or outcome |
+| `DNS_ANOMALY` | DNS labels, queries and timestamps | 81 | No behavior alert; EVE contains at least the reported 20 unique requests for all 76 frequency windows and the queried name for all 5 DGA alerts |
+| `BRUTE_FORCE` | TCP attempts to configured authentication ports | 2 | No behavior alert; packet review found 20 unique initial SYNs per alert window and no FTP authentication payload or SYN-ACK |
 | `SLOW_PORT_SCAN` | TCP SYNs, target cardinality and 120-second windows | 98 | 199 excessive-SYN alerts; 11 alerts shared source/destination/port with NetGuard scans (4 distinct endpoint triples), and 1 pair was within 120 seconds. This is partial behavioral overlap, not ground truth. |
 | `DATA_EXFIL` | Directional byte volume and time | 0 | No NetGuard alert to compare |
 | `TLS_ANOMALY` | TLS ClientHello and SNI fields | 0 | No NetGuard alert to compare |
@@ -52,7 +52,9 @@ names.
 | `TCP_ZERO_WINDOW` | TCP window advertisements by flow and time | 0 | No NetGuard alert to compare |
 
 Suricata also recorded 84,570 DNS events and 17,357 flow events, which confirm
-protocol telemetry was present for DNS and flow-based review. The 2,632
+protocol telemetry was present for DNS and flow-based review. Rule-specific
+event and packet checks are summarized below; they compare only behaviors
+covered by the 19 existing NetGuard rules. The 2,632
 invalid-checksum alerts and other parser/integrity alerts are not treated as
 missed NetGuard behavioral detections.
 
@@ -117,10 +119,31 @@ Suricata was used as a targeted cross-check, not as a wider alert-count target.
 Of its 199 excessive-SYN alerts, 11 shared source, destination and destination
 port with NetGuard `SLOW_PORT_SCAN` alerts (4 distinct endpoint triples); 1
 alert pair fell within the NetGuard 120-second window. This indicates partial
-behavioral overlap, not ground truth. Suricata recorded 84,570 DNS events and
-17,357 flow events, but emitted no corresponding DNS-frequency/DGA,
-UDP-scan/flood, brute-force, or payload-content behavior alert in this
-ruleset. Its checksum and parser alerts are not counted as NetGuard misses.
+behavioral overlap, not ground truth.
+
+For the 76 `DNS_FREQ` alerts, each NetGuard window had at least 20 distinct
+Suricata DNS request identities matching the source and parent domain (20–23
+identities per window). Each of the 5 `DNS_DGA` alerts had its exact queried
+name in Suricata DNS requests. For all 184 `UDP_SCAN` windows, the Suricata DNS
+request records from the same source and time window covered at least the
+distinct destination count reported by NetGuard (15–34 destinations, versus
+15–30 reported). For all 79 `UDP_FLOOD` windows, Suricata recorded 50–52 DNS
+requests, while deduplication by source, resolver, DNS transaction ID, type
+and name yielded 25–47 distinct query identities (median 29). These checks
+support that the rules fired on DNS activity in this capture; they do not
+establish whether the activity was malicious or benign.
+
+Packet review of both `BRUTE_FORCE` windows found 20 distinct initial SYN
+attempts, no SYN-ACKs, and no FTP `USER`/`PASS` payload. The rule already
+describes this as a SYN-rate signal because authentication outcome is not
+observed. Repeated UDP datagrams contribute to packet rate by design, so the
+lower count of distinct DNS query identities in some `UDP_FLOOD` windows is
+not sufficient evidence to suppress repeated packets or reduce coverage.
+Suricata emitted no corresponding DNS-frequency/DGA, UDP-scan/flood,
+brute-force, or payload-content behavior alert in this ruleset. Its checksum
+and parser alerts are not counted as NetGuard misses. The botnet-only sample
+has no benign companion, so these alignments do not provide false-positive
+or precision estimates.
 
 The repository's generic `compare.py` matcher reports zero exact matches for
 this run. It does not map the packaged Suricata excessive-SYN signature to the
