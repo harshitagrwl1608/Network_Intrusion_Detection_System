@@ -41,6 +41,18 @@ class TestUdpFloodRule(unittest.TestCase):
         self.assertEqual(alert["severity"], "high")
         self.assertEqual(alert["protocol"], "UDP")
 
+    def test_multicast_and_limited_broadcast_do_not_count_as_host_floods(self):
+        rule = UdpFloodRule(threshold=3, window=5)
+        destinations = ("224.0.0.251", "239.1.2.3", "ff02::fb", "255.255.255.255")
+        for dst in destinations:
+            with self.subTest(destination=dst):
+                for i in range(3):
+                    alert = rule.check(self._pkt(
+                        "192.168.1.10", dst, src_port=53000, dst_port=5353,
+                        ts=100.0 + i * 0.1))
+                    self.assertIsNone(alert)
+        self.assertEqual(rule._history, {})
+
     def test_sub_threshold_traffic_does_not_alert(self):
         alert = None
         for i in range(25):  # 25 packets in 5s (threshold is 50)

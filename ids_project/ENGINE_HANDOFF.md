@@ -1067,3 +1067,10 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Version 1.14 keeps a bounded 512-byte prefix for at most 5,000 directional TCP flows, joins only sequence-contiguous payloads within the configured window and connection generation, and prunes stale entries. It skips reassembly when the payload sample is truncated, preventing incorrect sequence advancement. The existing signature set, direct packet matching, direction/host exemptions, and volumetric threshold are unchanged.
 - Regressions cover the split ZIP header and a sequence gap that must not be joined.
 - Verification: focused DATA_EXFIL tests **38 passed**; full suite **376 tests passed** in 47.13s. Final synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
+## Follow-up: 2026-11-02 multicast destinations in UDP_FLOOD
+
+- `UDP_FLOOD` aggregated traffic to a destination group as if it were a single host. Three ordinary mDNS packets to `224.0.0.251` reproduced a targeted flood alert.
+- Version 1.3 now excludes IPv4/IPv6 multicast and the limited IPv4 broadcast address before maintaining flow state. Unicast destinations, source-port exemptions, thresholds, and cooldown behavior remain unchanged. Directed subnet broadcasts are not excluded because the rule has no subnet-mask context to classify them reliably.
+- Regression coverage includes common IPv4 multicast, IPv6 multicast, and limited broadcast destinations and verifies no flow history is retained; the existing unicast flood test remains active.
+- Verification: focused UDP_FLOOD tests **13 passed**; full suite **377 tests passed** in 46.86s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.

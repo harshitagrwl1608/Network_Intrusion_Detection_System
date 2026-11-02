@@ -572,7 +572,7 @@ class UdpFloodRule:
     """
 
     name = "UDP_FLOOD"
-    rule_version = "1.2"
+    rule_version = "1.3"
     ALERT_COOLDOWN_S: float = 60.0
     _EXEMPT_SRC_PORTS: set[int] = {53, 67, 68, 123}
 
@@ -614,6 +614,16 @@ class UdpFloodRule:
         src = record.get("src_ip", "")
         dst = record.get("dst_ip", "")
         if not src or not dst or _is_trusted(src):
+            return None
+        # This rule detects floods directed at a host. Discovery and service
+        # traffic to multicast groups (and limited broadcast) is not targeted
+        # host traffic and can otherwise accumulate into false flood alerts.
+        try:
+            dst_addr = ipaddress.ip_address(dst)
+        except (TypeError, ValueError):
+            return None
+        if dst_addr.is_multicast or (
+                dst_addr.version == 4 and int(dst_addr) == 0xFFFFFFFF):
             return None
 
         src_port = record.get("src_port")
