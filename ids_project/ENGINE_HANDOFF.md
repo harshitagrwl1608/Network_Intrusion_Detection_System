@@ -1032,3 +1032,10 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Version 1.13 parses the destination IP and excludes any multicast address plus the limited IPv4 broadcast address. Invalid destination address strings are ignored as unclassifiable. Private-to-public outbound flow thresholds and signature checks remain unchanged.
 - Regressions cover IPv4 multicast groups in both 224/8 and 239/8, IPv6 multicast, and limited broadcast; existing public-destination volume and signature cases remain covered.
 - Verification: focused DataExfil tests **36 passed**; full suite **365 tests passed** in 48.80s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.
+
+## Follow-up: 2026-11-02 SYN_FLOOD RST setting validation
+
+- `SYN_FLOOD` used `max(1, int(rst_threshold))`, so a zero RST threshold became 1 and one RST could trigger a flood alert. Several RST windows and state-cap arguments also raised on malformed values or silently clamped invalid values to 1.
+- Version 1.7 now applies the existing documented defaults to invalid/nonpositive capacities, thresholds, and windows. The response grace period must be finite and non-negative; zero remains an intentional opt-out. Positive threshold 1 remains valid for explicit single-RST configurations.
+- Regressions cover invalid settings and no alert from one RST under fallback defaults, plus valid threshold-one and zero-grace behavior.
+- Verification: focused RST tests **12 passed**; full suite **367 tests passed** in 48.42s. Synthetic replay processed **1,163 attack and 832 benign packets**, detected **38/38 labelled scenarios**, and produced zero unmatched attack alerts, zero benign alerts, zero dropped alerts, and no shutdown timeout. Fixture-only results.

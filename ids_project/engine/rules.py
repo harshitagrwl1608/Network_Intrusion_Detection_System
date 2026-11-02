@@ -950,7 +950,7 @@ class SynFloodRule:
     """Detect SYN/RST floods while excluding normal closed-port RST replies."""
 
     name = "SYN_FLOOD"
-    rule_version = "1.6"
+    rule_version = "1.7"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 100, window: int = 10,
@@ -961,13 +961,19 @@ class SynFloodRule:
                  max_syn_contexts: int = 32768):
         self.threshold = _positive_setting(threshold, 100, "SYN_FLOOD_THRESHOLD")
         self.window = _positive_setting(window, 10, "TIME_WINDOW")
-        self.max_flows = max(1, int(max_flows))
+        self.max_flows = _positive_setting(
+            max_flows, 8192, "SYN_FLOOD_MAX_FLOWS")
         # RST flood parameters: RSTs from one src to one dst (any port)
-        self.rst_threshold = max(1, int(rst_threshold))
-        self.rst_window = max(1, int(rst_window))
-        self.max_rst_flows = max(1, int(max_rst_flows))
-        self.rst_response_grace = max(0.0, float(rst_response_grace))
-        self.max_syn_contexts = max(1, int(max_syn_contexts))
+        self.rst_threshold = _positive_setting(
+            rst_threshold, 100, "RST_FLOOD_THRESHOLD")
+        self.rst_window = _positive_setting(
+            rst_window, 10, "RST_FLOOD_WINDOW")
+        self.max_rst_flows = _positive_setting(
+            max_rst_flows, 4096, "SYN_FLOOD_MAX_RST_FLOWS")
+        self.rst_response_grace = _nonnegative_float_setting(
+            rst_response_grace, 5.0, "RST_RESPONSE_GRACE_SECONDS")
+        self.max_syn_contexts = _positive_setting(
+            max_syn_contexts, 32768, "SYN_FLOOD_MAX_SYN_CONTEXTS")
         self._lock = threading.RLock()
         # (src_ip, dst_ip, dst_port) → list of SYN timestamps
         self._history: dict[tuple, list] = defaultdict(list)

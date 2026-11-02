@@ -169,6 +169,31 @@ class TestRstFloodDetection(unittest.TestCase):
             "syn_flag": False,
         }
 
+    def test_invalid_rst_settings_use_defaults_and_do_not_turn_one_rst_into_a_flood(self):
+        rule = SynFloodRule(
+            threshold=100, max_flows=0, rst_threshold=0, rst_window="invalid",
+            max_rst_flows="invalid", rst_response_grace=float("nan"),
+            max_syn_contexts=0,
+        )
+        self.assertEqual(rule.max_flows, 8192)
+        self.assertEqual(rule.rst_threshold, 100)
+        self.assertEqual(rule.rst_window, 10)
+        self.assertEqual(rule.max_rst_flows, 4096)
+        self.assertEqual(rule.rst_response_grace, 5.0)
+        self.assertEqual(rule.max_syn_contexts, 32768)
+        self.assertIsNone(rule.check(self._rst(
+            "192.0.2.31", "198.51.100.31", timestamp=100.0)))
+
+    def test_valid_rst_threshold_one_and_zero_grace_remain_supported(self):
+        rule = SynFloodRule(threshold=1000, rst_threshold=1,
+                            rst_window=5, rst_response_grace=0)
+        self.assertEqual(rule.rst_threshold, 1)
+        self.assertEqual(rule.rst_response_grace, 0.0)
+        alert = rule.check(self._rst(
+            "192.0.2.32", "198.51.100.32", timestamp=100.0))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["flood_type"], "RST")
+
     def test_rst_flood_fires_at_threshold(self):
         rule = SynFloodRule(rst_threshold=10, rst_window=5)
         base = time.time()
