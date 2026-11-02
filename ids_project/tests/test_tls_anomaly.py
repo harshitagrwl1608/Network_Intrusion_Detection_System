@@ -96,6 +96,7 @@ class TestTlsAnomalyRule(unittest.TestCase):
         alert = self.rule.check(self._pkt(payload=payload, ts=100.0))
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "TLS_ANOMALY")
+        self.assertEqual(alert["rule_version"], "1.6")
         self.assertEqual(alert["severity"], "high")
         self.assertEqual(alert["confidence"], "high")
         self.assertEqual(alert["evidence"]["anomaly_type"], "DIRECT_IP_SNI")
@@ -108,6 +109,9 @@ class TestTlsAnomalyRule(unittest.TestCase):
             alert = self.rule.check(self._pkt(dst=f"203.0.113.{100 + i}", payload=payload, ts=100.0))
             self.assertIsNotNone(alert, f"Expected alert for suspicious SNI {domain}")
             self.assertEqual(alert["rule_name"], "TLS_ANOMALY")
+            self.assertEqual(alert["rule_version"], "1.6")
+            self.assertEqual(alert["severity"], "medium")
+            self.assertEqual(alert["confidence"], "heuristic")
             self.assertEqual(alert["evidence"]["anomaly_type"], "SUSPICIOUS_TUNNEL_SNI")
             self.assertEqual(alert["evidence"]["sni"], domain)
 

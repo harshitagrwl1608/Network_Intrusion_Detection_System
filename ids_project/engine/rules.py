@@ -4335,7 +4335,7 @@ class TlsAnomalyRule:
     Port expansion covers: XMPP-SSL (5223), MQTT-TLS (8083), alternative HTTPS C2 (4443, 9443).
     """
     name = "TLS_ANOMALY"
-    rule_version = "1.5"
+    rule_version = "1.6"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
     MAX_CLIENT_HELLO_BYTES = 16_389
@@ -4532,7 +4532,7 @@ class TlsAnomalyRule:
             "src_port": record.get("src_port"),
             "dst_port": dst_port,
             "protocol": "TCP",
-            "severity": "high",
+            "severity": "high" if anomaly_type == "DIRECT_IP_SNI" else "medium",
             "confidence": "high" if anomaly_type == "DIRECT_IP_SNI" else "heuristic",
             "detail": detail,
             "evidence": {
