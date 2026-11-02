@@ -28,6 +28,14 @@ class TestPayloadRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertIn("SQL_INJECTION", [h["signature"] for h in alert["evidence"]["hits"]])
 
+    def test_malformed_sequence_skips_reassembly_but_still_inspects_packet(self):
+        record = self.packet(b"GET /?q=UNION SELECT password", 1000)
+        record["tcp_payload_seq"] = "malformed"
+        alert = self.rule.check(record)
+        self.assertIsNotNone(alert)
+        self.assertIn("SQL_INJECTION", [h["signature"] for h in alert["evidence"]["hits"]])
+        self.assertEqual(self.rule._streams, {})
+
     def test_normal_cdata_xml_is_not_misclassified_as_xxe(self):
         alert = self.rule.check(self.packet(
             b"POST /soap HTTP/1.1\\r\\n\\r\\n<![CDATA[ordinary content]]>", 7000))
@@ -134,7 +142,7 @@ class TestPayloadRule(unittest.TestCase):
         suffix.update(tcp_flags=0x18, tcp_seq=1018)
         alert = self.rule.check(suffix)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.13")
+        self.assertEqual(alert["rule_version"], "1.14")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):

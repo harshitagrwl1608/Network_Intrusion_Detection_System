@@ -934,3 +934,10 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - Version 1.3 keeps bounded directional prefix state (at most 2,064 bytes per prefix, 30-second expiry, and `max_states` keys). It joins only sequence-adjacent TCP payloads, suppresses an exact retransmission of an incomplete segment, drops mismatched continuations, and ignores late segments without replacing newer state. It preserves the existing method, port, repeat-count, and cooldown conditions.
 - S38 now splits its first request line across two TCP segments and sends a second request on another client port. The rule still emits one matching service alert, proving reassembly contributes exactly one request before the second request reaches the threshold.
 - Verification: focused cleartext tests **10 passed**; full suite **337 passed, 8 subtests passed** in 51.77s. Synthetic replay: **38/38 scenarios**, all 19 rule families covered, zero unmatched attack alerts, zero benign alerts, zero dropped alerts, no shutdown timeout; 1,162 attack and 832 benign packets processed. These remain fixture-only results.
+
+## Follow-up: 2026-11-02 malformed TCP sequence metadata in PAYLOAD_HIT
+
+- `PayloadRule._update_stream` converted `tcp_payload_seq` without handling malformed input. Reproduction with a valid SQL injection payload and `tcp_payload_seq="malformed"` raised `ValueError` before packet-level matching, losing that detection.
+- Version 1.14 now skips TCP stream reconstruction when the payload sequence number is invalid. The independent packet sample continues through the existing signature inspection, preserving detection for the current packet while leaving stream state untouched.
+- Added a regression test that verifies the SQL injection signature alerts despite malformed sequence metadata and that no stream state is created.
+- Verification: focused payload tests **38 passed**; full suite **338 tests passed** in 46.60s. Synthetic replay: **38/38 scenarios**, all 19 rule families covered, zero unmatched attack alerts, zero benign alerts, zero dropped alerts, no shutdown timeout; 1,162 attack and 832 benign packets processed. These are fixture-only results.

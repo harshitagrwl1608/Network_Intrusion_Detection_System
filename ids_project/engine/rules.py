@@ -2073,7 +2073,7 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.13"
+    rule_version = "1.14"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048,
@@ -2117,7 +2117,12 @@ class PayloadRule:
             return None
         now = float(record.get("event_timestamp", record.get("timestamp", time.time())))
         key = (src, sport, dst, dport)
-        seq = int(seq) & 0xFFFFFFFF
+        try:
+            seq = int(seq) & 0xFFFFFFFF
+        except (TypeError, ValueError, OverflowError):
+            # Stream reconstruction is unavailable without a valid sequence
+            # number; check() still inspects this packet's payload directly.
+            return None
         try:
             flags = int(record.get("tcp_flags") or 0)
         except (TypeError, ValueError, OverflowError):
