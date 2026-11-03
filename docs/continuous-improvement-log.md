@@ -207,7 +207,7 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
   - `pytest ids_project/tests`: 465 passed in 53.88s.
   - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
 - **Test Results**: All 465 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly.
-- **Commit Hash**: Pending commit for Cycle 5.
+- **Commit Hash**: `963ab3a` (pushed to `origin/antigravity/overnight-work`)
 - **Remaining Issues**:
   - Inspect `BruteForceRule` and `SlowPortScanRule` for state bounding, auth port coverage, RST teardown handling, and time-window drift.
   - Evaluate CTU-13 and external PCAP captures against hardened rules.
@@ -215,8 +215,48 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
 
 ---
 
+## Cycle 6 / 10
+
+- **Date/Time**: 2026-11-04 00:21:00 UTC+5:30
+- **Files Inspected**:
+  - `ids_project/engine/rules.py`
+  - `ids_project/tests/test_new_rules_cycle8.py`
+  - `ids_project/tests/test_finite_rule_timestamps.py`
+  - `docs/autonomy/dataset-registry.md`
+  - `docs/autonomy/research-sources.md`
+- **Weakness Discovered**:
+  1. `SlowPortScanRule` used raw Python `dict` structures for `_vert` and `_horiz` with $O(N)$ key extraction on LRU eviction, and lacked `move_to_end` recency tracking under continuous scanning.
+  2. `SlowPortScanRule` and `BruteForceRule` did not validate source port bounds (`1 <= src_port <= 65535`), risking invalid or out-of-range port entries in alert evidence and SYN identity tracking.
+  3. `BruteForceRule` did not clean up orphaned entries in `_saturated_history` when keys expired from `_history`.
+  4. External dataset discovery lacked full research profiles and cross-rule coverage for large-scale enterprise (CIC-IDS2017/2018), malware (Brad Duncan MTA), IoT (IoT-23), CCDC, and Wireshark traces.
+- **Changes Implemented**:
+  1. Updated `SlowPortScanRule` (bumped to v1.11):
+     - Converted `_vert` and `_horiz` to `OrderedDict` with deterministic $O(1)$ LRU eviction via `popitem(last=False)`.
+     - Added `move_to_end` recency maintenance.
+     - Added port validation on `src_port` (`1 <= src_port <= 65535`).
+  2. Updated `BruteForceRule` (bumped to v1.12):
+     - Added `_saturated_history.intersection_update(self._history)` in `prune_stale` to guarantee zero orphaned keys.
+     - Hardened `src_port` validation and `syn_identity` construction.
+  3. Integrated independent Dataset Researcher findings:
+     - Populated `docs/autonomy/dataset-registry.md` with complete 19-rule cross-coverage matrix.
+     - Documented official sources for CIC-IDS2017/2018, Malware-Traffic-Analysis, Aposemat IoT-23, MACCDC, and Wireshark traces in `docs/autonomy/research-sources.md`.
+  4. Added regression tests in `test_new_rules_cycle8.py`:
+     - `test_brute_force_prune_stale_clears_orphaned_saturated_keys`
+     - `test_slow_port_scan_ordered_dict_lru_eviction`
+- **Tests Executed**:
+  - `pytest ids_project/tests`: 467 passed in 51.27s.
+  - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
+- **Test Results**: All 467 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly.
+- **Commit Hash**: Pending commit for Cycle 6.
+- **Remaining Issues**:
+  - Inspect `ids_project/evaluation/replay.py` and external dataset sample handling for streaming memory safety and packet offset accounting.
+  - Inspect `ids_project/evaluation/compare.py` for Suricata EVE JSON parser edge cases, missing alert keys, and IPv6 address canonicalization.
+- **Next Cycle's Objective**: Inspect `ids_project/evaluation/replay.py` and `ids_project/evaluation/run_eval.py` for memory efficiency, packet offset logging, and external PCAP handling.
+
+---
+
 ## Next Actions Summary
 
-1. Commit Cycle 5 verified improvements to `antigravity/overnight-work`.
+1. Commit Cycle 6 verified improvements to `antigravity/overnight-work`.
 2. Push to `origin/antigravity/overnight-work`.
-3. Proceed immediately to Cycle 6: BruteForceRule and SlowPortScanRule state bounding, auth port coverage, RST teardown handling, and time-window drift.
+3. Proceed immediately to Cycle 7: Replay and evaluation runner enhancements for memory efficiency, packet offset logging, and external PCAP handling.

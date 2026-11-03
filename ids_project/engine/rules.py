@@ -3314,7 +3314,7 @@ class BruteForceRule:
     """
 
     name = "BRUTE_FORCE"
-    rule_version = "1.11"
+    rule_version = "1.12"
 
     # Per-(src, dst, port) cooldown after firing. Prevents re-alerting for the
     # same ongoing brute-force burst; renewed bursts after the cooldown will fire.
@@ -3375,6 +3375,7 @@ class BruteForceRule:
                 else:
                     del self._history[key]
                     self._saturated_history.discard(key)
+            self._saturated_history.intersection_update(self._history)
             cooldown_cutoff = now - self.ALERT_COOLDOWN_S
             for key, last_alert in list(self._cooldown.items()):
                 if last_alert <= cooldown_cutoff or last_alert > now:
@@ -3403,6 +3404,8 @@ class BruteForceRule:
             return None
 
         src_port = _normalize_port(record.get("src_port"))
+        if src_port is not None and not (1 <= src_port <= 65535):
+            src_port = None
         now = _finite_record_timestamp(record)
         if now is None:
             return None
@@ -3538,7 +3541,7 @@ class SlowPortScanRule:
     """
 
     name = "SLOW_PORT_SCAN"
-    rule_version = "1.10"
+    rule_version = "1.11"
 
     def __init__(self, threshold: int = 30, window: int = 120,
                  max_states: int = 5000, cooldown: float | None = None):
@@ -3553,9 +3556,9 @@ class SlowPortScanRule:
             cooldown_default, "SLOW_PORT_SCAN_COOLDOWN")
         self._lock = threading.RLock()
         # Vertical scan: (src_ip, dst_ip) → [(ts, dst_port)]
-        self._vert: dict[tuple, list] = {}
+        self._vert: OrderedDict[tuple, list] = OrderedDict()
         # Horizontal scan: (src_ip, dst_port) → [(ts, dst_ip)]
-        self._horiz: dict[tuple, list] = {}
+        self._horiz: OrderedDict[tuple, list] = OrderedDict()
         # Rate-limit alerts per scanning source and scan direction. The same
         # campaign can cross hundreds of destination keys in one capture.
         self._alert_cooldown: OrderedDict[tuple[str, str], float] = OrderedDict()
@@ -3602,6 +3605,8 @@ class SlowPortScanRule:
         if not dst_ip:
             return None
         src_port = _normalize_port(record.get("src_port"))
+        if src_port is not None and not (1 <= src_port <= 65535):
+            src_port = None
         dst_port = _normalize_port(record.get("dst_port"))
         if dst_port is None or not 1 <= dst_port <= 65535:
             return None
@@ -3620,9 +3625,9 @@ class SlowPortScanRule:
 
             # Capacity eviction
             if vkey not in self._vert and len(self._vert) >= self.max_states:
-                self._vert.pop(next(iter(self._vert)))
+                self._vert.popitem(last=False)
             if hkey not in self._horiz and len(self._horiz) >= self.max_states:
-                self._horiz.pop(next(iter(self._horiz)))
+                self._horiz.popitem(last=False)
 
             # Vertical history update (deduplicate per port)
             vertical = [(t, p) for t, p in self._vert.get(vkey, [])
@@ -3630,6 +3635,7 @@ class SlowPortScanRule:
             vertical.append((now, dst_port))
             self._vert.pop(vkey, None)
             self._vert[vkey] = vertical
+            self._vert.move_to_end(vkey)
             distinct_ports = len(vertical)
 
             # Horizontal history update (deduplicate per host)
@@ -3638,6 +3644,7 @@ class SlowPortScanRule:
             horizontal.append((now, dst_ip))
             self._horiz.pop(hkey, None)
             self._horiz[hkey] = horizontal
+            self._horiz.move_to_end(hkey)
             distinct_hosts = len(horizontal)
 
             vert_fired  = distinct_ports >= self.threshold

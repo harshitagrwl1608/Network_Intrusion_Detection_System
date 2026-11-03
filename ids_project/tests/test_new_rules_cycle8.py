@@ -667,7 +667,7 @@ class TestBruteForceRule(unittest.TestCase):
                 break
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "BRUTE_FORCE")
-        self.assertEqual(alert["rule_version"], "1.11")
+        self.assertEqual(alert["rule_version"], "1.12")
         self.assertEqual(alert["severity"], "medium")
         self.assertEqual(alert["confidence"], "heuristic")
         self.assertEqual(alert["evidence"]["classification"], "AUTH_SERVICE_SYN_BURST")
@@ -694,7 +694,7 @@ class TestBruteForceRule(unittest.TestCase):
         first["tcp_seq"] = 100
         alert = rule.check(second)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.11")
+        self.assertEqual(alert["rule_version"], "1.12")
         self.assertEqual(alert["evidence"]["attempt_count"], 2)
 
     def test_syn_ack_from_auth_service_port_is_not_counted(self):
@@ -774,7 +774,7 @@ class TestBruteForceRule(unittest.TestCase):
                         "10.0.0.10", "10.0.0.20", dst_port=port,
                         timestamp=base + i * 0.1))
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.11")
+                self.assertEqual(alert["rule_version"], "1.12")
                 self.assertEqual(alert["evidence"]["auth_port"], port)
 
     def test_below_threshold_no_alert(self):
@@ -938,7 +938,7 @@ class TestSlowPortScanRule(unittest.TestCase):
             record["src_port"] = 80
             alert = rule.check(record) or alert
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.10")
+        self.assertEqual(alert["rule_version"], "1.11")
         self.assertEqual(alert["evidence"]["distinct_ports"], 3)
 
         reply = self._syn(
@@ -1073,6 +1073,37 @@ class TestSlowPortScanRule(unittest.TestCase):
         finally:
             rm.TRUSTED_HOSTS.clear()
             rm.TRUSTED_HOSTS.update(original)
+
+    def test_brute_force_prune_stale_clears_orphaned_saturated_keys(self):
+        rule = BruteForceRule(threshold=3, window=60)
+        key_active = ("10.0.0.1", "10.0.0.2", 22)
+        key_expired = ("10.0.0.3", "10.0.0.4", 22)
+        rule._history[key_active] = [90.0, 95.0, 100.0]
+        rule._history[key_expired] = [10.0, 11.0, 12.0]  # will expire at now=100 (cutoff=40)
+        rule._saturated_history.add(key_active)
+        rule._saturated_history.add(key_expired)
+
+        rule.prune_stale(now=100.0)
+
+        self.assertIn(key_active, rule._history)
+        self.assertNotIn(key_expired, rule._history)
+        self.assertIn(key_active, rule._saturated_history)
+        self.assertNotIn(key_expired, rule._saturated_history)
+
+    def test_slow_port_scan_ordered_dict_lru_eviction(self):
+        rule = SlowPortScanRule(threshold=5, window=120, max_states=2)
+        # Populate 2 vertical keys
+        rule.check(self._syn("10.0.0.1", "10.0.0.10", dst_port=1001, timestamp=100.0))
+        rule.check(self._syn("10.0.0.2", "10.0.0.10", dst_port=1002, timestamp=101.0))
+        # Refresh first key so second key becomes oldest
+        rule.check(self._syn("10.0.0.1", "10.0.0.10", dst_port=1003, timestamp=102.0))
+        # Insert third key - should evict second key ("10.0.0.2", "10.0.0.10")
+        rule.check(self._syn("10.0.0.3", "10.0.0.10", dst_port=1004, timestamp=103.0))
+
+        with rule._lock:
+            self.assertIn(("10.0.0.1", "10.0.0.10"), rule._vert)
+            self.assertNotIn(("10.0.0.2", "10.0.0.10"), rule._vert)
+            self.assertIn(("10.0.0.3", "10.0.0.10"), rule._vert)
 
 
 if __name__ == "__main__":

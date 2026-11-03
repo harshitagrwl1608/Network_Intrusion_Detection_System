@@ -32,3 +32,19 @@ This document tracks all external technical research, RFC specifications, threat
   - T1071.004: Application Layer Protocol: DNS (DGA)
 - **Stratosphere IPS Research (Czech Technical University)**:
   - CTU-13 Dataset analysis and botnet behavior characteristics (Neris, Donbot, Rbot).
+
+## 4. Empirical Datasets & Packet Telemetry Repositories
+- **Canadian Institute for Cybersecurity (CIC)**:
+  - *CIC-IDS2017 & CSE-CIC-IDS2018*: Sharafaldin, I., Lashkari, A. H., & Ghorbani, A. A. "Toward Generating a New Intrusion Detection Dataset and Intrusion Traffic Characterization", ICISSP 2018.
+  - Source: `https://www.unb.ca/cic/datasets/ids-2017.html` and AWS Open Data `s3://cse-cic-ids2018/`.
+- **Malware-Traffic-Analysis.net**:
+  - Duncan, B. Malware Traffic Analysis exercises, PCAPs, and Suricata EVE threat intelligence feeds (2013–2024).
+  - Source: `https://www.malware-traffic-analysis.net/`.
+- **Stratosphere Laboratory (Czech Technical University in Prague)**:
+  - *Aposemat IoT-23*: Garcia, S., Parmisano, A., & Erquiaga, M. J. "IoT-23: A labeled dataset with malicious and benign IoT network traffic", Zenodo DOI: 10.5281/zenodo.4743746, CC BY 4.0.
+  - Source: `https://www.stratosphereips.org/datasets-iot23`.
+- **Collegiate Cyber Defense Competition (CCDC) Repositories**:
+  - Netresec AB MACCDC PCAP Repository (`https://www.netresec.com/?page=MACCDC`).
+  - WRCCDC Multi-Year Traffic Archive (`https://archive.wrccdc.org/pcaps/`).
+- **Wireshark Foundation Protocol Sample Captures**:
+  - Wireshark GitLab Wiki SampleCaptures (`https://gitlab.com/wireshark/wireshark/-/wikis/SampleCaptures`) and developer test suite (`test/captures`).

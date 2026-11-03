@@ -51,12 +51,12 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "type": "IP", "protocol": "ICMP", "src_ip": "198.51.100.15",
                 "dst_ip": "203.0.113.15", "icmp_type": 8, "icmp_code": 0,
             }, ("_history", "_cooldown")),
-            ("BRUTE_FORCE", "1.11", lambda: BruteForceRule(threshold=1), {
+            ("BRUTE_FORCE", "1.12", lambda: BruteForceRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.16",
                 "dst_ip": "203.0.113.16", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_history", "_cooldown", "_seen_syns")),
-            ("SLOW_PORT_SCAN", "1.10", lambda: SlowPortScanRule(threshold=1), {
+            ("SLOW_PORT_SCAN", "1.11", lambda: SlowPortScanRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.17",
                 "dst_ip": "203.0.113.17", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,

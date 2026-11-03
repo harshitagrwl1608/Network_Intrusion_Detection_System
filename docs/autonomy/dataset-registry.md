@@ -26,16 +26,46 @@ This registry tracks all discovered, ingested, evaluated, and candidate security
 
 | Candidate Dataset | Publisher | Repository / Source URL | Telemetry Format | Evaluation Suitability | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **CIC-IDS-2017 / PCAP subset** | Canadian Institute for Cybersecurity (UNB) | `https://www.unb.ca/cic/datasets/ids-2017.html` | PCAP / Flow CSV | Multi-day full packet captures including DoS, Heartbleed, PortScan, Infiltration, Web Attacks | Candidate for high-volume DoS / Web attack validation |
-| **Wireshark Sample Captures** | Wireshark Foundation | `https://wiki.wireshark.org/SampleCaptures` | PCAP | Specific protocol captures: ARP storms, TCP zero-window anomalies, HTTP anomalies, TLS handshakes | Candidate for micro-validation of zero-window and TLS anomalies |
-| **MACCDC PCAP Corpus** | Mid-Atlantic CCDC | `https://www.netresec.com/?page=MACCDC` | PCAP | Multi-team collegiate cyber defense competition captures | Candidate for mixed benign and adversarial enterprise traffic |
+| **CIC-IDS2017 & CSE-CIC-IDS2018** | Canadian Institute for Cybersecurity (UNB) / CSE | `https://www.unb.ca/cic/datasets/ids-2017.html` & `s3://cse-cic-ids2018/` | PCAP / Flow CSV | Multi-day enterprise captures covering DoS (Hulk, GoldenEye), DDoS (LOIC, HOIC), Patator Brute Force, Nmap PortScan, Infiltration, Web Attacks | Discovered; Candidate for macro-evaluation DoS & Web attack validation |
+| **Malware-Traffic-Analysis.net Exercises** | Brad Duncan (Unit 42 / SANS ISC) | `https://www.malware-traffic-analysis.net/` | PCAP / Suricata EVE / IOCs | Real-world enterprise Windows malware infections (WarmCookie, Cobalt Strike, IcedID) with native Suricata corroboration | Discovered; Ideal for `PAYLOAD_HIT`, `CLEAR_HTTP_ON_TLS_PORT`, `TLS_ANOMALY`, and `DNS_ANOMALY` |
+| **Aposemat IoT-23** | Stratosphere Laboratory (CTU Prague) & Avast | `https://www.stratosphereips.org/datasets-iot23` | PCAP / Zeek `conn.log.labeled` | 20 IoT botnet scenarios (Mirai, Torii, Gafgyt, Muhstik) + 3 benign IoT baselines under CC BY 4.0 | Discovered; Primary candidate for `SYN_FLOOD`, `UDP_FLOOD`, `BRUTE_FORCE`, and `PORT_SCAN` |
+| **MACCDC & WRCCDC PCAP Corpus** | Mid-Atlantic CCDC / WRCCDC / Netresec | `https://www.netresec.com/?page=MACCDC` & `https://archive.wrccdc.org/pcaps/` | PCAP (59+ files, >18 GB) | Multi-team collegiate defense competition traffic with live Red Team attacks (ARP spoofing, recon, exfil) | Discovered; Candidate for `ARP_SPOOF` and complex mixed-enterprise validation |
+| **Wireshark Sample Captures** | Wireshark Foundation / GitLab | `https://gitlab.com/wireshark/wireshark/-/wikis/SampleCaptures` | Micro PCAP / PCAPNG | Protocol edge cases: TCP zero-window flow control, illegal TCP flags, DNS tunneling, gratuitous ARP storms | Discovered; Optimal source for deterministic micro-fixtures (`TCP_ZERO_WINDOW`, `DNS_ANOMALY`) |
+| **Splunk BOTS v2** | Splunk Inc. | `https://github.com/splunk/botsv2` | SIEM index / PCAP subset | Enterprise SIEM logs + Suricata EVE + PCAP | Discovered; Candidate for Suricata EVE corroboration and SPL mapping review |
 | **EVTX-ATTACK-SAMPLES** | Samir Bousseaden | `https://github.com/sbousseaden/EVTX-ATTACK-SAMPLES` | Windows EVTX | Host endpoint security telemetry (Sysmon, Security.evtx) | Discovered; out of scope for packet engine input path |
 | **OTRF Security Datasets** | Open Threat Research Forge | `https://github.com/OTRF/Security-Datasets` | JSON / YAML / EVTX | Endpoint & attack telemetry | Discovered; out of scope for packet engine |
-| **Splunk BOTS v2** | Splunk Inc. | `https://github.com/splunk/botsv2` | SIEM index / PCAP subset | Enterprise SIEM logs + Suricata EVE + PCAP | Candidate for Suricata EVE corroboration and SPL mapping review |
 
 ---
 
-## 4. Sampling & Deduplication Protocol
+## 4. 19-Rule Cross-Coverage Matrix (NetGuard IDS Rules vs External Datasets)
+
+| # | NetGuard Rule Name | Class in Engine | Primary Threat Behavior | CIC-IDS 2017/2018 | Malware-Traffic Analysis.net | Aposemat IoT-23 | MACCDC / CCDC | Wireshark Samples |
+| :-: | :--- | :--- | :--- | :-: | :-: | :-: | :-: | :-: |
+| 1 | `BLOCKLIST` | `BlocklistRule` | Known malicious C2 IPs / Subnets | ⚠️ (Static IP) | ✅ (Active C2) | ✅ (Known Botnet IPs) | ✅ (Red Team IPs) | ❌ |
+| 2 | `PORT_SCAN` | `PortScanRule` | Rapid horizontal/vertical port scan | ✅ (Nmap Scans) | ⚠️ (Ad-hoc) | ✅ (Telnet/HTTP Scan) | ✅ (Red Team Recon) | ⚠️ (Demo traces) |
+| 3 | `UDP_SCAN` | `UdpScanRule` | UDP service port scanning | ✅ (Nmap -sU) | ❌ | ✅ (IoT UDP Scans) | ✅ (Nmap UDP) | ⚠️ |
+| 4 | `UDP_FLOOD` | `UdpFloodRule` | Volumetric UDP packet flooding | ✅ (LOIC-UDP) | ❌ | ✅ (Mirai UDP Flood) | ✅ (UDP DoS) | ❌ |
+| 5 | `TCP_STEALTH_SCAN` | `TcpStealthScanRule` | NULL, FIN, XMAS TCP flag scans | ⚠️ (Nmap stealth) | ❌ | ⚠️ (HNS scan) | ✅ (Red Team Scans) | ✅ (XMAS/NULL PCAP) |
+| 6 | `TCP_FLAG_ANOMALY`| `TcpFlagAnomalyRule` | Illegal TCP flag combinations | ⚠️ (SYN+FIN) | ❌ | ⚠️ (Custom SYN) | ✅ (Fuzzing/Injects)| ✅ (Protocol tests) |
+| 7 | `SYN_FLOOD` | `SynFloodRule` | Half-open TCP SYN flooding | ✅ (Hulk / LOIC) | ❌ | ✅ (Mirai SYN Flood)| ✅ (SYN DoS) | ✅ (synflood.pcap) |
+| 8 | `DISTRIBUTED_SYN_FLOOD`| `DistributedSynFloodRule`| Multi-source coordinated SYN flood | ✅ (HOIC / LOIC) | ❌ | ✅ (Mirai Botnet) | ✅ (Multi-host DoS)| ⚠️ |
+| 9 | `ICMP_SWEEP` | `IcmpSweepRule` | Host discovery ICMP ping sweep | ⚠️ (Discovery) | ❌ | ⚠️ (Ping sweep) | ✅ (Red Team Ping) | ✅ (Ping sweep cap)|
+| 10 | `ICMP_FLOOD` | `IcmpFloodRule` | Volumetric ICMP echo flooding | ⚠️ (Flood) | ❌ | ⚠️ (DDoS mode) | ✅ (Smurf / Ping) | ✅ (ICMP flood) |
+| 11 | `ARP_SPOOF` | `ArpSpoofRule` | ARP cache poisoning / MITM | ❌ (Layer 3 trace)| ❌ (WAN trace) | ❌ (Bridge trace) | ✅ (Subnet MITM) | ✅ (arp-storm.pcap) |
+| 12 | `PAYLOAD_HIT` | `PayloadRule` | SQLi, XSS, Shellcode, Dropper cmd | ✅ (SQLi, XSS) | ✅ (PE, Scripts) | ✅ (Busybox cmds) | ✅ (Metasploit) | ✅ (Sample exploits)|
+| 13 | `DNS_ANOMALY` | `DnsRule` | DGA, excessive length, DNS tunnel | ⚠️ (Bot queries) | ✅ (DGA domains) | ⚠️ (Bot lookups) | ✅ (Covert DNS) | ✅ (iodine.pcap) |
+| 14 | `BRUTE_FORCE` | `BruteForceRule` | SSH, FTP, HTTP, Telnet login bursts| ✅ (Patator) | ✅ (SMB/RDP) | ✅ (Telnet Dict) | ✅ (Hydra/Medusa) | ⚠️ (Auth samples) |
+| 15 | `SLOW_PORT_SCAN` | `SlowPortScanRule` | Low-frequency evasion port scanning | ✅ (Infiltration)| ⚠️ (Recon) | ✅ (Torii / HNS) | ✅ (Stealth Recon) | ⚠️ |
+| 16 | `DATA_EXFIL` | `DataExfiltrationRule` | Large burst upload, suspicious MIME | ✅ (Infiltration)| ✅ (HTTP POST Exfil)| ⚠️ (Drop payload) | ✅ (Flag exfil) | ⚠️ |
+| 17 | `CLEAR_HTTP_ON_TLS_PORT`| `CleartextHttpOnTlsPortRule`| Plaintext HTTP methods on 443/8443 | ⚠️ (Infiltration)| ✅ (Malware C2) | ⚠️ (Proxy ports) | ✅ (Covert shells) | ✅ (http_on_ssl) |
+| 18 | `TLS_ANOMALY` | `TlsAnomalyRule` | Malformed TLS headers, bad SNI/cert | ⚠️ (Heartbleed) | ✅ (Self-signed C2)| ❌ | ✅ (MITM certs) | ✅ (TLS test traces)|
+| 19 | `TCP_ZERO_WINDOW`| `TcpZeroWindowRule` | Receiver buffer zero window & probe| ⚠️ (Traffic burst)| ⚠️ (Host congestion)| ⚠️ (IoT overload) | ⚠️ (Server stress)| ✅ (zerowindow.pcap)|
+
+*Legend*: ✅ = Directly exercised with rich true-positive samples; ⚠️ = Partially exercised or present as incidental background; ❌ = Not present or out of scope for capture environment.
+
+---
+
+## 5. Sampling & Deduplication Protocol
 - Datasets are partitioned into:
   1. **New independent external datasets**: Newly discovered from distinct publishers and network environments.
   2. **New samples from previously registered datasets**: Different capture sessions or time windows.
