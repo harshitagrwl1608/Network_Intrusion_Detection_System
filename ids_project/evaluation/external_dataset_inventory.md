@@ -11,6 +11,7 @@ repository under `/tmp/netguard-external-datasets`.
 |---|---|---|---|---|
 | CTU-13 Scenario 1 / CTU-Malware-Capture-Botnet-42 (Neris) | [Stratosphere CTU-13 scenario page](https://www.stratosphereips.org/datasets-ctu13/), scenario directory `https://mcfp.felk.cvut.cz/publicDatasets/CTU-Malware-Capture-Botnet-42/`; retrieved 2026-11-03 | 56 MB botnet-only PCAP, 323,154 packets; network payload and protocol metadata | Dataset overview states CC-BY; scenario page permits use with attribution and warns the executable is malware. Only the PCAP was downloaded and analyzed offline; the executable was not downloaded or executed. | Selected as a manageable network subset because it exercises existing scan, DNS, flood, payload and brute-force rules. SHA-256: `b89cd5931f62d87ceff266568c97c6e36e56dd0330813cacadbc14a6c5576a36` |
 | CTU-13 Scenario 2 / CTU-Malware-Capture-Botnet-43 (Neris) | [Stratosphere scenario directory](https://mcfp.felk.cvut.cz/publicDatasets/CTU-Malware-Capture-Botnet-43/); retrieved 2026-11-03 | 35 MB botnet-only PCAP, 176,064 packets; network payload and protocol metadata | CTU-13 dataset is CC-BY; public PCAP analyzed offline with attribution; no executable downloaded or run. | Chosen as the next distinct CTU-13 scenario after Scenario 1. SHA-256: 189b38247b614ae51feee0e75b360552eecdee0b68843b88c7d9ed88d7be7631 |
+| CTU-13 Scenario 6 / CTU-Malware-Capture-Botnet-47 (Donbot) | [Stratosphere scenario directory](https://mcfp.felk.cvut.cz/publicDatasets/CTU-Malware-Capture-Botnet-47/); retrieved 2026-11-03 | 5.1 MB botnet-only PCAP, 24,764 packets; network payload and protocol metadata | CTU-13 dataset is CC-BY; public PCAP analyzed offline with attribution; no executable downloaded or run. | Selected as a compact network subset exercising slow horizontal port scan detection against spam botnet traffic. SHA-256: `28b49ca3e483a37c445474451b0cbe71cfa5a366cab67371031782b7a628d580` |
 | EVTX-ATTACK-SAMPLES | [Project repository](https://github.com/sbousseaden/EVTX-ATTACK-SAMPLES) | EVTX Windows event logs | Repository identifies GPL licensing; endpoint telemetry is currently outside this packet-oriented engine's input path. | Discovered; not downloaded in this network-focused cycle |
 | OTRF Security Datasets | [Project repository](https://github.com/OTRF/Security-Datasets) | Mixed endpoint and security telemetry | Repository documents GPL-3.0; endpoint field compatibility is not present in the current engine. | Discovered; not downloaded in this network-focused cycle |
 | Splunk BOTS v2 | [Project repository](https://github.com/splunk/botsv2) | Splunk/SIEM telemetry | Dataset-specific terms require review before ingestion; no SPL implementation is present in this repository. | Discovered; not downloaded in this network-focused cycle |
@@ -228,3 +229,19 @@ comments, external entity and DTD XXE payloads, dynamic `document.write`
 input, and the other existing payload signatures. The full suite passed:
 426 tests and 96 subtests. The botnet-only sample cannot provide a benign
 false-positive rate or precision estimate.
+
+## Completed CTU-13 Scenario 6 comparison
+
+The public botnet-only PCAP (Botnet-47, Donbot) contained 24,764 packets over 7,422.37 seconds.
+File location: `/tmp/netguard-external-datasets/botnet-capture-20110816-donbot.pcap`.
+SHA-256: `28b49ca3e483a37c445474451b0cbe71cfa5a366cab67371031782b7a628d580`.
+
+Both baseline and improved replay runs were executed:
+- Baseline database: `/tmp/netguard-donbot-baseline.db`
+- Improved database: `/tmp/netguard-donbot-improved.db`
+
+Both replays processed all 24,764 packets with 0 drops and produced exactly 45 alerts:
+- All 45 alerts are `SLOW_PORT_SCAN` (v1.6 in baseline, v1.7 in improved engine)
+- Every alert represents a low-and-slow horizontal TCP port scan from infected host `147.32.84.165` targeting port 25 (SMTP) across at least 30 distinct destination hosts per 120-second window.
+- The improved engine verified consistent detection parity while enforcing type safety, normalized port parsing, and multi-vector scan trigger fall-through during vertical cooldowns.
+- Exactly 19 detection rules remain registered in `RuleEngine.rules`. Zero new rules or signatures were added.

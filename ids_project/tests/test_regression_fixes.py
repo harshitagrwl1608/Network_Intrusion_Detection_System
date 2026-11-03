@@ -829,6 +829,98 @@ class TestDetectionEnvironmentParsing(unittest.TestCase):
         self.assertEqual(values["payload_effective"], 512)
         self.assertEqual(values["dns_frequency"], 0)
 
+    def test_string_port_telemetry_compatibility_across_rules(self):
+        from engine.rules import (
+            SynFloodRule,
+            DistributedSynFloodRule,
+            BruteForceRule,
+            DnsRule,
+            TcpZeroWindowRule,
+            CleartextHttpOnTlsPortRule,
+            TlsAnomalyRule,
+            IcmpSweepRule,
+            IcmpFloodRule,
+        )
+        base_time = 1000.0
+
+        # SynFloodRule with string port "80" and string ephemeral port "50000"
+        syn_rule = SynFloodRule(threshold=2, window=10)
+        rec1 = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.10",
+            "dst_ip": "10.0.0.1", "src_port": "50000", "dst_port": "80",
+            "tcp_flags": 0x02, "initial_syn": True, "timestamp": base_time,
+        }
+        rec2 = dict(rec1, timestamp=base_time + 1)
+        self.assertIsNone(syn_rule.check(rec1))
+        alert = syn_rule.check(rec2)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_name"], "SYN_FLOOD")
+
+        # DistributedSynFloodRule with string port "80"
+        dist_rule = DistributedSynFloodRule(threshold=2, min_sources=2, window=10)
+        drec1 = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.1",
+            "dst_ip": "10.0.0.5", "src_port": "51000", "dst_port": "80",
+            "tcp_flags": 0x02, "initial_syn": True, "timestamp": base_time,
+        }
+        drec2 = dict(drec1, src_ip="192.168.1.2", timestamp=base_time + 1)
+        self.assertIsNone(dist_rule.check(drec1))
+        dalert = dist_rule.check(drec2)
+        self.assertIsNotNone(dalert)
+        self.assertEqual(dalert["rule_name"], "DISTRIBUTED_SYN_FLOOD")
+
+        # BruteForceRule with string auth port "22"
+        bf_rule = BruteForceRule(threshold=2, window=10)
+        bf1 = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.50",
+            "dst_ip": "10.0.0.22", "src_port": "52000", "dst_port": "22",
+            "tcp_flags": 0x02, "initial_syn": True, "timestamp": base_time,
+        }
+        bf2 = dict(bf1, timestamp=base_time + 1, tcp_seq=100)
+        bf1["tcp_seq"] = 50
+        self.assertIsNone(bf_rule.check(bf1))
+        bf_alert = bf_rule.check(bf2)
+        self.assertIsNotNone(bf_alert)
+        self.assertEqual(bf_alert["rule_name"], "BRUTE_FORCE")
+
+        # DnsRule with string port "53"
+        dns_rule = DnsRule(max_query_len=10)
+        drec = {
+            "type": "IP", "protocol": "UDP", "src_ip": "192.168.1.50",
+            "dst_ip": "8.8.8.8", "src_port": "53000", "dst_port": "53",
+            "dns_query": "verylongdnsqueryexceedingthreshold.com",
+            "timestamp": base_time,
+        }
+        dns_alert = dns_rule.check(drec)
+        self.assertIsNotNone(dns_alert)
+        self.assertEqual(dns_alert["rule_name"], "DNS_ANOMALY")
+
+        # TcpZeroWindowRule with string window "0" and string port "443"
+        zw_rule = TcpZeroWindowRule(threshold=2, min_distinct_flows=1, window=10)
+        zw1 = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.60",
+            "dst_ip": "10.0.0.100", "src_port": "54000", "dst_port": "443",
+            "tcp_flags": 0x10, "tcp_window": "0", "timestamp": base_time,
+        }
+        zw2 = dict(zw1, timestamp=base_time + 1)
+        self.assertIsNone(zw_rule.check(zw1))
+        zw_alert = zw_rule.check(zw2)
+        self.assertIsNotNone(zw_alert)
+        self.assertEqual(zw_alert["rule_name"], "TCP_ZERO_WINDOW")
+
+        # IcmpSweepRule with string icmp_type "8"
+        sweep_rule = IcmpSweepRule(threshold=2, window=10)
+        sw1 = {
+            "type": "IP", "protocol": "ICMP", "src_ip": "192.168.1.70",
+            "dst_ip": "10.0.0.1", "icmp_type": "8", "icmp_code": "0",
+            "timestamp": base_time,
+        }
+        sw2 = dict(sw1, dst_ip="10.0.0.2", timestamp=base_time + 1)
+        self.assertIsNone(sweep_rule.check(sw1))
+        sw_alert = sweep_rule.check(sw2)
+        self.assertIsNotNone(sw_alert)
+        self.assertEqual(sw_alert["rule_name"], "ICMP_SWEEP")
+
 
 if __name__ == "__main__":
     unittest.main()

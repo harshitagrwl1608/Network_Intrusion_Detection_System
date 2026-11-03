@@ -32,11 +32,22 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **409 passed, 92 subtests passed** (`python -m pytest -q`).
-- Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** These are fixture results only and do **not** imply 100% real-world accuracy.
-- All 1,163 synthetic attack packets and 832 benign packets were replayed; alert persistence checks reported no dropped alerts or shutdown timeout.
-- `git diff --check` was clean at inspection.
-- Scapy's local interface enumeration required an approved elevated process; validation used offline tests and PCAP replay only, not live capture.
+- Full test suite: **431 passed, 96 subtests passed** in 51.03s (`python -m pytest -q`).
+- Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** Precision: 100.0%, Recall: 100.0%, F1: 100.0%. These are fixture results only and do **not** imply 100% real-world accuracy.
+- External dataset replay (CTU-13 Scenario 6 / Botnet-47 Donbot, 24,764 packets): all packets processed with 0 drops; 45 `SLOW_PORT_SCAN v1.7` horizontal scan alerts verified against infected host `147.32.84.165` targeting port 25.
+- Rule inventory verified: **strictly 19 rules registered in `RuleEngine.rules`**. Zero new rules, zero new Sigma/SPL rules, zero deleted rules.
+- `git diff --check` clean.
+
+## Follow-up: 2026-11-03 Telemetry normalization, timestamp fallback, multi-vector scan fall-through, and IPv6 SSRF scoping
+
+- **`_finite_record_timestamp` None fallback fix:** Fixed a bug where a packet record with `{"event_timestamp": None, "timestamp": <float>}` failed to fall back to `"timestamp"` because `"event_timestamp"` existed in the dict with value `None`. `float(None)` raised `TypeError`, discarding valid telemetry with a valid fallback timestamp.
+- **`_is_initial_syn` None check fix:** Fixed a membership check bug where `record["initial_syn"] = None` prevented inspecting raw `tcp_flags`.
+- **`_is_trusted` performance optimization:** Added short-circuit check against `TRUSTED_HOSTS` set before performing CIDR parsing and frozenset allocation on the packet hot path.
+- **Telemetry port normalization (`_normalize_port`):** Safe integer parsing for string ports (e.g. `"80"`, `"443"`) across `PortScanRule`, `UdpScanRule`, `UdpFloodRule`, `SynFloodRule`, `DistributedSynFloodRule`, `BruteForceRule`, `DnsRule`, `TcpZeroWindowRule`, `CleartextHttpOnTlsPortRule`, `TlsAnomalyRule`, and `PayloadRule`. Fixed `SynFloodRule` line 1273 crash (`TypeError: '>' not supported between instances of 'str' and 'int'`).
+- **Telemetry ICMP normalization:** Handled string representation of `icmp_type` and `icmp_code` in `IcmpSweepRule` and `IcmpFloodRule`.
+- **`SlowPortScanRule` Multi-Vector Scan Fall-Through (v1.7):** Fixed a bug where a vertical scan alert suppressed by active cooldown immediately executed `return None`, preventing evaluation of horizontal scan triggers on multi-vector scanning hosts.
+- **`PayloadRule` `HEADER_INJECTION` IPv6 Scoping (v1.19):** Replaced over-broad bracketed IPv6 regex (`\[(?:[0-9a-fA-F:]+)\]`) that falsely flagged 100% of legitimate direct IPv6 HTTP requests (RFC 3986 §3.2.2) with scoped internal, loopback, and link-local IPv6 prefixes (`(?:::1?|0::|fe80:[0-9a-fA-F:]*|f[cd][0-9a-fA-F]{2}:[0-9a-fA-F:]*)`).
+- **Rule versions updated:** `PortScanRule` 1.12, `UdpScanRule` 1.3, `UdpFloodRule` 1.6, `SynFloodRule` 1.11, `DistributedSynFloodRule` 1.7, `IcmpSweepRule` 1.5, `IcmpFloodRule` 1.6, `PayloadRule` 1.19, `DnsRule` 1.19, `BruteForceRule` 1.9, `SlowPortScanRule` 1.7, `CleartextHttpOnTlsPortRule` 1.8, `TlsAnomalyRule` 1.8, `TcpZeroWindowRule` 1.9. Total registered rule instances: **strictly 19**. Zero new rules created.
 
 ## Follow-up: 2026-11-03 invalid timestamps in PAYLOAD_HIT
 

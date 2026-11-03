@@ -23,7 +23,7 @@ from engine.rules import (
 class TestFiniteRuleTimestamps(unittest.TestCase):
     def test_invalid_event_timestamps_do_not_mutate_rate_rule_state(self):
         cases = (
-            ("UDP_FLOOD", "1.5", lambda: UdpFloodRule(threshold=1), {
+            ("UDP_FLOOD", "1.6", lambda: UdpFloodRule(threshold=1), {
                 "type": "IP", "protocol": "UDP", "src_ip": "198.51.100.10",
                 "dst_ip": "203.0.113.10", "src_port": 50000, "dst_port": 5060,
             }, ("_history", "_cooldown")),
@@ -37,37 +37,37 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "dst_ip": "203.0.113.12", "src_port": 50000, "dst_port": 22,
                 "tcp_flags": 0x03,
             }, ("_cooldown",)),
-            ("DISTRIBUTED_SYN_FLOOD", "1.6", lambda: DistributedSynFloodRule(
+            ("DISTRIBUTED_SYN_FLOOD", "1.7", lambda: DistributedSynFloodRule(
                 threshold=1, min_sources=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.13",
                 "dst_ip": "203.0.113.13", "src_port": 50000, "dst_port": 80,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_history", "_cooldown")),
-            ("ICMP_SWEEP", "1.4", lambda: IcmpSweepRule(threshold=1), {
+            ("ICMP_SWEEP", "1.5", lambda: IcmpSweepRule(threshold=1), {
                 "type": "IP", "protocol": "ICMP", "src_ip": "198.51.100.14",
                 "dst_ip": "203.0.113.14", "icmp_type": 8, "icmp_code": 0,
             }, ("_history", "_fired")),
-            ("ICMP_FLOOD", "1.5", lambda: IcmpFloodRule(threshold=1), {
+            ("ICMP_FLOOD", "1.6", lambda: IcmpFloodRule(threshold=1), {
                 "type": "IP", "protocol": "ICMP", "src_ip": "198.51.100.15",
                 "dst_ip": "203.0.113.15", "icmp_type": 8, "icmp_code": 0,
             }, ("_history", "_cooldown")),
-            ("BRUTE_FORCE", "1.8", lambda: BruteForceRule(threshold=1), {
+            ("BRUTE_FORCE", "1.9", lambda: BruteForceRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.16",
                 "dst_ip": "203.0.113.16", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_history", "_cooldown", "_seen_syns")),
-            ("SLOW_PORT_SCAN", "1.6", lambda: SlowPortScanRule(threshold=1), {
+            ("SLOW_PORT_SCAN", "1.7", lambda: SlowPortScanRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.17",
                 "dst_ip": "203.0.113.17", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_vert", "_horiz", "_alert_cooldown")),
-            ("CLEAR_HTTP_ON_TLS_PORT", "1.7", lambda: CleartextHttpOnTlsPortRule(
+            ("CLEAR_HTTP_ON_TLS_PORT", "1.8", lambda: CleartextHttpOnTlsPortRule(
                 min_requests=2), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.18",
                 "dst_ip": "203.0.113.18", "src_port": 50000, "dst_port": 443,
                 "payload": b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n",
             }, ("_history", "_seen", "_saturated", "_tcp_prefixes", "_seen_requests")),
-            ("TCP_ZERO_WINDOW", "1.8", lambda: TcpZeroWindowRule(threshold=1), {
+            ("TCP_ZERO_WINDOW", "1.9", lambda: TcpZeroWindowRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.19",
                 "dst_ip": "203.0.113.19", "src_port": 50000, "dst_port": 443,
                 "tcp_flags": 0x10, "tcp_window": 0,
@@ -96,6 +96,21 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                         alert = rule.check(next_record)
                     self.assertIsNotNone(alert)
                     self.assertEqual(alert["rule_version"], version)
+
+    def test_finite_record_timestamp_fallback_when_event_timestamp_is_none(self):
+        from engine.rules import _finite_record_timestamp, _is_initial_syn
+        record = {"event_timestamp": None, "timestamp": 1234567.89}
+        self.assertEqual(_finite_record_timestamp(record), 1234567.89)
+
+        record_only_event = {"event_timestamp": 987654.32}
+        self.assertEqual(_finite_record_timestamp(record_only_event), 987654.32)
+
+    def test_is_initial_syn_handles_explicit_none_gracefully(self):
+        from engine.rules import _is_initial_syn
+        record = {"initial_syn": None, "tcp_flags": 0x02}
+        self.assertTrue(_is_initial_syn(record))
+        record_syn_ack = {"initial_syn": None, "tcp_flags": 0x12}
+        self.assertFalse(_is_initial_syn(record_syn_ack))
 
 
 if __name__ == "__main__":

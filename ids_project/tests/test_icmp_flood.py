@@ -50,7 +50,7 @@ class TestIcmpFloodRule(unittest.TestCase):
                 break
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "ICMP_FLOOD")
-        self.assertEqual(alert["rule_version"], "1.5")
+        self.assertEqual(alert["rule_version"], "1.6")
         self.assertEqual(alert["severity"], "medium")
         self.assertEqual(alert["confidence"], "heuristic")
         self.assertEqual(alert["evidence"]["classification"], "ICMP_ECHO_RATE_THRESHOLD")

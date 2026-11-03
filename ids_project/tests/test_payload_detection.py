@@ -199,7 +199,7 @@ class TestPayloadRule(unittest.TestCase):
         suffix.update(tcp_flags=0x18, tcp_seq=1018)
         alert = self.rule.check(suffix)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.18")
+        self.assertEqual(alert["rule_version"], "1.19")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):
@@ -581,6 +581,29 @@ class TestPayloadRule(unittest.TestCase):
             pkt = self.packet(req, 5300)
             alert = self.rule.check(pkt)
             self.assertIsNone(alert, f"Unexpected alert on benign request: {req}")
+
+
+    def test_header_injection_ipv6_handling(self):
+        # Public bracketed IPv6 Host header should not trigger SSRF HEADER_INJECTION
+        public_ipv6_req = (
+            b"GET /index.html HTTP/1.1\r\n"
+            b"Host: [2001:db8::1]\r\n"
+            b"User-Agent: Mozilla/5.0\r\n\r\n"
+        )
+        pkt_public = self.packet(public_ipv6_req, 5301)
+        self.assertIsNone(self.rule.check(pkt_public))
+
+        # Loopback and link-local IPv6 Host header should trigger SSRF HEADER_INJECTION
+        loopback_req = (
+            b"GET /admin HTTP/1.1\r\n"
+            b"Host: [::1]\r\n"
+            b"User-Agent: curl/7.88.1\r\n\r\n"
+        )
+        pkt_loopback = self.packet(loopback_req, 5302)
+        alert = self.rule.check(pkt_loopback)
+        self.assertIsNotNone(alert)
+        signatures = [h["signature"] for h in alert["evidence"]["hits"]]
+        self.assertIn("HEADER_INJECTION", signatures)
 
 
 if __name__ == "__main__":

@@ -213,8 +213,8 @@ class TestPortScanDetection(unittest.TestCase):
 
     def test_malformed_timestamps_are_ignored_without_corrupting_scan_window(self):
         for rule_cls, protocol, version in (
-            (PortScanRule, "TCP", "1.11"),
-            (UdpScanRule, "UDP", "1.2"),
+            (PortScanRule, "TCP", "1.12"),
+            (UdpScanRule, "UDP", "1.3"),
         ):
             for invalid_time in ("bad-time", float("nan"), float("inf")):
                 with self.subTest(rule=rule_cls.__name__, timestamp=invalid_time):

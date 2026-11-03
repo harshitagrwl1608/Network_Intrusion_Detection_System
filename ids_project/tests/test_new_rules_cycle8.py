@@ -290,7 +290,7 @@ class TestRstFloodDetection(unittest.TestCase):
                 self.assertIsNone(rule.check(syn(invalid_time, 80)))
                 alert = rule.check(syn(102.0, 80))
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.10")
+                self.assertEqual(alert["rule_version"], "1.11")
 
             with self.subTest(kind="RST", timestamp=invalid_time):
                 rule = SynFloodRule(threshold=1000, rst_threshold=3,
@@ -305,7 +305,7 @@ class TestRstFloodDetection(unittest.TestCase):
                 self.assertIsNone(rule.check(rst(invalid_time, 3)))
                 alert = rule.check(rst(102.0, 4))
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.10")
+                self.assertEqual(alert["rule_version"], "1.11")
 
     def test_closed_port_scan_rst_replies_do_not_count_as_rst_flood(self):
         rule = SynFloodRule(threshold=1000, rst_threshold=10, rst_window=5,
@@ -398,7 +398,7 @@ class TestDnsSubdomainExfil(unittest.TestCase):
                 src="10.0.0.26", domain=f"{label}.bad.com",
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.18")
+        self.assertEqual(alert["rule_version"], "1.19")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
         self.assertEqual(alert["evidence"]["parent_domain"], "bad.com")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 3)
@@ -426,7 +426,7 @@ class TestDnsSubdomainExfil(unittest.TestCase):
                 src="10.0.0.28", domain=f"{label}.foo.io",
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.18")
+        self.assertEqual(alert["rule_version"], "1.19")
         self.assertEqual(alert["evidence"]["parent_domain"], "foo.io")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 3)
 
@@ -467,7 +467,7 @@ class TestDnsSubdomainExfil(unittest.TestCase):
                 domain=f"host.chunk{i:04x}.evil.com",
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.18")
+        self.assertEqual(alert["rule_version"], "1.19")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
         self.assertEqual(alert["evidence"]["subdomain"], "host.chunk0004")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 5)
@@ -667,7 +667,7 @@ class TestBruteForceRule(unittest.TestCase):
                 break
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "BRUTE_FORCE")
-        self.assertEqual(alert["rule_version"], "1.8")
+        self.assertEqual(alert["rule_version"], "1.9")
         self.assertEqual(alert["severity"], "medium")
         self.assertEqual(alert["confidence"], "heuristic")
         self.assertEqual(alert["evidence"]["classification"], "AUTH_SERVICE_SYN_BURST")
@@ -694,7 +694,7 @@ class TestBruteForceRule(unittest.TestCase):
         first["tcp_seq"] = 100
         alert = rule.check(second)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.8")
+        self.assertEqual(alert["rule_version"], "1.9")
         self.assertEqual(alert["evidence"]["attempt_count"], 2)
 
     def test_syn_ack_from_auth_service_port_is_not_counted(self):
@@ -924,7 +924,7 @@ class TestSlowPortScanRule(unittest.TestCase):
             record["src_port"] = 80
             alert = rule.check(record) or alert
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.6")
+        self.assertEqual(alert["rule_version"], "1.7")
         self.assertEqual(alert["evidence"]["distinct_ports"], 3)
 
         reply = self._syn(
@@ -969,6 +969,24 @@ class TestSlowPortScanRule(unittest.TestCase):
         for i in range(3):
             after = rule.check(self._syn("10.0.0.8", "10.0.0.4", 3000 + i, base + 40 + i))
         self.assertIsNotNone(after)
+
+    def test_horizontal_scan_alerts_when_vertical_is_in_cooldown(self):
+        rule = SlowPortScanRule(threshold=3, window=120, cooldown=30)
+        base = time.time()
+        # Trigger vertical scan for 10.0.0.9
+        for i in range(3):
+            alert = rule.check(self._syn("10.0.0.9", "10.0.0.2", 1000 + i, base + i))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["scan_type"], "slow_vertical")
+
+        # Now send horizontal scan probes to port 80 across 3 hosts while vertical is in cooldown
+        horiz_alert = None
+        for i in range(3):
+            a = rule.check(self._syn("10.0.0.9", f"10.0.0.{10+i}", 80, base + 5 + i))
+            if a:
+                horiz_alert = a
+        self.assertIsNotNone(horiz_alert)
+        self.assertEqual(horiz_alert["evidence"]["scan_type"], "slow_horizontal")
 
     def test_below_threshold_no_alert(self):
         rule = SlowPortScanRule(threshold=10, window=120)
