@@ -45,6 +45,7 @@ import sys
 import os
 import json
 import argparse
+import ipaddress
 import logging
 from datetime import datetime
 
@@ -56,6 +57,30 @@ from storage.db import get_connection, read_all_alerts
 
 # How close (seconds) two alerts must be to be considered the same event
 TIMESTAMP_TOLERANCE = 5.0
+
+
+def _norm_ip(ip) -> str:
+    """Normalize IPv4/IPv6 string representation, stripping spaces and canonicalizing format."""
+    if ip is None:
+        return ""
+    s = str(ip).strip()
+    if not s:
+        return ""
+    try:
+        return str(ipaddress.ip_address(s))
+    except ValueError:
+        return s
+
+
+def _norm_port(port) -> int | None:
+    """Normalize integer/string port to 0-65535 int or None."""
+    if port is None:
+        return None
+    try:
+        val = int(port)
+        return val if 0 <= val <= 65535 else None
+    except (ValueError, TypeError):
+        return None
 
 
 def _get_conn(db_path: str | None = None):
@@ -72,27 +97,60 @@ def _get_conn(db_path: str | None = None):
 def load_suricata_alerts(eve_path: str) -> list[dict]:
     """Parse eve.json and return list of alert dicts."""
     alerts = []
-    with open(eve_path) as f:
+    with open(eve_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
+            line_str = line.strip()
+            if not line_str:
+                continue
             try:
-                event = json.loads(line.strip())
+                event = json.loads(line_str)
+                if not isinstance(event, dict):
+                    continue
                 if event.get("event_type") == "alert":
-                    ts_str = event.get("timestamp", "")
-                    try:
-                        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                        ts = dt.timestamp()
-                    except Exception:
-                        ts = 0.0
+                    alert_obj = event.get("alert")
+                    if not isinstance(alert_obj, dict):
+                        alert_obj = {}
+                    ts_raw = event.get("timestamp")
+                    ts = 0.0
+                    if isinstance(ts_raw, (int, float)):
+                        ts = float(ts_raw)
+                    elif isinstance(ts_raw, str) and ts_raw.strip():
+                        ts_str = ts_raw.strip()
+                        try:
+                            cleaned_ts = ts_str.replace("Z", "+00:00")
+                            if len(cleaned_ts) >= 5 and cleaned_ts[-5] in ("+", "-") and cleaned_ts[-3] != ":":
+                                cleaned_ts = cleaned_ts[:-2] + ":" + cleaned_ts[-2:]
+                            dt = datetime.fromisoformat(cleaned_ts)
+                            ts = dt.timestamp()
+                        except Exception:
+                            try:
+                                ts = float(ts_str)
+                            except Exception:
+                                ts = 0.0
+
+                    src_ip = event.get("src_ip")
+                    dst_ip = event.get("dest_ip") or event.get("dst_ip")
+                    src_port = _norm_port(event.get("src_port"))
+                    dst_port = _norm_port(event.get("dest_port") or event.get("dst_port"))
+                    proto = str(event.get("proto") or "").strip().upper()
+                    sig = str(alert_obj.get("signature") or "").strip()
+                    cat = str(alert_obj.get("category") or "").strip()
+                    sev = alert_obj.get("severity")
+                    app_proto = str(event.get("app_proto") or "").strip().lower()
+                    flow_id = event.get("flow_id")
+
                     alerts.append({
                         "timestamp":  ts,
-                        "src_ip":     event.get("src_ip"),
-                        "dst_ip":     event.get("dest_ip"),
-                        "src_port":   event.get("src_port"),
-                        "dst_port":   event.get("dest_port"),
-                        "protocol":   event.get("proto", "").upper(),
-                        "signature":  event.get("alert", {}).get("signature", ""),
-                        "category":   event.get("alert", {}).get("category", ""),
-                        "severity":   event.get("alert", {}).get("severity"),
+                        "src_ip":     src_ip,
+                        "dst_ip":     dst_ip,
+                        "src_port":   src_port,
+                        "dst_port":   dst_port,
+                        "protocol":   proto,
+                        "signature":  sig,
+                        "category":   cat,
+                        "severity":   sev,
+                        "app_proto":  app_proto,
+                        "flow_id":    flow_id,
                     })
             except json.JSONDecodeError:
                 continue
@@ -109,9 +167,13 @@ def _events_match(a: dict, b: dict, tolerance: float = TIMESTAMP_TOLERANCE) -> b
     Two events match if src_ip, dst_ip and dst_port agree AND timestamps
     are within tolerance.  Protocol is included when both sides provide it.
     """
-    if a.get("src_ip") != b.get("src_ip"):
+    src_a = _norm_ip(a.get("src_ip"))
+    src_b = _norm_ip(b.get("src_ip"))
+    if not src_a or not src_b or src_a != src_b:
         return False
-    if a.get("dst_ip") != b.get("dst_ip"):
+    dst_a = _norm_ip(a.get("dst_ip"))
+    dst_b = _norm_ip(b.get("dst_ip"))
+    if not dst_a or not dst_b or dst_a != dst_b:
         return False
     # Threshold rules aggregate packets across multiple destination ports, so
     # the final packet that crosses the threshold can differ between engines.
@@ -120,21 +182,13 @@ def _events_match(a: dict, b: dict, tolerance: float = TIMESTAMP_TOLERANCE) -> b
     family_a = _scan_family(a)
     family_b = _scan_family(b)
     semantic_scan_match = family_a is not None and family_a == family_b
-    port_a = a.get("dst_port")
-    port_b = b.get("dst_port")
-    try:
-        port_a = int(port_a) if port_a is not None else None
-    except (ValueError, TypeError):
-        pass
-    try:
-        port_b = int(port_b) if port_b is not None else None
-    except (ValueError, TypeError):
-        pass
+    port_a = _norm_port(a.get("dst_port"))
+    port_b = _norm_port(b.get("dst_port"))
     if not semantic_scan_match and port_a != port_b:
         return False
     # Protocol check only when both sides have a non-empty value
-    proto_a = (a.get("protocol") or "").upper()
-    proto_b = (b.get("protocol") or "").upper()
+    proto_a = (a.get("protocol") or "").strip().upper()
+    proto_b = (b.get("protocol") or "").strip().upper()
     if proto_a and proto_b and proto_a != proto_b:
         return False
     time_diff = abs((a.get("timestamp") or 0) - (b.get("timestamp") or 0))
@@ -160,11 +214,50 @@ def _semantic_family(event: dict) -> str | None:
         return scan
     rule = str(event.get("rule_name") or "").upper()
     signature = str(event.get("signature") or "").lower()
-    port = event.get("dst_port")
+    detail = str(event.get("detail") or "").lower()
+    evidence_str = str(event.get("evidence_json") or "").lower()
+    port = _norm_port(event.get("dst_port"))
+
     if rule == "CLEAR_HTTP_ON_TLS_PORT":
         return "cleartext_http_on_tls_port"
-    if port in (443, 8443) and signature.startswith("suricata http"):
+    if port in (443, 8443) and (signature.startswith("suricata http") or "http request missing protocol" in signature):
         return "cleartext_http_on_tls_port"
+
+    # Web payload attack families (independently observable in HTTP/TCP stream payloads)
+    if rule == "PAYLOAD_HIT":
+        if "sql_injection" in detail or "sql_injection" in evidence_str:
+            return "sql_injection"
+        if "cmd_injection" in detail or "cmd_injection" in evidence_str or "shellshock" in detail or "shellshock" in evidence_str:
+            return "command_injection"
+        if "log4shell" in detail or "log4shell" in evidence_str:
+            return "log4shell"
+        if "path_traversal" in detail or "path_traversal" in evidence_str:
+            return "path_traversal"
+    if "sql injection" in signature or "sqli" in signature:
+        return "sql_injection"
+    if "command injection" in signature or "cmd injection" in signature or "shellshock" in signature:
+        return "command_injection"
+    if "log4j" in signature or "log4shell" in signature or "cve-2021-44228" in signature:
+        return "log4shell"
+    if "path traversal" in signature or "directory traversal" in signature:
+        return "path_traversal"
+
+    # Flood families (network packet rate / count anomalies)
+    if rule in ("SYN_FLOOD", "DISTRIBUTED_SYN_FLOOD") or "syn flood" in signature:
+        return "syn_flood"
+    if rule == "ICMP_FLOOD" or "icmp flood" in signature or "echo flood" in signature:
+        return "icmp_flood"
+
+    # DNS tunneling / exfiltration
+    if rule == "DNS_ANOMALY" and ("dns_tunnel" in detail or "dns_exfil" in detail):
+        return "dns_tunnel"
+    if "dns tunnel" in signature or "dns exfiltration" in signature:
+        return "dns_tunnel"
+
+    # TLS anomalies
+    if rule == "TLS_ANOMALY" or ("tls" in signature and ("sni" in signature or "certificate" in signature)):
+        return "tls_anomaly"
+
     return None
 
 
@@ -180,14 +273,11 @@ def _endpoint_correlations(netguard: list[dict], suricata: list[dict]) -> list[d
             family = _semantic_family(event)
             if not family:
                 continue
-            protocol = str(event.get("protocol") or "").upper()
-            port = event.get("dst_port")
-            try:
-                port = int(port) if port is not None else None
-            except (ValueError, TypeError):
-                pass
-            key = (family, event.get("src_ip"), event.get("dst_ip"),
-                   port, protocol)
+            protocol = str(event.get("protocol") or "").strip().upper()
+            port = _norm_port(event.get("dst_port"))
+            src_ip = _norm_ip(event.get("src_ip"))
+            dst_ip = _norm_ip(event.get("dst_ip"))
+            key = (family, src_ip, dst_ip, port, protocol)
             counts[key] = counts.get(key, 0) + 1
         return counts
 
@@ -357,10 +447,9 @@ def run_ground_truth(labels_path: str, db_path: str | None = None):
 
     for sc in scenarios:
         expected_rule = sc.get("expected_rule", "").strip()
-        exp_src   = sc.get("src_ip", "").strip()
-        exp_dst   = sc.get("dst_ip", "").strip()
-        exp_port_str = sc.get("dst_port", "").strip()
-        exp_port  = int(exp_port_str) if exp_port_str.isdigit() else None
+        exp_src   = _norm_ip(sc.get("src_ip", "").strip())
+        exp_dst   = _norm_ip(sc.get("dst_ip", "").strip())
+        exp_port  = _norm_port(sc.get("dst_port", "").strip())
         exp_proto = sc.get("protocol", "").strip().upper()
 
         found = False
@@ -370,12 +459,12 @@ def run_ground_truth(labels_path: str, db_path: str | None = None):
             # Match on all non-empty label fields (not rule name alone)
             rule_match  = (not expected_rule or
                            alert.get("rule_name") == expected_rule)
-            src_match   = (not exp_src   or alert.get("src_ip")   == exp_src)
-            dst_match   = (not exp_dst   or alert.get("dst_ip")   == exp_dst)
+            src_match   = (not exp_src   or _norm_ip(alert.get("src_ip"))   == exp_src)
+            dst_match   = (not exp_dst   or _norm_ip(alert.get("dst_ip"))   == exp_dst)
             port_match  = (exp_port is None or
-                           alert.get("dst_port") == exp_port)
+                           _norm_port(alert.get("dst_port")) == exp_port)
             proto_match = (not exp_proto or
-                           (alert.get("protocol") or "").upper() == exp_proto)
+                           (alert.get("protocol") or "").strip().upper() == exp_proto)
             if rule_match and src_match and dst_match and port_match and proto_match:
                 matched_alerts.add(i)
                 tp_scenarios.append((sc, alert))

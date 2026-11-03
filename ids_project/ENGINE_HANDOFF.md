@@ -40,6 +40,35 @@ Results verified during the current continuation on 2026-11-03 on branch `codex-
 - Rule inventory verified: **strictly 19 rules registered in `RuleEngine.rules`**. Zero new rules, zero new Sigma/SPL rules, zero deleted rules.
 - `git diff --check` clean.
 
+## Follow-up: 2026-11-03 Suricata EVE Ingestion Resilience, Semantic Corroboration Families, and IP/Port Canonicalization (Cycle 2)
+
+- **`compare.py` Suricata EVE JSON Loader Hardening:**
+  - Added line stripping and `dict` type checks to prevent crashes on empty lines or non-dict JSON records.
+  - Safe navigation on `alert` object (`event.get("alert") or {}`) protecting against `NoneType` errors.
+  - Resilient timestamp parser supporting ISO-8601 (`Z`, `+00:00`, `+0000`, `-0500`), float/int epoch seconds, and malformed string fallbacks.
+  - Ingestion of alternative destination keys (`dest_ip` / `dst_ip`, `dest_port` / `dst_port`), flow IDs, and application protocols (`app_proto`).
+  - Strict `utf-8` file reading with replacement fallback.
+- **IP and Port Canonicalization:**
+  - Added `_norm_ip` helper leveraging `ipaddress.ip_address` to normalize IPv4/IPv6 addresses, eliminating false mismatches on format variants (e.g. `2001:0db8::1` vs `2001:db8::1`) and leading/trailing whitespace.
+  - Added `_norm_port` helper ensuring valid port boundaries (`0 <= port <= 65535`) and consistent integer casting.
+  - Integrated `_norm_ip` and `_norm_port` into `_events_match`, `_endpoint_correlations`, and `run_ground_truth`.
+- **Defensible Cross-Engine Semantic Corroboration:**
+  - Expanded `_semantic_family` with well-grounded network-observable attack families that Suricata can independently corroborate without claiming unobservable endpoint telemetry:
+    - `sql_injection` (`PAYLOAD_HIT` SQL injection <-> Suricata SQLi / SQL syntax signatures)
+    - `command_injection` (`PAYLOAD_HIT` command injection / Shellshock <-> Suricata command injection / shellshock signatures)
+    - `log4shell` (`PAYLOAD_HIT` Log4Shell <-> Suricata Log4j / CVE-2021-44228 signatures)
+    - `path_traversal` (`PAYLOAD_HIT` path traversal <-> Suricata path / directory traversal signatures)
+    - `syn_flood` (`SYN_FLOOD` / `DISTRIBUTED_SYN_FLOOD` <-> Suricata syn flood signatures)
+    - `icmp_flood` (`ICMP_FLOOD` <-> Suricata ICMP / echo flood signatures)
+    - `dns_tunnel` (`DNS_ANOMALY` tunnel/exfil <-> Suricata DNS tunnel / exfil signatures)
+    - `tls_anomaly` (`TLS_ANOMALY` <-> Suricata TLS SNI / certificate anomaly signatures)
+- **Regressions & Verifications:**
+  - Added comprehensive test suite in `ids_project/tests/test_compare.py`: `test_ipv6_normalization_in_events_match`, `test_load_suricata_alerts_resilience`, and `test_semantic_family_cross_engine_corroboration`.
+  - Full test suite: **8 passed in 0.13s** (`pytest ids_project/tests/test_compare.py`).
+  - Synthetic ground-truth evaluation: **38/38 detected** (100.0% precision, 100.0% recall, 0 false positives).
+  - Rule inventory invariant: strictly 19 rules registered in `RuleEngine.rules`.
+
+
 ## Follow-up: 2026-11-03 Port Validation, Cooldown Eviction, DPI Port Expansion, and Target Port Telemetry (Cycle 1)
 
 - **`ArpSpoofRule` Periodic Cooldown Pruning (v1.8):**
