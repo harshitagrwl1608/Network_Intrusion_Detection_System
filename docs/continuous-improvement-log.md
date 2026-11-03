@@ -512,15 +512,49 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
   - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
   - `pytest ids_project/tests`: 481 passed in 52.16s (task-932).
 - **Test Results**: All 481 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly. Exactly 19 rules preserved in `RuleEngine.rules`.
-- **Commit Hash**: Pending commit for Cycle 13.
+- **Commit Hash**: `f54f208` (pushed to `origin/antigravity/overnight-work`)
 - **Remaining Issues**:
   - Inspect `DistributedSynFloodRule` for target and source LRU eviction bounds, clock-drift handling, and optional `now=None` in `prune_stale`.
 - **Next Cycle's Objective**: Cycle 14 — `DistributedSynFloodRule` LRU state bounding and garbage collection hardening.
 
 ---
 
+## Cycle 14 / 15
+
+- **Date/Time**: 2026-11-04 01:07:00 UTC+5:30
+- **Files Inspected**:
+  - `ids_project/engine/rules.py` (`DistributedSynFloodRule`)
+  - `ids_project/tests/test_finite_rule_timestamps.py`
+  - `ids_project/tests/test_port_scan_detection.py`
+- **Weakness Discovered**:
+  1. `DistributedSynFloodRule`:
+     - `self._history` and inner `sources` tracking used plain `dict` structures with `pop(next(iter(...)))`, failing to maintain deterministic LRU recency tracking for target hosts or per-target source IP addresses.
+     - `prune_stale` required a positional `now: float` parameter without default `now = time.time()`.
+     - `self._cooldown` state was not bounded using LRU order and direct `del` was used in `prune_stale`.
+- **Changes Implemented**:
+  1. Updated `DistributedSynFloodRule` (v1.9):
+     - Converted `self._history` to `OrderedDict` with deterministic $O(1)$ LRU eviction via `popitem(last=False)` and `move_to_end(key)` on target updates.
+     - Converted inner `sources` tracking to `OrderedDict` with $O(1)$ LRU eviction via `popitem(last=False)` and `move_to_end(src)`.
+     - Bounded `self._cooldown` using `popitem(last=False)` and `move_to_end(key)`.
+     - Added optional `now: float = None` with default `now = time.time()` in `prune_stale()`.
+     - Hardened `_cooldown` eviction using `self._cooldown.pop(key, None)`.
+  2. Added regression tests:
+     - `test_port_scan_detection.py`: `test_distributed_syn_flood_prune_stale_optional_now_and_source_lru`.
+     - Updated rule version assertions in `test_finite_rule_timestamps.py`.
+- **Tests Executed**:
+  - `pytest ids_project/tests/test_port_scan_detection.py ids_project/tests/test_finite_rule_timestamps.py`: 39 passed in 0.47s.
+  - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
+  - `pytest ids_project/tests`: 482 passed in 51.95s (task-968).
+- **Test Results**: All 482 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly. Exactly 19 rules preserved in `RuleEngine.rules`.
+- **Commit Hash**: Pending commit for Cycle 14.
+- **Remaining Issues**:
+  - Cycle 15 — Final end-to-end regression validation, rule inventory verification, and comprehensive autonomy state finalization.
+- **Next Cycle's Objective**: Cycle 15 — Final regression test suite verification, comprehensive validation report, and campaign finalization.
+
+---
+
 ## Next Actions Summary
 
-1. Commit Cycle 13 verified improvements to `antigravity/overnight-work`.
+1. Commit Cycle 14 verified improvements to `antigravity/overnight-work`.
 2. Push to `origin/antigravity/overnight-work`.
-3. Proceed immediately to Cycle 14: `DistributedSynFloodRule` LRU state bounding and GC hardening.
+3. Proceed immediately to Cycle 15: Final regression verification, state finalization, and end-of-campaign report.

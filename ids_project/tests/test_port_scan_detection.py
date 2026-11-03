@@ -571,6 +571,30 @@ class TestPortScanDetection(unittest.TestCase):
         self.assertIsNone(alert)
         self.assertEqual(len(rule._history[("203.0.113.80", 443)][0]), 1)
 
+    def test_distributed_syn_flood_prune_stale_optional_now_and_source_lru(self):
+        rule = DistributedSynFloodRule(threshold=10, min_sources=2, window=10)
+        def packet(src, ts):
+            return {
+                "type": "IP", "src_ip": src, "dst_ip": "203.0.113.80",
+                "protocol": "TCP", "dst_port": 443, "initial_syn": True,
+                "timestamp": ts,
+            }
+        # Populate sources
+        rule.check(packet("198.51.100.1", 100))
+        rule.check(packet("198.51.100.2", 101))
+        # Refresh 198.51.100.1 recency
+        rule.check(packet("198.51.100.1", 102))
+        # Add third source; since min_sources=2, oldest source (198.51.100.2) should be evicted
+        rule.check(packet("198.51.100.3", 103))
+        _, sources = rule._history[("203.0.113.80", 443)]
+        self.assertIn("198.51.100.1", sources)
+        self.assertNotIn("198.51.100.2", sources)
+        self.assertIn("198.51.100.3", sources)
+
+        # prune_stale with default now=None
+        rule.prune_stale()
+        self.assertNotIn(("203.0.113.80", 443), rule._history)
+
     def test_port_scan_prune_stale_clears_future_drifted_cooldown_and_orphaned_saturated(self):
         rule = PortScanRule(threshold=3, window=10)
         # Manually populate cooldown with future drift and stale past

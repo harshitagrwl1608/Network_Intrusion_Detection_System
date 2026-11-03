@@ -1412,7 +1412,7 @@ class DistributedSynFloodRule:
     """Detect high-volume initial-SYN bursts to one service from many sources."""
 
     name = "DISTRIBUTED_SYN_FLOOD"
-    rule_version = "1.8"
+    rule_version = "1.9"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 500, min_sources: int = 20,
@@ -1431,26 +1431,28 @@ class DistributedSynFloodRule:
         # that many events; if they do not, no older event can restore it.
         # Keeping the most recently active `min_sources` sources is enough to
         # decide the distinct-source predicate without retaining every packet.
-        self._history: dict[tuple, tuple[deque[float], dict[str, float]]] = {}
-        self._cooldown: dict[tuple, float] = {}
+        self._history: OrderedDict[tuple, tuple[deque[float], OrderedDict[str, float]]] = OrderedDict()
+        self._cooldown: OrderedDict[tuple, float] = OrderedDict()
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         with self._lock:
             for key in list(self._history):
                 packet_times, sources = self._history[key]
                 packet_times = deque(ts for ts in packet_times if cutoff <= ts <= now)
-                sources = {src: ts for src, ts in sources.items()
-                           if cutoff <= ts <= now}
+                sources = OrderedDict((src, ts) for src, ts in sources.items()
+                                      if cutoff <= ts <= now)
                 if packet_times:
                     self._history.pop(key, None)
                     self._history[key] = (packet_times, sources)
                 else:
-                    del self._history[key]
+                    self._history.pop(key, None)
             cooldown_cutoff = now - self.ALERT_COOLDOWN_S
             for key, last_alert in list(self._cooldown.items()):
                 if last_alert < cooldown_cutoff or last_alert > now:
-                    del self._cooldown[key]
+                    self._cooldown.pop(key, None)
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP" or record.get("protocol") != "TCP":
@@ -1474,29 +1476,30 @@ class DistributedSynFloodRule:
             state = self._history.get(key)
             if state is None:
                 if len(self._history) >= self.max_targets:
-                    evicted = next(iter(self._history))
-                    self._history.pop(evicted)
+                    evicted, _ = self._history.popitem(last=False)
                     self._cooldown.pop(evicted, None)
-                packet_times, sources = deque(), {}
+                packet_times, sources = deque(), OrderedDict()
             else:
                 packet_times, sources = state
             if packet_times and now < packet_times[-1]:
                 return None
             packet_times = deque(ts for ts in packet_times
                                  if 0 <= now - ts <= self.window)
-            sources = {host: ts for host, ts in sources.items()
-                       if 0 <= now - ts <= self.window}
+            sources = OrderedDict((host, ts) for host, ts in sources.items()
+                                  if 0 <= now - ts <= self.window)
             packet_times.append(now)
             if len(packet_times) > self.threshold:
                 packet_times.popleft()
             sources.pop(src, None)
             sources[src] = now
+            sources.move_to_end(src)
             if len(sources) > self.min_sources:
-                sources.pop(next(iter(sources)))
+                sources.popitem(last=False)
             source_count = len(sources)
             if len(packet_times) < self.threshold or source_count < self.min_sources:
                 self._history.pop(key, None)
                 self._history[key] = (packet_times, sources)
+                self._history.move_to_end(key)
                 return None
             window_start = packet_times[0]
             packet_count = len(packet_times)
@@ -1505,10 +1508,17 @@ class DistributedSynFloodRule:
                     and now - last_alert < self.ALERT_COOLDOWN_S):
                 self._history.pop(key, None)
                 self._history[key] = (packet_times, sources)
+                self._history.move_to_end(key)
+                self._cooldown.move_to_end(key)
                 return None
+            if key not in self._cooldown and len(self._cooldown) >= self.max_targets:
+                self._cooldown.popitem(last=False)
+            self._cooldown.pop(key, None)
             self._cooldown[key] = now
+            self._cooldown.move_to_end(key)
             self._history.pop(key, None)
             self._history[key] = (packet_times, sources)
+            self._history.move_to_end(key)
 
         return {
             "rule_name": self.name,
