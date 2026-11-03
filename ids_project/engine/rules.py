@@ -775,7 +775,7 @@ class TcpStealthScanRule:
     """Detect vertical FIN, NULL, and Xmas TCP probes."""
 
     name = "TCP_STEALTH_SCAN"
-    rule_version = "1.6"
+    rule_version = "1.7"
     _FIN, _SYN, _RST, _PSH, _ACK, _URG, _ECE, _CWR = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80
     _XMAS_FLAGS = _FIN | _PSH | _URG
     _DISALLOWED_FLAGS = _SYN | _RST | _ACK | _ECE | _CWR
@@ -839,7 +839,7 @@ class TcpStealthScanRule:
                 self._probes.pop(next(iter(self._probes)))
             self._probes.pop(key, None)
             self._probes[key] = active
-            distinct_ports = len({port for _, port, _ in active})
+            distinct_ports = len(active)
             if distinct_ports < self.threshold:
                 return None
 
@@ -4259,14 +4259,14 @@ class CleartextHttpOnTlsPortRule:
     """Flag repeated plaintext HTTP requests sent to conventional TLS ports."""
 
     name = "CLEAR_HTTP_ON_TLS_PORT"
-    rule_version = "1.9"
+    rule_version = "1.10"
     MAX_REQUEST_LINE_BYTES = 2064
     STREAM_TIMEOUT_S = 30.0
     MAX_SEEN_REQUEST_IDENTITIES = 32_768
     _METHOD_PREFIXES = (b"GET ", b"POST ", b"PUT ", b"DELETE ",
-                        b"PATCH ", b"OPTIONS ", b"HEAD ")
+                        b"PATCH ", b"OPTIONS ", b"HEAD ", b"CONNECT ", b"TRACE ")
     _REQUEST_LINE = re.compile(
-        rb"(?i)^(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s+[^\r\n]{1,2048}\s+HTTP/1\.[01]\r?\n"
+        rb"(?i)^(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD|CONNECT|TRACE)\s+[^\r\n]{1,2048}\s+HTTP/1\.[01]\r?\n"
     )
 
     def __init__(self, cooldown: float = 600.0, window: float = 600.0,
@@ -4539,6 +4539,8 @@ _SUSPICIOUS_TLS_SUFFIXES: tuple[str, ...] = (
     ".vip.cpolar.cn", ".vip.cpolar.top",
     # Additional DDNS providers
     ".myddns.rocks", ".3utilities.com", ".wikaba.com",
+    # Modern reverse-proxy tunnels (CISA, MITRE ATT&CK T1572 / T1090)
+    ".pinggy.link", ".pinggy.io", ".packetriot.net", ".telebit.io", ".loophole.site",
 )
 
 
@@ -4627,7 +4629,7 @@ class TlsAnomalyRule:
     Port expansion covers: XMPP-SSL (5223), MQTT-TLS (8083), alternative HTTPS C2 (4443, 9443).
     """
     name = "TLS_ANOMALY"
-    rule_version = "1.9"
+    rule_version = "1.10"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
     MAX_CLIENT_HELLO_BYTES = 16_389
@@ -4799,7 +4801,7 @@ class TlsAnomalyRule:
                 f"in SNI ('{sni}') — violates RFC 6066, possible C2 beacon"
             )
         # Check 2: Suspicious dynamic DNS / reverse-proxy tunnel in SNI
-        elif any(sni_clean.endswith(suffix) for suffix in _SUSPICIOUS_TLS_SUFFIXES):
+        elif any(sni_clean.endswith(suffix) or sni_clean == suffix.lstrip(".") for suffix in _SUSPICIOUS_TLS_SUFFIXES):
             anomaly_type = "SUSPICIOUS_TUNNEL_SNI"
             detail = (
                 f"{src_ip} sent TLS Client Hello to {dst_ip}:{dst_port} with suspicious "

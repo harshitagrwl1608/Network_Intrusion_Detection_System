@@ -32,13 +32,31 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **448 passed, 108 subtests passed** in 53.33s (`python3 -m pytest -q -p no:cacheprovider`).
-- Unittest discover: **Ran 448 tests in 48.357s. OK.** (`python3 -m unittest discover ids_project/tests`).
+- Full test suite: **450 passed, 114 subtests passed** in 49.56s (`python3 -m pytest -q -p no:cacheprovider`).
+- Unittest discover: **Ran 450 tests in 47.711s. OK.** (`python3 -m unittest discover ids_project/tests`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** Precision: 100.0%, Recall: 100.0%, F1: 100.0%. These are fixture results only and do **not** imply 100% real-world accuracy.
 - Ground-truth evaluation: **38/38 detected** (TP=38, FN=0, FP=0, Precision: 100.0%, Recall: 100.0%, F1: 100.0%).
 - External dataset replay (CTU-13 Scenario 6 / Botnet-47 Donbot, 24,764 packets): all 24,764 packets processed with 0 drops; 45 `SLOW_PORT_SCAN v1.9` horizontal scan alerts verified against infected host `147.32.84.165` targeting port 25.
 - Rule inventory verified: **strictly 19 rules registered in `RuleEngine.rules`**. Zero new rules, zero new Sigma/SPL rules, zero deleted rules.
 - `git diff --check` clean.
+
+## Follow-up: 2026-11-03 Reverse Tunnel Expansion, Apex Tunnel SNI Coverage, Cleartext CONNECT/TRACE Handling, and Stealth Scan State Optimization
+
+- **`TlsAnomalyRule` Reverse-Proxy C2 Tunneling and Apex SNI Support (v1.10):**
+  - Expanded `_SUSPICIOUS_TLS_SUFFIXES` with modern reverse-tunneling services leveraged in threat campaigns and red-team operations (MITRE ATT&CK T1572 / T1090): `.pinggy.link`, `.pinggy.io`, `.packetriot.net`, `.telebit.io`, and `.loophole.site`.
+  - Added support for both apex tunnel domains and subdomains (`sni_clean == suffix.lstrip(".") or sni_clean.endswith(suffix)`), closing the gap where direct connections to tunnel root hostnames (e.g. `trycloudflare.com`, `ngrok.io`, `bore.pub`) bypassed subdomain-only matching.
+  - Added unit test `test_apex_and_modern_tunnel_services_detected` in `test_tls_anomaly.py`.
+- **`CleartextHttpOnTlsPortRule` Extended Method Handling (v1.10):**
+  - Added `CONNECT` and `TRACE` methods to `_METHOD_PREFIXES` and `_REQUEST_LINE`. Attackers leverage cleartext `CONNECT` requests on TLS ports (443/8443) to probe for open proxy tunneling or misconfigured reverse proxies.
+  - Added unit test `test_connect_and_trace_methods_detected` in `test_clear_http_tls.py`.
+- **`TcpStealthScanRule` Unique State Set Elimination (v1.7):**
+  - Streamlined `distinct_ports` evaluation to `len(active)` rather than constructing an intermediate set `{port for _, port, _ in active}`. Because incoming probes to an existing destination port filter out prior occurrences (`port != dst_port`), the sliding window list is strictly pairwise distinct.
+- **Regressions & Verifications:**
+  - Synchronized rule version assertions across `test_finite_rule_timestamps.py`, `test_tcp_stealth_scan_detection.py`, `test_clear_http_tls.py`, and `test_tls_anomaly.py`.
+  - Full test suite: **450 passed, 114 subtests passed** in 49.56s.
+  - Synthetic evaluation harness: **38/38 detected** (100.0% precision, recall, F1; 0 FP on benign).
+  - External CTU-13 Donbot replay: 24,764/24,764 packets processed (0 dropped), 45 `SLOW_PORT_SCAN v1.9` alerts detected.
+  - Rule inventory invariant: strictly 19 rules registered in `RuleEngine.rules`.
 
 ## Follow-up: 2026-11-03 HTTPS Metadata SSRF Detection, FHS /usr Binary Path Coverage, and DNS Subdomain Frequency Optimization
 

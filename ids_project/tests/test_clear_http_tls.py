@@ -250,7 +250,18 @@ class TestCleartextHttpOnTlsPortRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["src_port"], 50001)
         self.assertIsInstance(alert["src_port"], int)
-        self.assertEqual(alert["rule_version"], "1.9")
+        self.assertEqual(alert["rule_version"], "1.10")
+
+    def test_connect_and_trace_methods_detected(self):
+        for method in (b"CONNECT proxy.internal:8080 HTTP/1.1\r\nHost: proxy.internal:8080\r\n\r\n",
+                       b"TRACE /diagnostics HTTP/1.1\r\nHost: c2.example\r\n\r\n"):
+            with self.subTest(method=method[:7]):
+                rule = CleartextHttpOnTlsPortRule(min_requests=2)
+                self.assertIsNone(rule.check(self.packet(method, src_port=51000, event_timestamp=200.0)))
+                alert = rule.check(self.packet(method, src_port=51001, event_timestamp=201.0))
+                self.assertIsNotNone(alert)
+                self.assertEqual(alert["rule_name"], "CLEAR_HTTP_ON_TLS_PORT")
+                self.assertEqual(alert["rule_version"], "1.10")
 
 
 if __name__ == "__main__":
