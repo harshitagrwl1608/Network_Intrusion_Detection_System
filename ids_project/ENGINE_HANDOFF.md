@@ -32,13 +32,43 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **450 passed, 114 subtests passed** in 49.56s (`python3 -m pytest -q -p no:cacheprovider`).
-- Unittest discover: **Ran 450 tests in 47.711s. OK.** (`python3 -m unittest discover ids_project/tests`).
+- Full test suite: **452 passed, 125 subtests passed** in 54.97s (`python3 -m pytest -q -p no:cacheprovider`).
+- Unittest discover: **Ran 452 tests in 51.372s. OK.** (`python3 -m unittest discover ids_project/tests`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** Precision: 100.0%, Recall: 100.0%, F1: 100.0%. These are fixture results only and do **not** imply 100% real-world accuracy.
 - Ground-truth evaluation: **38/38 detected** (TP=38, FN=0, FP=0, Precision: 100.0%, Recall: 100.0%, F1: 100.0%).
 - External dataset replay (CTU-13 Scenario 6 / Botnet-47 Donbot, 24,764 packets): all 24,764 packets processed with 0 drops; 45 `SLOW_PORT_SCAN v1.9` horizontal scan alerts verified against infected host `147.32.84.165` targeting port 25.
 - Rule inventory verified: **strictly 19 rules registered in `RuleEngine.rules`**. Zero new rules, zero new Sigma/SPL rules, zero deleted rules.
 - `git diff --check` clean.
+
+## Follow-up: 2026-11-03 Cross-Platform Binary Exfiltration, Command Injection Shell Path Generalization, and Auth Port Expansion
+
+- **`DataExfiltrationRule` Cross-Platform Binary Exfiltration Signatures (v1.18):**
+  - Added Linux ELF executable magic bytes (`\x7fELF`), compiled Java class bytecode / Mach-O universal binary magic (`\xca\xfe\xba\xbe`), and Mach-O 64-bit executable magic (`\xcf\xfa\xed\xfe`) to `_EXFIL_SIGNATURES`.
+  - In modern multi-platform cloud and containerized environments, attackers stage compiled custom implants, rootkits, kernel modules, or compiled Java classes for outbound exfiltration (MITRE ATT&CK T1005 / T1048 / T1041). Expanding beyond Windows PE (`MZ`) and archive formats closes this cross-platform binary exfiltration gap while preserving zero false-positive risk (rule evaluates internal -> external traffic only).
+  - Added unit test `test_elf_and_binary_signatures_exfil_triggers_alert` in `test_data_exfiltration.py`.
+- **`PayloadRule` Command Injection Binary Path & Reverse Shell Hardening (v1.22):**
+  - Generalized `CMD_INJECTION` shell executable regex from `/(?:usr/)?bin/(?:ba|da)?sh|/bin/zsh` to `/(?:usr/)?bin/(?:ba|da|z)?sh`, ensuring `/usr/bin/zsh` is detected on macOS and Linux systems alongside `/bin/zsh`.
+  - Hardened Netcat reverse-shell detection pattern from `nc\s+-(?:e|c)\s+/bin` to `(?:nc|ncat|netcat)\s+-(?:e|c)\s+/(?:usr/)?bin`, detecting `ncat -e /bin/sh`, `netcat -e /bin/sh`, and `nc -e /usr/bin/bash` without bypass from symlinked `/usr/bin` paths.
+  - Added unit test cases for `/usr/bin/zsh` and `ncat -e /usr/bin/sh` in `test_payload_detection.py`.
+- **`BruteForceRule` Enterprise Database & Secure Directory Auth Port Expansion (v1.10):**
+  - Expanded `_BRUTE_FORCE_AUTH_PORTS` to include:
+    - `1433`: Microsoft SQL Server (TDS protocol) — standard enterprise database brute-force target alongside MySQL (3306) and Postgres (5432).
+    - `636`: LDAPS (Secure LDAP over TLS) — standard Active Directory credential authentication port.
+    - `993`: IMAPS (Secure IMAP over TLS) — enterprise mail authentication endpoint.
+    - `995`: POP3S (Secure POP3 over TLS) — enterprise mail authentication endpoint.
+  - Added unit test `test_mssql_and_ldaps_auth_ports_detected` in `test_new_rules_cycle8.py`.
+- **`TlsAnomalyRule` Reverse-Proxy C2 Suffix Expansion (v1.11):**
+  - Added modern reverse-tunneling and vanity C2 domains to `_SUSPICIOUS_TLS_SUFFIXES`: `.playit.gg`, `.ngrok.dev`, `.serveousercontent.com`.
+  - Added test cases in `test_tls_anomaly.py`.
+- **`DnsRule` International Multi-Label ccTLD Suffix Expansion (v1.22):**
+  - Expanded `_COMMON_MULTI_LABEL_CC_SUFFIXES` with Austrian (`co.at`, `or.at`, `gv.at`, `ac.at`), Israeli (`co.il`, `org.il`, `gov.il`, `ac.il`), Colombian (`com.co`, `org.co`, `gov.co`, `edu.co`), Peruvian (`com.pe`, `org.pe`, `gob.pe`, `edu.pe`), Venezuelan (`com.ve`, `org.ve`, `gob.ve`, `edu.ve`), and Ecuadorian (`com.ec`, `org.ec`, `gob.ec`, `edu.ec`) suffixes to prevent incorrect grouping of unrelated hostnames under ccTLDs.
+- **Regressions & Verifications:**
+  - Synchronized rule version assertions across `test_data_exfiltration.py`, `test_payload_detection.py`, `test_finite_rule_timestamps.py`, `test_new_rules_cycle8.py`, `test_dns_and_arp_detection.py`, and `test_tls_anomaly.py`.
+  - Full test suite: **452 passed, 125 subtests passed** in 54.97s. Unittest discover: **Ran 452 tests in 51.372s. OK.**
+  - Synthetic evaluation harness: **38/38 detected** (100.0% precision, recall, F1; 0 FP on benign).
+  - Ground-truth evaluation: **38/38 detected** (100.0% precision, recall, F1).
+  - External CTU-13 Donbot replay: 24,764/24,764 packets processed (0 dropped), 45 `SLOW_PORT_SCAN v1.9` alerts detected.
+  - Rule inventory invariant: strictly 19 rules registered in `RuleEngine.rules`.
 
 ## Follow-up: 2026-11-03 Reverse Tunnel Expansion, Apex Tunnel SNI Coverage, Cleartext CONNECT/TRACE Handling, and Stealth Scan State Optimization
 

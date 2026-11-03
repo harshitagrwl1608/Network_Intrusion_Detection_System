@@ -398,7 +398,7 @@ class TestDnsSubdomainExfil(unittest.TestCase):
                 src="10.0.0.26", domain=f"{label}.bad.com",
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.21")
+        self.assertEqual(alert["rule_version"], "1.22")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
         self.assertEqual(alert["evidence"]["parent_domain"], "bad.com")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 3)
@@ -426,7 +426,7 @@ class TestDnsSubdomainExfil(unittest.TestCase):
                 src="10.0.0.28", domain=f"{label}.foo.io",
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.21")
+        self.assertEqual(alert["rule_version"], "1.22")
         self.assertEqual(alert["evidence"]["parent_domain"], "foo.io")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 3)
 
@@ -467,7 +467,7 @@ class TestDnsSubdomainExfil(unittest.TestCase):
                 domain=f"host.chunk{i:04x}.evil.com",
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.21")
+        self.assertEqual(alert["rule_version"], "1.22")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
         self.assertEqual(alert["evidence"]["subdomain"], "host.chunk0004")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 5)
@@ -667,7 +667,7 @@ class TestBruteForceRule(unittest.TestCase):
                 break
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "BRUTE_FORCE")
-        self.assertEqual(alert["rule_version"], "1.9")
+        self.assertEqual(alert["rule_version"], "1.10")
         self.assertEqual(alert["severity"], "medium")
         self.assertEqual(alert["confidence"], "heuristic")
         self.assertEqual(alert["evidence"]["classification"], "AUTH_SERVICE_SYN_BURST")
@@ -694,7 +694,7 @@ class TestBruteForceRule(unittest.TestCase):
         first["tcp_seq"] = 100
         alert = rule.check(second)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.9")
+        self.assertEqual(alert["rule_version"], "1.10")
         self.assertEqual(alert["evidence"]["attempt_count"], 2)
 
     def test_syn_ack_from_auth_service_port_is_not_counted(self):
@@ -762,6 +762,20 @@ class TestBruteForceRule(unittest.TestCase):
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["auth_port"], 8443)
+
+    def test_mssql_and_ldaps_auth_ports_detected(self):
+        for port in (1433, 636, 993, 995):
+            with self.subTest(port=port):
+                rule = BruteForceRule(threshold=3, window=60)
+                base = time.time()
+                alert = None
+                for i in range(3):
+                    alert = rule.check(self._syn(
+                        "10.0.0.10", "10.0.0.20", dst_port=port,
+                        timestamp=base + i * 0.1))
+                self.assertIsNotNone(alert)
+                self.assertEqual(alert["rule_version"], "1.10")
+                self.assertEqual(alert["evidence"]["auth_port"], port)
 
     def test_below_threshold_no_alert(self):
         rule = BruteForceRule(threshold=10, window=60)

@@ -1975,7 +1975,7 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
     (
         "CMD_INJECTION",
         re.compile(
-            rb"(?i)(/(?:usr/)?bin/(?:ba|da)?sh|/bin/zsh|/etc/passwd|/etc/shadow|cmd\.exe|powershell\.exe"
+            rb"(?i)(/(?:usr/)?bin/(?:ba|da|z)?sh|/etc/passwd|/etc/shadow|cmd\.exe|powershell\.exe"
             # A bare command-substitution delimiter is common in quoted mail,
             # logs and templates. Require a recognizable command inside it so
             # arbitrary delimited prose does not become a shell alert.
@@ -1983,7 +1983,7 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
             rb"|`\s*(?:/(?:[\w.-]+/)*[\w.-]+|(?:id|whoami|uname|cat|curl|wget|nc|netcat|bash|sh|cmd|powershell|python\d?|perl|ruby|node|php|chmod|chown|sudo|touch|rm|echo|sleep|ping)\b)[^`]{0,100}`"
             # Reverse-shell patterns
             rb"|bash\s+-i\s+>&\s*/dev/tcp/|/dev/tcp/"
-            rb"|nc\s+-(?:e|c)\s+/bin"
+            rb"|(?:nc|ncat|netcat)\s+-(?:e|c)\s+/(?:usr/)?bin"
             # Interpreter one-liner code execution (python, perl, ruby, node, php)
             rb"|python\d?\s+-c\s+[\x27\x22]"
             rb"|perl\s+-e\s+[\x27\x22]"
@@ -2300,7 +2300,7 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.21"
+    rule_version = "1.22"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048,
@@ -2815,12 +2815,18 @@ _COMMON_MULTI_LABEL_CC_SUFFIXES = frozenset({
     "com.pk", "net.pk", "org.pk", "gov.pk", "edu.pk",
     "co.id", "web.id", "or.id", "ac.id", "go.id",
     "com.ua", "net.ua", "org.ua", "gov.ua",
+    "co.at", "or.at", "gv.at", "ac.at",
+    "co.il", "org.il", "gov.il", "ac.il",
+    "com.co", "org.co", "gov.co", "edu.co",
+    "com.pe", "org.pe", "gob.pe", "edu.pe",
+    "com.ve", "org.ve", "gob.ve", "edu.ve",
+    "com.ec", "org.ec", "gob.ec", "edu.ec",
 })
 
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.21"
+    rule_version = "1.22"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -3239,6 +3245,10 @@ _BRUTE_FORCE_AUTH_PORTS: frozenset = frozenset({
     143,   # IMAP
     389,   # LDAP
     445,   # SMB
+    636,   # LDAPS (Secure LDAP over TLS)
+    993,   # IMAPS (Secure IMAP over TLS)
+    995,   # POP3S (Secure POP3 over TLS)
+    1433,  # Microsoft SQL Server (TDS protocol)
     3306,  # MySQL
     3389,  # RDP
     5432,  # PostgreSQL
@@ -3274,7 +3284,7 @@ class BruteForceRule:
     """
 
     name = "BRUTE_FORCE"
-    rule_version = "1.9"
+    rule_version = "1.10"
 
     # Per-(src, dst, port) cooldown after firing. Prevents re-alerting for the
     # same ongoing brute-force burst; renewed bursts after the cooldown will fire.
@@ -3694,7 +3704,7 @@ class DataExfiltrationRule:
     - Configured TRUSTED_HOSTS.
     """
     name = "DATA_EXFIL"
-    rule_version = "1.17"
+    rule_version = "1.18"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 5000
     MAX_TRACKED_FLOW_EVENTS = 1_000_000
@@ -3724,6 +3734,12 @@ class DataExfiltrationRule:
         (b"\x1f\x9d", "LZW/Compress archive"),
         # Windows PE/EXE/DLL: executable binary exfiltration
         (b"MZ", "Windows PE executable"),
+        # Linux ELF executable: compiled binaries, custom implants, kernel modules
+        (b"\x7fELF", "Linux ELF executable"),
+        # Compiled Java class bytecode / Mach-O universal binary
+        (b"\xca\xfe\xba\xbe", "Compiled Java class / Mach-O universal binary"),
+        # Mach-O 64-bit executable (Apple Silicon / Intel macOS)
+        (b"\xcf\xfa\xed\xfe", "Mach-O 64-bit executable"),
         # MS Office/OLE compound document (Word, Excel, PowerPoint, Outlook .msg)
         (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "MS Office OLE compound document"),
         # PDF: credential documents, internal reports
@@ -4541,6 +4557,7 @@ _SUSPICIOUS_TLS_SUFFIXES: tuple[str, ...] = (
     ".myddns.rocks", ".3utilities.com", ".wikaba.com",
     # Modern reverse-proxy tunnels (CISA, MITRE ATT&CK T1572 / T1090)
     ".pinggy.link", ".pinggy.io", ".packetriot.net", ".telebit.io", ".loophole.site",
+    ".playit.gg", ".ngrok.dev", ".serveousercontent.com",
 )
 
 
@@ -4629,7 +4646,7 @@ class TlsAnomalyRule:
     Port expansion covers: XMPP-SSL (5223), MQTT-TLS (8083), alternative HTTPS C2 (4443, 9443).
     """
     name = "TLS_ANOMALY"
-    rule_version = "1.10"
+    rule_version = "1.11"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
     MAX_CLIENT_HELLO_BYTES = 16_389

