@@ -143,7 +143,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
             "src_port": "54321", "dst_port": "443", "protocol": "TCP",
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.3")
+        self.assertEqual(alert["rule_version"], "1.4")
         self.assertEqual(alert["src_port"], 54321)
         self.assertEqual(alert["dst_port"], 443)
 

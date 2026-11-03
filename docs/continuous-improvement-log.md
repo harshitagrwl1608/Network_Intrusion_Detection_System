@@ -393,16 +393,57 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
   - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
   - `pytest ids_project/tests`: 477 passed (task-664).
 - **Test Results**: All 477 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly. Exactly 19 rules preserved in `RuleEngine.rules`.
-- **Commit Hash**: Pending commit for Cycle 10.
+- **Commit Hash**: `37f19b6` (pushed to `origin/antigravity/overnight-work`)
 - **Remaining Issues**:
-  - All 10 development cycles successfully completed and verified.
-- **Next Cycle's Objective**: Campaign completion, final test suite execution, final report generation, and repository synchronization.
+  - Inspect `BlocklistRule` for subnet caching performance and `TlsAnomalyRule` for literal IPv6 detection and clock drift handling.
+- **Next Cycle's Objective**: Cycle 11 — `BlocklistRule` memoization cache and `TlsAnomalyRule` IPv6 SNI hardening.
+
+---
+
+## Cycle 11 / 15
+
+- **Date/Time**: 2026-11-04 00:54:00 UTC+5:30
+- **Files Inspected**:
+  - `ids_project/engine/rules.py` (`BlocklistRule`, `TlsAnomalyRule`)
+  - `ids_project/tests/test_blocklist_path_handling.py`
+  - `ids_project/tests/test_finite_rule_timestamps.py`
+  - `ids_project/tests/test_tls_anomaly.py`
+- **Weakness Discovered**:
+  1. `BlocklistRule`:
+     - Computed full string IP address parsing and linear subnet scans on every packet without memoization, imposing $O(N)$ CPU overhead on high-throughput packet streams.
+     - Did not partition IPv4 and IPv6 subnets, causing IPv4 addresses to be tested against IPv6 subnets and vice versa.
+     - Lacked `prune_stale()` method for garbage collection of transient lookup state.
+  2. `TlsAnomalyRule`:
+     - Checked literal IP in SNI using loose regex matching rather than RFC 6066 compliant IP parsing, and did not properly handle bracketed IPv6 addresses (`[2001:db8::1]`).
+     - `prune_stale` required a positional `now: float` argument without default, and did not prune future-drifted cooldown timestamps (`seen[k] > now`).
+- **Changes Implemented**:
+  1. Updated `BlocklistRule` (v1.4):
+     - Added bounded $O(1)$ LRU memoization cache `self._cache` (up to 4096 entries) for fast repeated IP lookup.
+     - Partitioned CIDR networks into `_v4_networks` and `_v6_networks` to eliminate cross-protocol evaluation overhead.
+     - Added `prune_stale(self, now: float = None)` method to maintain bounded memory.
+  2. Updated `TlsAnomalyRule` (v1.13):
+     - Added robust `ipaddress.ip_address(sni_clean.strip("[]"))` validation to detect both IPv4 and IPv6 literal SNI while avoiding false positives on non-IP hostnames.
+     - Hardened `prune_stale(self, now: float = None)` with default `now = time.time()` and added clock-drift eviction for `_seen` (`seen[k] > now`).
+  3. Added regression tests:
+     - `test_blocklist_path_handling.py`: `test_blocklist_cache_and_prune_stale`.
+     - `test_tls_anomaly.py`: `test_literal_ipv6_sni_and_prune_stale_optional_now`.
+     - Updated rule version assertions across `test_finite_rule_timestamps.py` and `test_tls_anomaly.py`.
+- **Tests Executed**:
+  - `pytest ids_project/tests/test_blocklist_path_handling.py ids_project/tests/test_finite_rule_timestamps.py`: 16 passed in 0.52s.
+  - `pytest ids_project/tests/test_tls_anomaly.py`: 17 passed in 0.16s.
+  - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
+  - `pytest ids_project/tests`: 479 passed (task-769).
+- **Test Results**: All 479 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly. Exactly 19 rules preserved in `RuleEngine.rules`.
+- **Commit Hash**: Pending commit for Cycle 11.
+- **Remaining Issues**:
+  - Inspect `TcpStealthScanRule` and `TcpFlagAnomalyRule` for TCP flag combination bounds, probe eviction, and port validation.
+- **Next Cycle's Objective**: Cycle 12 — `TcpStealthScanRule` and `TcpFlagAnomalyRule` state bounding and flag combination resilience.
 
 ---
 
 ## Next Actions Summary
 
-1. Verify task-664 completion.
-2. Commit Cycle 10 verified improvements to `antigravity/overnight-work`.
+1. Verify task-769 completion.
+2. Commit Cycle 11 verified improvements to `antigravity/overnight-work`.
 3. Push to `origin/antigravity/overnight-work`.
-4. Finalize autonomy state and compile final overnight engineering report.
+4. Proceed immediately to Cycle 12: `TcpStealthScanRule` and `TcpFlagAnomalyRule` hardening.

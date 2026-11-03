@@ -290,7 +290,8 @@ def _is_internal(ip: str) -> bool:
 
 class BlocklistRule:
     name = "BLOCKLIST"
-    rule_version = "1.3"
+    rule_version = "1.4"
+    MAX_CACHE_ENTRIES = 4096
 
     def __init__(self, blocklist):
         """
@@ -305,26 +306,54 @@ class BlocklistRule:
             # Legacy: plain set of IP strings — no CIDR support
             self._exact = set(blocklist)
             self._networks = []
+        self._v4_networks = [n for n in self._networks if getattr(n, "version", 4) == 4]
+        self._v6_networks = [n for n in self._networks if getattr(n, "version", 6) == 6]
+        self._cache: OrderedDict[str, bool] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def prune_stale(self, now: float = None):
+        """Bounded cache maintenance for blocklist lookups."""
+        with self._lock:
+            while len(self._cache) > self.MAX_CACHE_ENTRIES // 2:
+                self._cache.popitem(last=False)
 
     def _in_blocklist(self, ip: str) -> bool:
         """Check exact set then CIDR networks.
         Normalises the observed IP before exact matching so that
         equivalent IPv6 spellings (e.g. ::1 vs ::0:1) resolve correctly.
+        Caches recent lookups in a bounded LRU dictionary for fast O(1) matching.
         """
         if not ip or not isinstance(ip, str):
             return False
         ip = ip.strip()
+
+        with self._lock:
+            cached = self._cache.get(ip)
+            if cached is not None:
+                self._cache.move_to_end(ip)
+                return cached
+
         try:
             addr = ipaddress.ip_address(ip)
             canon = str(addr)
         except ValueError:
             addr = None
             canon = ip  # not a valid IP — try raw string
+
+        matched = False
         if canon in self._exact:
-            return True
-        if addr is not None and self._networks:
-            return any(addr in net for net in self._networks)
-        return False
+            matched = True
+        elif addr is not None and self._networks:
+            nets = self._v4_networks if addr.version == 4 else self._v6_networks
+            matched = any(addr in net for net in nets)
+
+        with self._lock:
+            if ip not in self._cache and len(self._cache) >= self.MAX_CACHE_ENTRIES:
+                self._cache.popitem(last=False)
+            self._cache[ip] = matched
+            self._cache.move_to_end(ip)
+
+        return matched
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP":
@@ -4720,7 +4749,7 @@ class TlsAnomalyRule:
     Port expansion covers: XMPP-SSL (5223), MQTT-TLS (8083), alternative HTTPS C2 (4443, 9443).
     """
     name = "TLS_ANOMALY"
-    rule_version = "1.12"
+    rule_version = "1.13"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
     MAX_CLIENT_HELLO_BYTES = 16_389
@@ -4842,11 +4871,13 @@ class TlsAnomalyRule:
                 self._hello_prefixes.move_to_end(key)
         return None
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.cooldown
         with self._lock:
             for k in list(self._seen):
-                if self._seen[k] < cutoff:
+                if self._seen[k] < cutoff or self._seen[k] > now:
                     del self._seen[k]
             stream_cutoff = now - self.STREAM_TIMEOUT_S
             for key, (_, _, _, last_seen, _) in list(self._hello_prefixes.items()):
@@ -4885,7 +4916,15 @@ class TlsAnomalyRule:
         detail = ""
 
         # Check 1: Literal IP in SNI (RFC 6066 prohibits literal IPs in HostName)
-        if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", sni_clean) or ":" in sni_clean:
+        is_literal_ip = False
+        try:
+            ipaddress.ip_address(sni_clean.strip("[]"))
+            is_literal_ip = True
+        except ValueError:
+            if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", sni_clean) or ":" in sni_clean:
+                is_literal_ip = True
+
+        if is_literal_ip:
             anomaly_type = "DIRECT_IP_SNI"
             detail = (
                 f"{src_ip} sent TLS Client Hello to {dst_ip}:{dst_port} with literal IP "
