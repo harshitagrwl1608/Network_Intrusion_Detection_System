@@ -29,6 +29,7 @@ class TestIcmpSweepRule(unittest.TestCase):
         alert = self.rule.check(self.record("198.51.100.4", 103))
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "ICMP_SWEEP")
+        self.assertEqual(alert["rule_version"], "1.8")
         self.assertEqual(alert["evidence"]["distinct_targets"], 4)
         self.assertEqual(alert["window_start"], 100)
 
@@ -108,6 +109,23 @@ class TestIcmpSweepRule(unittest.TestCase):
         self.rule.check(self.record("198.51.100.1", 100))
         self.rule.prune_stale(111)
         self.assertNotIn("192.0.2.10", self.rule._history)
+
+        # Test prune_stale with default now=None
+        self.rule.check(self.record("198.51.100.1", 100))
+        self.rule.prune_stale()
+        self.assertNotIn("192.0.2.10", self.rule._history)
+
+    def test_history_lru_eviction(self):
+        rule = IcmpSweepRule(threshold=10, window=10, max_sources=2)
+        rule.check(self.record("198.51.100.1", 100, src_ip="192.0.2.1"))
+        rule.check(self.record("198.51.100.1", 101, src_ip="192.0.2.2"))
+        # Refresh 192.0.2.1 recency
+        rule.check(self.record("198.51.100.2", 102, src_ip="192.0.2.1"))
+        # Add third source, which should evict least recently used (192.0.2.2)
+        rule.check(self.record("198.51.100.1", 103, src_ip="192.0.2.3"))
+        self.assertIn("192.0.2.1", rule._history)
+        self.assertNotIn("192.0.2.2", rule._history)
+        self.assertIn("192.0.2.3", rule._history)
 
     def test_invalid_settings_use_defaults_without_one_target_alerts(self):
         rule = IcmpSweepRule(threshold=0, window=-1, max_sources="invalid")

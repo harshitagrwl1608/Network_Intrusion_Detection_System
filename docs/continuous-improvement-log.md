@@ -472,15 +472,55 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
   - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
   - `pytest ids_project/tests`: 480 passed in 52.99s (task-857).
 - **Test Results**: All 480 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly. Exactly 19 rules preserved in `RuleEngine.rules`.
-- **Commit Hash**: Pending commit for Cycle 12.
+- **Commit Hash**: `da03d14` (pushed to `origin/antigravity/overnight-work`)
 - **Remaining Issues**:
   - Inspect `IcmpSweepRule` and `IcmpFloodRule` for ICMPv6 echo handling, clock-drift eviction, and optional `now=None` GC defaults.
 - **Next Cycle's Objective**: Cycle 13 — `IcmpSweepRule` and `IcmpFloodRule` hardening with ICMPv6 echo support and garbage collection defaults.
 
 ---
 
+## Cycle 13 / 15
+
+- **Date/Time**: 2026-11-04 01:04:00 UTC+5:30
+- **Files Inspected**:
+  - `ids_project/engine/rules.py` (`IcmpSweepRule`, `IcmpFloodRule`)
+  - `ids_project/tests/test_finite_rule_timestamps.py`
+  - `ids_project/tests/test_icmp_sweep_detection.py`
+  - `ids_project/tests/test_icmp_flood.py`
+- **Weakness Discovered**:
+  1. `IcmpSweepRule`:
+     - `self._history` used a standard `defaultdict(list)` with `pop(next(iter(self._history)))`, which failed to enforce true LRU recency ordering upon probe access.
+     - `self._fired` used a plain dictionary and discarded arbitrary keys upon reaching capacity instead of the oldest fired source.
+     - `prune_stale` required a positional `now: float` parameter without default `now = time.time()`.
+  2. `IcmpFloodRule`:
+     - `self._history` used a plain `dict` with `pop(next(iter(self._history)))` instead of an LRU `OrderedDict`.
+     - `prune_stale` required a positional `now: float` parameter without default `now = time.time()`.
+- **Changes Implemented**:
+  1. Updated `IcmpSweepRule` (v1.8):
+     - Converted `self._history` and `self._fired` to `OrderedDict` with deterministic $O(1)$ LRU eviction via `popitem(last=False)` and `move_to_end(key)` on probe updates.
+     - Added optional `now: float = None` with default `now = time.time()` in `prune_stale()`.
+     - Hardened `_fired` eviction using `self._fired.pop(src, None)`.
+  2. Updated `IcmpFloodRule` (v1.8):
+     - Converted `self._history` to `OrderedDict` with deterministic $O(1)$ LRU eviction via `popitem(last=False)` and `move_to_end(key)` on packet updates.
+     - Added optional `now: float = None` with default `now = time.time()` in `prune_stale()`.
+  3. Added regression tests:
+     - `test_icmp_sweep_detection.py`: `test_history_lru_eviction`, verified `rule_version == "1.8"`, and tested `prune_stale()` with default `now=None`.
+     - `test_icmp_flood.py`: updated `test_prune_stale` to verify default `now=None`, and bumped version assertion to `"1.8"`.
+     - Updated rule version assertions in `test_finite_rule_timestamps.py`.
+- **Tests Executed**:
+  - `pytest ids_project/tests/test_icmp_sweep_detection.py ids_project/tests/test_icmp_flood.py ids_project/tests/test_finite_rule_timestamps.py`: 29 passed in 0.41s.
+  - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
+  - `pytest ids_project/tests`: 481 passed in 52.16s (task-932).
+- **Test Results**: All 481 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly. Exactly 19 rules preserved in `RuleEngine.rules`.
+- **Commit Hash**: Pending commit for Cycle 13.
+- **Remaining Issues**:
+  - Inspect `DistributedSynFloodRule` for target and source LRU eviction bounds, clock-drift handling, and optional `now=None` in `prune_stale`.
+- **Next Cycle's Objective**: Cycle 14 — `DistributedSynFloodRule` LRU state bounding and garbage collection hardening.
+
+---
+
 ## Next Actions Summary
 
-1. Commit Cycle 12 verified improvements to `antigravity/overnight-work`.
+1. Commit Cycle 13 verified improvements to `antigravity/overnight-work`.
 2. Push to `origin/antigravity/overnight-work`.
-3. Proceed immediately to Cycle 13: `IcmpSweepRule` and `IcmpFloodRule` hardening.
+3. Proceed immediately to Cycle 14: `DistributedSynFloodRule` LRU state bounding and GC hardening.

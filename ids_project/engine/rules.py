@@ -1549,7 +1549,7 @@ class IcmpSweepRule:
     """Detect a source probing distinct IPv4/IPv6 destinations with echo requests."""
 
     name = "ICMP_SWEEP"
-    rule_version = "1.7"
+    rule_version = "1.8"
 
     def __init__(self, threshold: int = 12, window: int = 10,
                  max_sources: int = 4096):
@@ -1558,10 +1558,12 @@ class IcmpSweepRule:
         self.max_sources = _positive_setting(
             max_sources, 4096, "ICMP_SWEEP_MAX_SOURCES")
         self._lock = threading.RLock()
-        self._history: dict[str, list[tuple[float, str]]] = defaultdict(list)
-        self._fired: dict[str, float] = {}
+        self._history: OrderedDict[str, list[tuple[float, str]]] = OrderedDict()
+        self._fired: OrderedDict[str, float] = OrderedDict()
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         with self._lock:
             for src in list(self._history):
@@ -1570,10 +1572,10 @@ class IcmpSweepRule:
                 if active:
                     self._history[src] = active
                 else:
-                    del self._history[src]
+                    self._history.pop(src, None)
             for src, fired_at in list(self._fired.items()):
                 if now - fired_at >= self.window or fired_at > now:
-                    del self._fired[src]
+                    self._fired.pop(src, None)
 
     def check(self, record: dict) -> dict | None:
         protocol = record.get("protocol")
@@ -1606,20 +1608,24 @@ class IcmpSweepRule:
             history = [(ts, host) for ts, host in history
                        if 0 <= now - ts <= self.window and host != dst]
             history.append((now, dst))
+            if src not in self._history and len(self._history) >= self.max_sources:
+                self._history.popitem(last=False)
             self._history.pop(src, None)
-            if len(self._history) >= self.max_sources:
-                self._history.pop(next(iter(self._history)))
             self._history[src] = history
+            self._history.move_to_end(src)
             if len(history) < self.threshold:
                 return None
             targets = sorted(host for _, host in history)
             last_alert = self._fired.get(src)
             self._history.pop(src, None)
             if last_alert is not None and now - last_alert < self.window:
+                self._fired.move_to_end(src)
                 return None
             if src not in self._fired and len(self._fired) >= self.max_sources:
-                self._fired.pop(next(iter(self._fired)))
+                self._fired.popitem(last=False)
+            self._fired.pop(src, None)
             self._fired[src] = now
+            self._fired.move_to_end(src)
             window_start = history[0][0]
 
         return {
@@ -1666,7 +1672,7 @@ class IcmpFloodRule:
     """
 
     name = "ICMP_FLOOD"
-    rule_version = "1.7"
+    rule_version = "1.8"
     ALERT_COOLDOWN_S: float = 60.0
 
     def __init__(self, threshold: int = 50, window: int = 5,
@@ -1679,11 +1685,13 @@ class IcmpFloodRule:
             cooldown, 60.0, "ICMP_FLOOD_COOLDOWN")
         self._lock = threading.RLock()
         # (src_ip, dst_ip) → list of timestamps
-        self._history: dict[tuple, list[float]] = {}
+        self._history: OrderedDict[tuple, list[float]] = OrderedDict()
         # (src_ip, dst_ip) → last_alert_time
         self._cooldown: OrderedDict[tuple, float] = OrderedDict()
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         cutoff_cd = now - self.cooldown
         with self._lock:
@@ -1692,10 +1700,10 @@ class IcmpFloodRule:
                 if active:
                     self._history[key] = active
                 else:
-                    del self._history[key]
+                    self._history.pop(key, None)
             for key in list(self._cooldown):
                 if self._cooldown[key] < cutoff_cd or self._cooldown[key] > now:
-                    del self._cooldown[key]
+                    self._cooldown.pop(key, None)
 
     def check(self, record: dict) -> dict | None:
         proto = record.get("protocol", "")
@@ -1732,7 +1740,7 @@ class IcmpFloodRule:
                 return None
 
             if key not in self._history and len(self._history) >= self.max_flows:
-                self._history.pop(next(iter(self._history)))
+                self._history.popitem(last=False)
 
             history = self._history.get(key, [])
             if history and now < history[-1]:
@@ -1741,6 +1749,7 @@ class IcmpFloodRule:
             history.append(now)
             self._history.pop(key, None)
             self._history[key] = history
+            self._history.move_to_end(key)
 
             count = len(history)
             window_start = history[0]

@@ -43,11 +43,11 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "dst_ip": "203.0.113.13", "src_port": 50000, "dst_port": 80,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_history", "_cooldown")),
-            ("ICMP_SWEEP", "1.7", lambda: IcmpSweepRule(threshold=1), {
+            ("ICMP_SWEEP", "1.8", lambda: IcmpSweepRule(threshold=1), {
                 "type": "IP", "protocol": "ICMP", "src_ip": "198.51.100.14",
                 "dst_ip": "203.0.113.14", "icmp_type": 8, "icmp_code": 0,
             }, ("_history", "_fired")),
-            ("ICMP_FLOOD", "1.7", lambda: IcmpFloodRule(threshold=1), {
+            ("ICMP_FLOOD", "1.8", lambda: IcmpFloodRule(threshold=1), {
                 "type": "IP", "protocol": "ICMP", "src_ip": "198.51.100.15",
                 "dst_ip": "203.0.113.15", "icmp_type": 8, "icmp_code": 0,
             }, ("_history", "_cooldown")),
