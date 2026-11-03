@@ -32,12 +32,25 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **443 passed, 102 subtests passed** in 49.95s (`python3 -m pytest -q -p no:cacheprovider`).
+- Full test suite: **444 passed, 102 subtests passed** in 51.60s (`python3 -m pytest -q -p no:cacheprovider`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** Precision: 100.0%, Recall: 100.0%, F1: 100.0%. These are fixture results only and do **not** imply 100% real-world accuracy.
 - Ground-truth evaluation: **38/38 detected** (TP=38, FN=0, FP=0, Precision: 100.0%, Recall: 100.0%, F1: 100.0%).
 - External dataset replay (CTU-13 Scenario 6 / Botnet-47 Donbot, 24,764 packets): all 24,764 packets processed with 0 drops; 45 `SLOW_PORT_SCAN v1.8` horizontal scan alerts verified against infected host `147.32.84.165` targeting port 25.
 - Rule inventory verified: **strictly 19 rules registered in `RuleEngine.rules`**. Zero new rules, zero new Sigma/SPL rules, zero deleted rules.
 - `git diff --check` clean.
+
+## Follow-up: 2026-11-03 Cross-Rule Telemetry Hardening: Evidence Target Port Normalization and Robust TCP Endpoint Extraction
+
+- **`UdpFloodRule` Evidence Target Port Normalization (v1.8):**
+  - Standardized `evidence["target_port"]` to use pre-normalized `dst_port` integer rather than raw `record.get("dst_port")`, eliminating string/integer type discrepancies between alert attributes and inner evidence payloads.
+- **`DataExfiltrationRule` Safe TCP Endpoint Generation (v1.17):**
+  - Hardened `_tcp_generation` endpoint extraction using `_normalize_port` helpers, preventing potential `KeyError` or string-conversion exceptions during TCP connection generational tracking.
+- **Stream Prefix and Handshake Helpers Hardened:**
+  - Safely normalized port lookups in `CleartextHttpOnTlsPortRule._extract_request_line` and `TlsAnomalyRule._extract_sni`.
+- **Regressions & Verifications:**
+  - Added new test cases verifying normalized evidence port in `test_udp_flood.py`.
+  - Updated rule versions and synchronized assertions: `UdpFloodRule` 1.8, `DataExfiltrationRule` 1.17.
+  - Full test suite: **444 passed, 102 subtests passed** in 51.60s. Total registered rules: **strictly 19**.
 
 ## Follow-up: 2026-11-03 HEADER_INJECTION Line-Anchoring, IP Scoping, and Cross-Rule Port Telemetry Normalization
 

@@ -286,7 +286,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNone(rule.check(late_old_syn))
         alert = rule.check(self._tcp_payload_pkt(payload, 1001, 103.0))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.16")
+        self.assertEqual(alert["rule_version"], "1.17")
         self.assertEqual(alert["evidence"]["bytes_transferred"], 1200)
 
     def test_tcp_connection_generation_state_is_bounded(self):
@@ -554,7 +554,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["sub_type"], "SIGNATURE_EXFIL")
         self.assertIn("ZIP", alert["detail"])
-        self.assertEqual(alert["rule_version"], "1.16")
+        self.assertEqual(alert["rule_version"], "1.17")
 
     def test_split_signature_is_not_joined_across_tcp_sequence_gap(self):
         rule = DataExfiltrationRule(byte_threshold=5000, window=30)
@@ -619,7 +619,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["src_port"], 50000)
         self.assertEqual(alert["dst_port"], 8080)
-        self.assertEqual(alert["rule_version"], "1.16")
+        self.assertEqual(alert["rule_version"], "1.17")
 
 
 if __name__ == "__main__":

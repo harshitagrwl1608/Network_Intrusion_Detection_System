@@ -37,8 +37,9 @@ class TestUdpFloodRule(unittest.TestCase):
 
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "UDP_FLOOD")
-        self.assertEqual(alert["rule_version"], "1.7")
+        self.assertEqual(alert["rule_version"], "1.8")
         self.assertEqual(alert["evidence"]["packet_count"], 50)
+        self.assertEqual(alert["evidence"]["target_port"], 5060)
         self.assertEqual(alert["severity"], "medium")
         self.assertEqual(alert["confidence"], "heuristic")
         self.assertEqual(alert["evidence"]["classification"], "UDP_PACKET_RATE_THRESHOLD")
@@ -172,6 +173,16 @@ class TestUdpFloodRule(unittest.TestCase):
         # Prune at t=120 (well past 5s window)
         self.rule.prune_stale(now=120.0)
         self.assertNotIn(("192.168.1.150", "192.168.1.1"), self.rule._history)
+
+    def test_udp_flood_string_dst_port_normalized_in_evidence(self):
+        rule = UdpFloodRule(threshold=2, window=5)
+        self.assertIsNone(rule.check(self._pkt("192.0.2.1", "198.51.100.1", dst_port="5060", ts=100.0)))
+        alert = rule.check(self._pkt("192.0.2.1", "198.51.100.1", dst_port="5060", ts=101.0))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["dst_port"], 5060)
+        self.assertIsInstance(alert["dst_port"], int)
+        self.assertEqual(alert["evidence"]["target_port"], 5060)
+        self.assertIsInstance(alert["evidence"]["target_port"], int)
 
 
 if __name__ == "__main__":

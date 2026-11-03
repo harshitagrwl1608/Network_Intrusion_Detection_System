@@ -23,7 +23,7 @@ from engine.rules import (
 class TestFiniteRuleTimestamps(unittest.TestCase):
     def test_invalid_event_timestamps_do_not_mutate_rate_rule_state(self):
         cases = (
-            ("UDP_FLOOD", "1.7", lambda: UdpFloodRule(threshold=1), {
+            ("UDP_FLOOD", "1.8", lambda: UdpFloodRule(threshold=1), {
                 "type": "IP", "protocol": "UDP", "src_ip": "198.51.100.10",
                 "dst_ip": "203.0.113.10", "src_port": 50000, "dst_port": 5060,
             }, ("_history", "_cooldown")),

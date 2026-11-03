@@ -647,7 +647,7 @@ class UdpFloodRule:
     """
 
     name = "UDP_FLOOD"
-    rule_version = "1.7"
+    rule_version = "1.8"
     ALERT_COOLDOWN_S: float = 60.0
     _EXEMPT_SRC_PORTS: set[int] = {53, 67, 68, 123}
 
@@ -762,7 +762,7 @@ class UdpFloodRule:
                     "classification": "UDP_PACKET_RATE_THRESHOLD",
                     "packet_count": count,
                     "target_host": dst,
-                    "target_port": record.get("dst_port"),
+                    "target_port": dst_port,
                     "window_s": self.window,
                     "threshold": effective_threshold,
                 },
@@ -3689,7 +3689,7 @@ class DataExfiltrationRule:
     - Configured TRUSTED_HOSTS.
     """
     name = "DATA_EXFIL"
-    rule_version = "1.16"
+    rule_version = "1.17"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 5000
     MAX_TRACKED_FLOW_EVENTS = 1_000_000
@@ -3781,13 +3781,12 @@ class DataExfiltrationRule:
     def _tcp_generation(self, record: dict, now: float):
         if record.get("protocol") != "TCP":
             return 0
-        try:
-            endpoints = tuple(sorted((
-                (str(record["src_ip"]), int(record["src_port"])),
-                (str(record["dst_ip"]), int(record["dst_port"])),
-            )))
-        except (KeyError, TypeError, ValueError, OverflowError):
+        src, dst = record.get("src_ip"), record.get("dst_ip")
+        src_port = _normalize_port(record.get("src_port"))
+        dst_port = _normalize_port(record.get("dst_port"))
+        if not src or not dst or src_port is None or dst_port is None:
             return 0
+        endpoints = tuple(sorted(((str(src), src_port), (str(dst), dst_port))))
 
         try:
             tcp_flags = int(record.get("tcp_flags") or 0)
@@ -4290,30 +4289,30 @@ class CleartextHttpOnTlsPortRule:
 
     def _extract_request_line(self, record: dict, payload: bytes, now: float) -> bytes | None:
         match = self._REQUEST_LINE.match(payload)
+        src = record.get("src_ip")
+        dst = record.get("dst_ip")
+        src_port = _normalize_port(record.get("src_port"))
+        dst_port = _normalize_port(record.get("dst_port"))
         if match:
-            try:
-                direct_key = (str(record["src_ip"]), int(record["src_port"]),
-                              str(record["dst_ip"]), int(record["dst_port"]))
-            except (KeyError, TypeError, ValueError, OverflowError):
-                direct_key = None
-            if direct_key is not None:
+            if src and dst and src_port is not None and dst_port is not None:
+                direct_key = (str(src), src_port, str(dst), dst_port)
                 with self._lock:
                     state = self._tcp_prefixes.get(direct_key)
                     if state is not None and now >= state[3]:
                         self._tcp_prefixes.pop(direct_key, None)
             return match.group(0).strip()
 
-        try:
-            src_port = int(record["src_port"])
-            dst_port = int(record["dst_port"])
-            seq = int(record["tcp_payload_seq"]) & 0xFFFFFFFF
-            src, dst = str(record["src_ip"]), str(record["dst_ip"])
-        except (KeyError, TypeError, ValueError, OverflowError):
+        if not src or not dst or src_port is None or dst_port not in (443, 8443) or not (1 <= src_port <= 65535):
             return None
-        if not 1 <= src_port <= 65535 or dst_port not in (443, 8443):
+        seq = record.get("tcp_payload_seq")
+        if seq is None:
+            return None
+        try:
+            seq = int(seq) & 0xFFFFFFFF
+        except (TypeError, ValueError, OverflowError):
             return None
 
-        key = (src, src_port, dst, dst_port)
+        key = (str(src), src_port, str(dst), dst_port)
         with self._lock:
             state = self._tcp_prefixes.get(key)
             if state is not None:
@@ -4664,14 +4663,17 @@ class TlsAnomalyRule:
 
     def _extract_sni(self, record: dict, payload: bytes, now: float) -> str | None:
         sni = _extract_tls_sni(payload)
-        try:
-            src_port, dst_port = int(record["src_port"]), int(record["dst_port"])
-            seq = int(record["tcp_payload_seq"]) & 0xFFFFFFFF
-            key = (str(record["src_ip"]), src_port,
-                   str(record["dst_ip"]), dst_port)
-        except (KeyError, TypeError, ValueError, OverflowError):
+        src = record.get("src_ip")
+        dst = record.get("dst_ip")
+        src_port = _normalize_port(record.get("src_port"))
+        dst_port = _normalize_port(record.get("dst_port"))
+        seq = record.get("tcp_payload_seq")
+        if not src or not dst or src_port is None or dst_port not in self.TLS_PORTS or not (1 <= src_port <= 65535) or seq is None:
             return sni
-        if not 1 <= src_port <= 65535 or dst_port not in self.TLS_PORTS:
+        try:
+            seq = int(seq) & 0xFFFFFFFF
+            key = (str(src), src_port, str(dst), dst_port)
+        except (TypeError, ValueError, OverflowError):
             return sni
 
         if sni:
