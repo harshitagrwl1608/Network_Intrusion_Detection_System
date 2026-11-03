@@ -419,7 +419,7 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "dns_query": qname, "timestamp": 100,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.19")
+        self.assertEqual(alert["rule_version"], "1.20")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
         self.assertEqual(alert["evidence"]["longest_label"], "a" * 61)
         self.assertEqual(alert["evidence"]["longest_label_length"], 61)
@@ -600,6 +600,20 @@ class TestDnsAndArpDetection(unittest.TestCase):
         }
         alert = rule.check(query)
         self.assertIsNone(alert, "Purely alphabetic label should not trigger hex chunk detection")
+
+    def test_dns_rule_string_src_port_normalized_in_alert(self):
+        rule = DnsRule(max_query_len=30)
+        query = {
+            "type": "IP", "protocol": "UDP", "src_ip": "192.168.1.50",
+            "dst_ip": "8.8.8.8", "src_port": "53000", "dst_port": "53",
+            "dns_query": "thisisaverylongsubdomainlabelthatexceedsthirtychars.example.com",
+            "timestamp": 100.0,
+        }
+        alert = rule.check(query)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["src_port"], 53000)
+        self.assertIsInstance(alert["src_port"], int)
+        self.assertEqual(alert["dst_port"], 53)
 
 
 if __name__ == "__main__":

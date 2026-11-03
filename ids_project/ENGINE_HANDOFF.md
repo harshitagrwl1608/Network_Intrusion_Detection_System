@@ -32,11 +32,31 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **431 passed, 96 subtests passed** in 51.03s (`python -m pytest -q`).
+- Full test suite: **443 passed, 102 subtests passed** in 49.95s (`python3 -m pytest -q -p no:cacheprovider`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** Precision: 100.0%, Recall: 100.0%, F1: 100.0%. These are fixture results only and do **not** imply 100% real-world accuracy.
-- External dataset replay (CTU-13 Scenario 6 / Botnet-47 Donbot, 24,764 packets): all packets processed with 0 drops; 45 `SLOW_PORT_SCAN v1.7` horizontal scan alerts verified against infected host `147.32.84.165` targeting port 25.
+- Ground-truth evaluation: **38/38 detected** (TP=38, FN=0, FP=0, Precision: 100.0%, Recall: 100.0%, F1: 100.0%).
+- External dataset replay (CTU-13 Scenario 6 / Botnet-47 Donbot, 24,764 packets): all 24,764 packets processed with 0 drops; 45 `SLOW_PORT_SCAN v1.8` horizontal scan alerts verified against infected host `147.32.84.165` targeting port 25.
 - Rule inventory verified: **strictly 19 rules registered in `RuleEngine.rules`**. Zero new rules, zero new Sigma/SPL rules, zero deleted rules.
 - `git diff --check` clean.
+
+## Follow-up: 2026-11-03 HEADER_INJECTION Line-Anchoring, IP Scoping, and Cross-Rule Port Telemetry Normalization
+
+- **`PayloadRule` `HEADER_INJECTION` Regex Refinement (v1.20):**
+  - **Line-start anchoring (`^`):** Added explicit `^` anchor to `X-Forwarded-For:` and `X-(?:Original|Rewrite)-URL:` in `HEADER_INJECTION`. Because `re.MULTILINE` is enabled, `^` strictly matches the start of HTTP header lines, preventing false positive hits when header names or IP addresses appear mid-line within HTTP request bodies, comment fields, or form data.
+  - **Loopback /8 and IPv6 Scoping:** Extended `Host:` and `X-Forwarded-For:` regexes to cover the entire RFC 1122 / RFC 5735 loopback block (`127\.(?:[0-9]{1,3}\.){2}[0-9]{1,3}`) and bracketed IPv6 loopback (`[::1]`) alongside `localhost` and cloud metadata `169.254.169.254`.
+  - **Subdomain Boundary Protection:** Bounded host matches with `(?::\d+|[ \t\r\n]|$)`, preventing legitimate subdomains (such as `localhost.example.com` or `127.0.0.1.attacker.com`) from triggering SSRF alarms.
+  - **Flow Key Type Safety:** Replaced fragile `int(record["dst_port"])` in cooldown key calculation with pre-normalized `dst_port` integer, preventing `ValueError`/`TypeError` when destination ports are formatted as strings or omitted.
+- **`DnsRule` Telemetry Normalization and Port Integrity (v1.20):**
+  - Replaced direct dictionary lookups `int(record["src_port"])` and `int(record["dst_port"])` in query identity extraction with pre-normalized `src_port` and `dst_port` integer variables, avoiding `KeyError` or type conversions.
+  - Standardized emitted alert `src_port` to normalized integer rather than raw dictionary value, eliminating string/integer type discrepancies.
+- **`CleartextHttpOnTlsPortRule` Deduplication Cleanup (v1.9):**
+  - Eliminated redundant `int(record["src_port"])` and `int(dst_port)` re-parsing in sequence deduplication, using pre-validated and normalized integer ports.
+- **`TlsAnomalyRule` Alert Port Normalization (v1.9):**
+  - Normalized `src_port` in alert evidence dictionary, ensuring 100% uniform port typing across all 19 rules.
+- **Synchronized Version Tracking & Regressions:**
+  - Updated rule versions: `PayloadRule` 1.20, `DnsRule` 1.20, `CleartextHttpOnTlsPortRule` 1.9, `TlsAnomalyRule` 1.9.
+  - Added new test cases verifying line-anchored header injection, loopback /8 detection, subdomain FP rejection, and port normalization across `test_payload_detection.py`, `test_dns_and_arp_detection.py`, `test_new_rules_cycle8.py`, `test_clear_http_tls.py`, `test_tls_anomaly.py`, and `test_finite_rule_timestamps.py`.
+  - Total registered rule instances: **strictly 19**. Zero new rules created.
 
 ## Follow-up: 2026-11-03 Telemetry normalization, timestamp fallback, multi-vector scan fall-through, and IPv6 SSRF scoping
 

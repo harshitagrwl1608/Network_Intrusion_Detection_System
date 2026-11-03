@@ -2147,12 +2147,12 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
             # URL-encoded CRLF injection (%0d%0a) — common bypass
             rb"|%0[dD]%0[aA][ \t]*[\w-]+:"
             # Host header SSRF: attacker sends request with internal IP as Host
-            # to exploit reverse-proxy misconfiguration (no ^anchor issue in MULTILINE)
-            rb"|^Host:[ \t]*(?:localhost|127\.0\.0\.1|0\.0\.0\.0|169\.254\.169\.254|\[(?:::1?|0::|fe80:[0-9a-fA-F:]*|f[cd][0-9a-fA-F]{2}:[0-9a-fA-F:]*)\])"
-            # X-Forwarded-For spoofing to loopback / metadata IPs for auth bypass
-            rb"|X-Forwarded-For:[ \t]*(?:127\.0\.0\.1|::1|169\.254\.169\.254|0\.0\.0\.0)"
-            # X-Original-URL / X-Rewrite-URL path override (nginx/Squid WAF bypass)
-            rb"|X-(?:Original|Rewrite)-URL:[ \t]*/(?:admin|etc|proc|windows|system32)[^\r\n]{0,100})",
+            # to exploit reverse-proxy misconfiguration (bounded to avoid matching subdomains like localhost.example.com)
+            rb"|^Host:[ \t]*(?:localhost|127\.(?:[0-9]{1,3}\.){2}[0-9]{1,3}|0\.0\.0\.0|169\.254\.169\.254|\[(?:::1?|0::|fe80:[0-9a-fA-F:]*|f[cd][0-9a-fA-F]{2}:[0-9a-fA-F:]*)\])(?::\d+|[ \t\r\n]|$)"
+            # X-Forwarded-For spoofing to loopback / metadata IPs for auth bypass (anchored at line start)
+            rb"|^X-Forwarded-For:[ \t]*(?:localhost|127\.(?:[0-9]{1,3}\.){2}[0-9]{1,3}|::1|\[::1\]|169\.254\.169\.254|0\.0\.0\.0)(?::\d+|[ \t\r\n,]+|$)"
+            # X-Original-URL / X-Rewrite-URL path override (nginx/Squid WAF bypass, anchored at line start)
+            rb"|^X-(?:Original|Rewrite)-URL:[ \t]*/(?:admin|etc|proc|windows|system32)[^\r\n]{0,100})",
             re.MULTILINE,
         ),
         "heuristic",
@@ -2295,7 +2295,7 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.19"
+    rule_version = "1.20"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048,
@@ -2658,9 +2658,9 @@ class PayloadRule:
         if hits and self.alert_cooldown > 0:
             src_ip = record.get("src_ip")
             dst_ip = record.get("dst_ip")
-            if src_ip and dst_ip and record.get("dst_port") is not None:
+            if src_ip and dst_ip and dst_port is not None:
                 flow_key = (
-                    src_ip, dst_ip, record.get("protocol"), int(record["dst_port"])
+                    src_ip, dst_ip, record.get("protocol"), dst_port
                 )
                 now = _finite_record_timestamp(record)
                 if now is not None:
@@ -2815,7 +2815,7 @@ _COMMON_MULTI_LABEL_CC_SUFFIXES = frozenset({
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.19"
+    rule_version = "1.20"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -3033,15 +3033,14 @@ class DnsRule:
             try:
                 dns_id = int(record["dns_id"])
                 qtype = int(record["dns_qtype"])
-                query_src_port = int(record["src_port"])
-                query_dst_port = int(record["dst_port"])
-                if (0 <= dns_id <= 65535 and 0 <= qtype <= 65535
-                        and 1 <= query_src_port <= 65535
-                        and 1 <= query_dst_port <= 65535
+                if (src_port is not None and dst_port is not None
+                        and 0 <= dns_id <= 65535 and 0 <= qtype <= 65535
+                        and 1 <= src_port <= 65535
+                        and 1 <= dst_port <= 65535
                         and record.get("dst_ip")):
                     query_identity = (
-                        str(src), str(record["dst_ip"]), query_src_port,
-                        query_dst_port, dns_id, qtype, domain,
+                        str(src), str(record["dst_ip"]), src_port,
+                        dst_port, dns_id, qtype, domain,
                     )
             except (KeyError, TypeError, ValueError, OverflowError):
                 query_identity = None
@@ -3178,7 +3177,7 @@ class DnsRule:
             "rule_version": self.rule_version,
             "src_ip": src,
             "dst_ip": record.get("dst_ip"),
-            "src_port": record.get("src_port"),
+            "src_port": src_port,
             "dst_port": 53,
             "protocol": record.get("protocol", "UDP"),
             "severity": severity,
@@ -4256,7 +4255,7 @@ class CleartextHttpOnTlsPortRule:
     """Flag repeated plaintext HTTP requests sent to conventional TLS ports."""
 
     name = "CLEAR_HTTP_ON_TLS_PORT"
-    rule_version = "1.8"
+    rule_version = "1.9"
     MAX_REQUEST_LINE_BYTES = 2064
     STREAM_TIMEOUT_S = 30.0
     MAX_SEEN_REQUEST_IDENTITIES = 32_768
@@ -4436,16 +4435,15 @@ class CleartextHttpOnTlsPortRule:
             # A retransmission repeats the same bytes at the same sequence
             # position. A fresh keep-alive request advances sequence even when
             # its request line is identical, so it remains countable.
-            if record.get("tcp_payload_seq") is not None and record.get("src_port") is not None:
+            if record.get("tcp_payload_seq") is not None and src_port is not None:
                 try:
                     seq = int(record["tcp_payload_seq"]) & 0xFFFFFFFF
-                    src_port = int(record["src_port"])
                     if 1 <= src_port <= 65535:
                         digest = record.get("tcp_payload_digest")
                         if not isinstance(digest, bytes) or len(digest) != 16:
                             digest = hashlib.blake2s(payload, digest_size=16).digest()
                         identity = (
-                            src, src_port, dst, int(dst_port), seq, digest
+                            src, src_port, dst, dst_port, seq, digest
                         )
                         seen_at = self._seen_requests.get(identity)
                         if seen_at is not None and 0 <= now - seen_at <= self.window:
@@ -4625,7 +4623,7 @@ class TlsAnomalyRule:
     Port expansion covers: XMPP-SSL (5223), MQTT-TLS (8083), alternative HTTPS C2 (4443, 9443).
     """
     name = "TLS_ANOMALY"
-    rule_version = "1.8"
+    rule_version = "1.9"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
     MAX_CLIENT_HELLO_BYTES = 16_389
@@ -4763,6 +4761,7 @@ class TlsAnomalyRule:
 
         src_ip = record.get("src_ip", "")
         dst_ip = record.get("dst_ip", "")
+        src_port = _normalize_port(record.get("src_port"))
         dst_port = _normalize_port(record.get("dst_port"))
         if not src_ip or not dst_ip or _is_trusted(src_ip):
             return None
@@ -4821,7 +4820,7 @@ class TlsAnomalyRule:
             "rule_version": self.rule_version,
             "src_ip": src_ip,
             "dst_ip": dst_ip,
-            "src_port": record.get("src_port"),
+            "src_port": src_port,
             "dst_port": dst_port,
             "protocol": "TCP",
             "severity": "high" if anomaly_type == "DIRECT_IP_SNI" else "medium",

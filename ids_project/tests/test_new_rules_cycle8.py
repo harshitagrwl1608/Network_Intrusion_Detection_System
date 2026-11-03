@@ -398,7 +398,7 @@ class TestDnsSubdomainExfil(unittest.TestCase):
                 src="10.0.0.26", domain=f"{label}.bad.com",
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.19")
+        self.assertEqual(alert["rule_version"], "1.20")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
         self.assertEqual(alert["evidence"]["parent_domain"], "bad.com")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 3)
@@ -426,7 +426,7 @@ class TestDnsSubdomainExfil(unittest.TestCase):
                 src="10.0.0.28", domain=f"{label}.foo.io",
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.19")
+        self.assertEqual(alert["rule_version"], "1.20")
         self.assertEqual(alert["evidence"]["parent_domain"], "foo.io")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 3)
 
@@ -467,7 +467,7 @@ class TestDnsSubdomainExfil(unittest.TestCase):
                 domain=f"host.chunk{i:04x}.evil.com",
                 timestamp=base + i * 0.1))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.19")
+        self.assertEqual(alert["rule_version"], "1.20")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_EXFIL")
         self.assertEqual(alert["evidence"]["subdomain"], "host.chunk0004")
         self.assertEqual(alert["evidence"]["distinct_subdomains"], 5)

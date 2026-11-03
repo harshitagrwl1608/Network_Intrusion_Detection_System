@@ -199,7 +199,7 @@ class TestPayloadRule(unittest.TestCase):
         suffix.update(tcp_flags=0x18, tcp_seq=1018)
         alert = self.rule.check(suffix)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.19")
+        self.assertEqual(alert["rule_version"], "1.20")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):
@@ -604,6 +604,50 @@ class TestPayloadRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         signatures = [h["signature"] for h in alert["evidence"]["hits"]]
         self.assertIn("HEADER_INJECTION", signatures)
+
+    def test_header_injection_x_forwarded_for_loopback_and_metadata(self):
+        for header_val in (b"127.0.0.1", b"127.0.0.2", b"[::1]", b"::1", b"169.254.169.254", b"localhost"):
+            with self.subTest(header=header_val):
+                req = (
+                    b"GET /api/v1/auth HTTP/1.1\r\n"
+                    b"Host: example.internal\r\n"
+                    b"X-Forwarded-For: " + header_val + b"\r\n\r\n"
+                )
+                pkt = self.packet(req, 5400)
+                alert = self.rule.check(pkt)
+                self.assertIsNotNone(alert, f"Expected alert for X-Forwarded-For: {header_val}")
+                signatures = [h["signature"] for h in alert["evidence"]["hits"]]
+                self.assertIn("HEADER_INJECTION", signatures)
+
+    def test_header_injection_line_anchoring_prevents_body_fps(self):
+        # Header text appearing mid-line in POST body must not trigger HEADER_INJECTION
+        req = (
+            b"POST /submit HTTP/1.1\r\n"
+            b"Host: example.internal\r\n"
+            b"Content-Type: text/plain\r\n\r\n"
+            b"The user asked about X-Forwarded-For: 127.0.0.1 configuration\r\n"
+        )
+        pkt = self.packet(req, 5401)
+        alert = self.rule.check(pkt)
+        self.assertIsNone(alert, "Mid-line header mention in body should not alert")
+
+    def test_header_injection_host_subdomain_prevents_fps(self):
+        # Host with subdomain localhost.example.com must not trigger SSRF HEADER_INJECTION
+        req = (
+            b"GET /index.html HTTP/1.1\r\n"
+            b"Host: localhost.example.com\r\n"
+            b"User-Agent: curl/7.88.1\r\n\r\n"
+        )
+        pkt = self.packet(req, 5402)
+        self.assertIsNone(self.rule.check(pkt))
+
+    def test_payload_rule_cooldown_with_string_dst_port(self):
+        # Ensure string port in record does not cause TypeError in cooldown flow_key
+        req = b"GET /?x=%0d%0aSet-Cookie:admin=1 HTTP/1.1\r\n"
+        pkt = self.packet(req, 5403, dst_port="80")
+        alert = self.rule.check(pkt)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["dst_port"], 80)
 
 
 if __name__ == "__main__":

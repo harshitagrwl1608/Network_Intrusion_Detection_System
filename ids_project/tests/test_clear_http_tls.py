@@ -243,6 +243,15 @@ class TestCleartextHttpOnTlsPortRule(unittest.TestCase):
             src_port=54001, tcp_payload_seq=8000, event_timestamp=102.0))
         self.assertIsNotNone(alert)
 
+    def test_clear_http_tls_string_src_port_normalized_in_alert(self):
+        payload = b"GET /admin HTTP/1.1\r\nHost: c2.example\r\n\r\n"
+        self.assertIsNone(self.rule.check(self.packet(payload, src_port="50000", event_timestamp=100.0)))
+        alert = self.rule.check(self.packet(payload, src_port="50001", event_timestamp=101.0))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["src_port"], 50001)
+        self.assertIsInstance(alert["src_port"], int)
+        self.assertEqual(alert["rule_version"], "1.9")
+
 
 if __name__ == "__main__":
     unittest.main()

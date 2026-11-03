@@ -96,7 +96,7 @@ class TestTlsAnomalyRule(unittest.TestCase):
         alert = self.rule.check(self._pkt(payload=payload, ts=100.0))
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "TLS_ANOMALY")
-        self.assertEqual(alert["rule_version"], "1.8")
+        self.assertEqual(alert["rule_version"], "1.9")
         self.assertEqual(alert["severity"], "high")
         self.assertEqual(alert["confidence"], "high")
         self.assertEqual(alert["evidence"]["anomaly_type"], "DIRECT_IP_SNI")
@@ -114,7 +114,7 @@ class TestTlsAnomalyRule(unittest.TestCase):
                 self.assertEqual(rule._hello_prefixes, {})
                 alert = rule.check(self._pkt(payload=payload, ts=100.0))
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.8")
+                self.assertEqual(alert["rule_version"], "1.9")
 
     def test_suspicious_tunnel_sni_triggers_alert(self):
         for i, domain in enumerate(("c2-node.ngrok-free.app", "beacon.duckdns.org", "tunnel.localtunnel.me", "drop.serveo.net")):
@@ -122,7 +122,7 @@ class TestTlsAnomalyRule(unittest.TestCase):
             alert = self.rule.check(self._pkt(dst=f"203.0.113.{100 + i}", payload=payload, ts=100.0))
             self.assertIsNotNone(alert, f"Expected alert for suspicious SNI {domain}")
             self.assertEqual(alert["rule_name"], "TLS_ANOMALY")
-            self.assertEqual(alert["rule_version"], "1.8")
+            self.assertEqual(alert["rule_version"], "1.9")
             self.assertEqual(alert["severity"], "medium")
             self.assertEqual(alert["confidence"], "heuristic")
             self.assertEqual(alert["evidence"]["anomaly_type"], "SUSPICIOUS_TUNNEL_SNI")
@@ -195,6 +195,15 @@ class TestTlsAnomalyRule(unittest.TestCase):
         self.assertIn(("192.0.2.1", "198.51.100.42", "DIRECT_IP_SNI"), self.rule._seen)
         self.assertNotIn(("192.0.2.2", "198.51.100.42", "DIRECT_IP_SNI"), self.rule._seen)
         self.assertLessEqual(len(self.rule._seen), self.rule.MAX_TRACKED_FLOWS)
+
+    def test_tls_anomaly_string_src_port_normalized_in_alert(self):
+        payload = make_tls_client_hello("198.51.100.42")
+        pkt = self._pkt(payload=payload, ts=100.0)
+        pkt["src_port"] = "54321"
+        alert = self.rule.check(pkt)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["src_port"], 54321)
+        self.assertIsInstance(alert["src_port"], int)
 
 
 if __name__ == "__main__":
