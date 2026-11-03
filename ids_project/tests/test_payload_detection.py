@@ -199,7 +199,7 @@ class TestPayloadRule(unittest.TestCase):
         suffix.update(tcp_flags=0x18, tcp_seq=1018)
         alert = self.rule.check(suffix)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.22")
+        self.assertEqual(alert["rule_version"], "1.23")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):
@@ -661,7 +661,7 @@ class TestPayloadRule(unittest.TestCase):
                 pkt = self.packet(payload, 5404)
                 alert = rule.check(pkt)
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.22")
+                self.assertEqual(alert["rule_version"], "1.23")
                 self.assertIn("SSRF", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_usr_bin_bash_cmd_injection_detected(self):
@@ -678,8 +678,36 @@ class TestPayloadRule(unittest.TestCase):
                 pkt = self.packet(cmd, 5405)
                 alert = rule.check(pkt)
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.22")
+                self.assertEqual(alert["rule_version"], "1.23")
                 self.assertIn("CMD_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
+
+    def test_mssql_and_memcached_dpi_ports_inspected(self):
+        rule = PayloadRule()
+        # MSSQL port 1433 SQL injection
+        mssql_pkt = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.168.1.100", "dst_ip": "192.168.1.10",
+            "src_port": 54000, "dst_port": 1433,
+            "payload": b"SELECT * FROM users WHERE id=1 UNION SELECT password FROM admin--",
+            "timestamp": 100.0,
+        }
+        alert = rule.check(mssql_pkt)
+        self.assertIsNotNone(alert, "Payload on MSSQL port 1433 should be inspected")
+        self.assertEqual(alert["rule_version"], "1.23")
+        self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
+
+        # Memcached port 11211 command injection
+        memcached_pkt = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.168.1.100", "dst_ip": "192.168.1.10",
+            "src_port": 54001, "dst_port": 11211,
+            "payload": b"set key 0 0 10\r\n; /bin/sh -c 'id'\r\n",
+            "timestamp": 101.0,
+        }
+        alert2 = rule.check(memcached_pkt)
+        self.assertIsNotNone(alert2, "Payload on Memcached port 11211 should be inspected")
+        self.assertEqual(alert2["rule_version"], "1.23")
+        self.assertIn("CMD_INJECTION", [hit["signature"] for hit in alert2["evidence"]["hits"]])
 
 
 if __name__ == "__main__":

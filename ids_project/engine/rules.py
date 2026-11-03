@@ -437,7 +437,7 @@ class PortScanRule:
             return None
 
         src = record.get("src_ip", "")
-        if _is_trusted(src):
+        if not src or _is_trusted(src):
             return None
 
         protocol = record.get("protocol", "")
@@ -459,8 +459,10 @@ class PortScanRule:
             return None
 
         dst_ip = record.get("dst_ip", "")
+        if not dst_ip:
+            return None
         dst_port = _normalize_port(record.get("dst_port"))
-        if dst_port is None:
+        if dst_port is None or not 1 <= dst_port <= 65535:
             return None
 
         now = _finite_record_timestamp(record, prefer_event_timestamp=False)
@@ -1076,7 +1078,7 @@ class SynFloodRule:
     """Detect SYN/RST floods while excluding normal closed-port RST replies."""
 
     name = "SYN_FLOOD"
-    rule_version = "1.12"
+    rule_version = "1.13"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 100, window: int = 10,
@@ -1155,11 +1157,11 @@ class SynFloodRule:
 
         src = record.get("src_ip", "")
         dst = record.get("dst_ip", "")
+        if not src or not dst or _is_trusted(src):
+            return None
+
         src_port = _normalize_port(record.get("src_port"))
         dst_port = _normalize_port(record.get("dst_port"))
-
-        if _is_trusted(src):
-            return None
 
         now = _finite_record_timestamp(record, prefer_event_timestamp=False)
         if now is None:
@@ -1292,7 +1294,8 @@ class SynFloodRule:
             return None
 
         # SYN floods target services; skip ephemeral dst ports (IANA: 49152-65535)
-        if dst_port is not None and dst_port > 49151:
+        # and validate destination port range
+        if dst_port is None or not 1 <= dst_port <= 49151:
             return None
 
         key = (src, dst, dst_port)
@@ -1347,6 +1350,7 @@ class SynFloodRule:
                 "evidence": {
                     "flood_type": "SYN",
                     "syn_count": count,
+                    "target_port": dst_port,
                     "window_s": self.window,
                     "threshold": self.threshold,
                     "note": (
@@ -1501,7 +1505,7 @@ class IcmpSweepRule:
     """Detect a source probing distinct IPv4/IPv6 destinations with echo requests."""
 
     name = "ICMP_SWEEP"
-    rule_version = "1.6"
+    rule_version = "1.7"
 
     def __init__(self, threshold: int = 12, window: int = 10,
                  max_sources: int = 4096):
@@ -1562,9 +1566,9 @@ class IcmpSweepRule:
             if len(self._history) >= self.max_sources:
                 self._history.pop(next(iter(self._history)))
             self._history[src] = history
-            targets = sorted({host for _, host in history})
-            if len(targets) < self.threshold:
+            if len(history) < self.threshold:
                 return None
+            targets = sorted(host for _, host in history)
             last_alert = self._fired.get(src)
             self._history.pop(src, None)
             if last_alert is not None and now - last_alert < self.window:
@@ -1743,7 +1747,7 @@ class IcmpFloodRule:
 # =============================================================================
 class ArpSpoofRule:
     name = "ARP_SPOOF"
-    rule_version = "1.7"
+    rule_version = "1.8"
 
     # Per-IP cooldown: once an alert fires for a given IP, suppress repeats
     # for this many seconds to avoid alert storms. Set to 0 to disable.
@@ -1775,6 +1779,13 @@ class ArpSpoofRule:
             if self._dirty:
                 self._save()
                 self._dirty = False
+
+    def prune_stale(self, now: float):
+        cutoff = now - self.ALERT_COOLDOWN_S
+        with self._lock:
+            for ip in list(self._cooldown):
+                if self._cooldown[ip] < cutoff or self._cooldown[ip] > now:
+                    del self._cooldown[ip]
 
     def _periodic_save(self):
         while True:
@@ -2266,8 +2277,9 @@ _DPI_PORTS: set[int] = {
     25, 587,        # SMTP
     110, 143,       # POP3, IMAP
     3000, 5000, 8000, 8888,   # Common dev/app servers
+    1433,           # Microsoft SQL Server
     3306, 5432,     # MySQL, PostgreSQL
-    6379,           # Redis
+    6379, 11211,    # Redis, Memcached
     27017,          # MongoDB
     9200,           # Elasticsearch
     9000,           # PHP-FPM / SonarQube
@@ -2300,7 +2312,7 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.22"
+    rule_version = "1.23"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048,
@@ -3508,7 +3520,7 @@ class SlowPortScanRule:
     """
 
     name = "SLOW_PORT_SCAN"
-    rule_version = "1.9"
+    rule_version = "1.10"
 
     def __init__(self, threshold: int = 30, window: int = 120,
                  max_states: int = 5000, cooldown: float | None = None):
@@ -3561,7 +3573,7 @@ class SlowPortScanRule:
             return None
 
         src = record.get("src_ip", "")
-        if _is_trusted(src):
+        if not src or _is_trusted(src):
             return None
 
         # Only count initial SYN (SYN=1, ACK=0)
@@ -3569,9 +3581,11 @@ class SlowPortScanRule:
             return None
 
         dst_ip = record.get("dst_ip", "")
+        if not dst_ip:
+            return None
         src_port = _normalize_port(record.get("src_port"))
         dst_port = _normalize_port(record.get("dst_port"))
-        if dst_port is None:
+        if dst_port is None or not 1 <= dst_port <= 65535:
             return None
 
         now = _finite_record_timestamp(record)

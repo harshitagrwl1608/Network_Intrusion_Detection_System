@@ -40,6 +40,27 @@ Results verified during the current continuation on 2026-11-03 on branch `codex-
 - Rule inventory verified: **strictly 19 rules registered in `RuleEngine.rules`**. Zero new rules, zero new Sigma/SPL rules, zero deleted rules.
 - `git diff --check` clean.
 
+## Follow-up: 2026-11-03 Port Validation, Cooldown Eviction, DPI Port Expansion, and Target Port Telemetry (Cycle 1)
+
+- **`ArpSpoofRule` Periodic Cooldown Pruning (v1.8):**
+  - Added `prune_stale(now: float)` method to evict expired per-IP cooldown entries older than `ALERT_COOLDOWN_S` (60.0s), preventing memory leakage over long-running continuous capture/replay sessions.
+  - Added unit test `test_arp_spoof_prune_stale_clears_expired_cooldowns` in `test_dns_and_arp_detection.py`.
+- **`PortScanRule` and `SlowPortScanRule` Destination Port and IP Validation (v1.10):**
+  - Added destination port boundary validation (`1 <= dst_port <= 65535`) and non-empty `src_ip`/`dst_ip` checks to both port scan detection rules, avoiding out-of-range port metrics or invalid key collisions.
+- **`SynFloodRule` Port Range Validation & Target Port Telemetry (v1.13):**
+  - Enforced valid service port range `1 <= dst_port <= 49151` and verified non-empty `src_ip`/`dst_ip`.
+  - Added `target_port` field to alert `evidence` dictionary, providing explicit target port telemetry in forensic exports and downstream SIEM/alert ingestion.
+- **`IcmpSweepRule` Destination Deduplication Streamlining (v1.7):**
+  - Optimized distinct target check to evaluate `len(history) < self.threshold` directly, taking advantage of the invariant that `history` filters duplicate destinations per source upon insertion.
+- **`PayloadRule` Enterprise Service DPI Expansion (v1.23):**
+  - Added Microsoft SQL Server (`1433`) and Memcached (`11211`) to `_DPI_PORTS` to ensure deep packet inspection runs on TDS queries (SQL injection detection) and key-value protocol commands (command injection and exploit payloads).
+  - Added unit test `test_mssql_and_memcached_dpi_ports_inspected` in `test_payload_detection.py`.
+- **Regressions & Verifications:**
+  - Full test suite: **454 passed in 53.13s** (`pytest ids_project/tests`).
+  - Synthetic ground-truth evaluation: **38/38 detected** (100.0% precision, 100.0% recall, 0 false positives).
+  - Rule inventory invariant: strictly 19 rules registered in `RuleEngine.rules`.
+
+
 ## Follow-up: 2026-11-03 Cross-Platform Binary Exfiltration, Command Injection Shell Path Generalization, and Auth Port Expansion
 
 - **`DataExfiltrationRule` Cross-Platform Binary Exfiltration Signatures (v1.18):**

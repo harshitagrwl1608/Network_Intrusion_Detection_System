@@ -43,7 +43,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "dst_ip": "203.0.113.13", "src_port": 50000, "dst_port": 80,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_history", "_cooldown")),
-            ("ICMP_SWEEP", "1.6", lambda: IcmpSweepRule(threshold=1), {
+            ("ICMP_SWEEP", "1.7", lambda: IcmpSweepRule(threshold=1), {
                 "type": "IP", "protocol": "ICMP", "src_ip": "198.51.100.14",
                 "dst_ip": "203.0.113.14", "icmp_type": 8, "icmp_code": 0,
             }, ("_history", "_fired")),
@@ -56,7 +56,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "dst_ip": "203.0.113.16", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_history", "_cooldown", "_seen_syns")),
-            ("SLOW_PORT_SCAN", "1.9", lambda: SlowPortScanRule(threshold=1), {
+            ("SLOW_PORT_SCAN", "1.10", lambda: SlowPortScanRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.17",
                 "dst_ip": "203.0.113.17", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
@@ -130,7 +130,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "timestamp": None, "event_timestamp": 101.0,
             })
             self.assertIsNotNone(alert)
-            self.assertEqual(alert["rule_version"], "1.7")
+            self.assertEqual(alert["rule_version"], "1.8")
             self.assertEqual(alert["evidence"]["new_mac"], "00:11:22:33:44:66")
 
     def test_blocklist_whitespace_and_string_ports(self):

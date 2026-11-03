@@ -446,7 +446,7 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "timestamp": 101.0,
         })
         self.assertIsNotNone(alert1, "First ARP spoof event must fire")
-        self.assertEqual(alert1["rule_version"], "1.7")
+        self.assertEqual(alert1["rule_version"], "1.8")
         self.assertEqual(alert1["severity"], "medium")
         self.assertEqual(alert1["confidence"], "heuristic")
         self.assertEqual(alert1["evidence"]["classification"], "ARP_IDENTITY_CHANGE")
@@ -519,6 +519,25 @@ class TestDnsAndArpDetection(unittest.TestCase):
                 "timestamp": 100.0,
             })
         self.assertEqual(len(rule._table), 2)
+
+    def test_arp_spoof_prune_stale_clears_expired_cooldowns(self):
+        rule = ArpSpoofRule(self.arp_table_path)
+        rule.check({
+            "type": "ARP", "src_ip": "192.168.1.10",
+            "src_mac": "00:11:22:33:44:01", "timestamp": 100.0,
+        })
+        alert = rule.check({
+            "type": "ARP", "src_ip": "192.168.1.10",
+            "src_mac": "00:11:22:33:44:02", "timestamp": 101.0,
+        })
+        self.assertIsNotNone(alert)
+        self.assertIn("192.168.1.10", rule._cooldown)
+
+        rule.prune_stale(150.0)
+        self.assertIn("192.168.1.10", rule._cooldown)
+
+        rule.prune_stale(222.0)
+        self.assertNotIn("192.168.1.10", rule._cooldown)
 
     def test_low_entropy_hex_chunk_dns_tunneling_detected(self):
         # 28-char hex chunk: entropy is ~3.08 (well below 3.8), length is 39 (well below 50).
