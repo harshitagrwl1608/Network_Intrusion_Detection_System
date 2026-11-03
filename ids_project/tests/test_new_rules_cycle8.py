@@ -290,7 +290,7 @@ class TestRstFloodDetection(unittest.TestCase):
                 self.assertIsNone(rule.check(syn(invalid_time, 80)))
                 alert = rule.check(syn(102.0, 80))
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.11")
+                self.assertEqual(alert["rule_version"], "1.12")
 
             with self.subTest(kind="RST", timestamp=invalid_time):
                 rule = SynFloodRule(threshold=1000, rst_threshold=3,
@@ -305,7 +305,7 @@ class TestRstFloodDetection(unittest.TestCase):
                 self.assertIsNone(rule.check(rst(invalid_time, 3)))
                 alert = rule.check(rst(102.0, 4))
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.11")
+                self.assertEqual(alert["rule_version"], "1.12")
 
     def test_closed_port_scan_rst_replies_do_not_count_as_rst_flood(self):
         rule = SynFloodRule(threshold=1000, rst_threshold=10, rst_window=5,
@@ -924,7 +924,7 @@ class TestSlowPortScanRule(unittest.TestCase):
             record["src_port"] = 80
             alert = rule.check(record) or alert
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.7")
+        self.assertEqual(alert["rule_version"], "1.8")
         self.assertEqual(alert["evidence"]["distinct_ports"], 3)
 
         reply = self._syn(

@@ -290,7 +290,7 @@ def _is_internal(ip: str) -> bool:
 
 class BlocklistRule:
     name = "BLOCKLIST"
-    rule_version = "1.1"
+    rule_version = "1.2"
 
     def __init__(self, blocklist):
         """
@@ -311,6 +311,9 @@ class BlocklistRule:
         Normalises the observed IP before exact matching so that
         equivalent IPv6 spellings (e.g. ::1 vs ::0:1) resolve correctly.
         """
+        if not ip or not isinstance(ip, str):
+            return False
+        ip = ip.strip()
         try:
             canon = str(ipaddress.ip_address(ip))
         except ValueError:
@@ -349,8 +352,8 @@ class BlocklistRule:
                 "rule_version": self.rule_version,
                 "src_ip": src,
                 "dst_ip": dst,
-                "src_port": record.get("src_port"),
-                "dst_port": record.get("dst_port"),
+                "src_port": _normalize_port(record.get("src_port")),
+                "dst_port": _normalize_port(record.get("dst_port")),
                 "protocol": record.get("protocol"),
                 "severity": "high",
                 "confidence": "high",
@@ -644,7 +647,7 @@ class UdpFloodRule:
     """
 
     name = "UDP_FLOOD"
-    rule_version = "1.6"
+    rule_version = "1.7"
     ALERT_COOLDOWN_S: float = 60.0
     _EXEMPT_SRC_PORTS: set[int] = {53, 67, 68, 123}
 
@@ -747,7 +750,7 @@ class UdpFloodRule:
                 "src_ip": src,
                 "dst_ip": dst,
                 "src_port": src_port,
-                "dst_port": record.get("dst_port"),
+                "dst_port": dst_port,
                 "protocol": "UDP",
                 "severity": "medium",
                 "confidence": "heuristic",
@@ -772,7 +775,7 @@ class TcpStealthScanRule:
     """Detect vertical FIN, NULL, and Xmas TCP probes."""
 
     name = "TCP_STEALTH_SCAN"
-    rule_version = "1.5"
+    rule_version = "1.6"
     _FIN, _SYN, _RST, _PSH, _ACK, _URG, _ECE, _CWR = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80
     _XMAS_FLAGS = _FIN | _PSH | _URG
     _DISALLOWED_FLAGS = _SYN | _RST | _ACK | _ECE | _CWR
@@ -807,16 +810,14 @@ class TcpStealthScanRule:
         src, dst = record.get("src_ip", ""), record.get("dst_ip", "")
         if not src or not dst or _is_trusted(src):
             return None
-        src_port, dst_port = record.get("src_port"), record.get("dst_port")
+        src_port = _normalize_port(record.get("src_port"))
+        dst_port = _normalize_port(record.get("dst_port"))
         flags = record.get("tcp_flags")
         if dst_port is None or flags is None:
             return None
         try:
             flags = int(flags)
-            dst_port = int(dst_port)
         except (TypeError, ValueError, OverflowError):
-            return None
-        if not 0 <= dst_port <= 65535:
             return None
         probe_type = self._probe_type(flags)
         if probe_type is None:
@@ -829,7 +830,7 @@ class TcpStealthScanRule:
         cutoff = now - self.window
         with self._lock:
             history = self._probes.get(key, [])
-            if history and now < max(ts for ts, _, _ in history):
+            if history and now < history[-1][0]:
                 return None
             active = [(ts, port, kind) for ts, port, kind in history
                       if cutoff <= ts <= now and port != dst_port]
@@ -856,7 +857,7 @@ class TcpStealthScanRule:
             self._fired.move_to_end(key)
 
             kinds = sorted({kind for _, _, kind in active})
-            window_start = min(ts for ts, _, _ in active)
+            window_start = active[0][0]
             self._probes.pop(key, None)
             return {
                 "rule_name": self.name,
@@ -923,7 +924,7 @@ class TcpFlagAnomalyRule:
     """
 
     name = "TCP_FLAG_ANOMALY"
-    rule_version = "1.5"
+    rule_version = "1.6"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, cooldown: float = 60.0, max_states: int = 5000):
@@ -1030,8 +1031,8 @@ class TcpFlagAnomalyRule:
             self._cooldown.move_to_end(key)
 
         dst = record.get("dst_ip", "")
-        dst_port = record.get("dst_port")
-        src_port = record.get("src_port")
+        dst_port = _normalize_port(record.get("dst_port"))
+        src_port = _normalize_port(record.get("src_port"))
 
         logger.debug(f"{self.name} fired: {src}→{dst}:{dst_port} {anomaly_type} (flags=0x{flags:02x})")
 
@@ -1070,7 +1071,7 @@ class SynFloodRule:
     """Detect SYN/RST floods while excluding normal closed-port RST replies."""
 
     name = "SYN_FLOOD"
-    rule_version = "1.11"
+    rule_version = "1.12"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 100, window: int = 10,
@@ -1259,7 +1260,7 @@ class SynFloodRule:
                             "rule_version": self.rule_version,
                             "src_ip": src,
                             "dst_ip": dst,
-                            "src_port": record.get("src_port"),
+                            "src_port": src_port,
                             "dst_port": dst_port,
                             "protocol": "TCP",
                             "severity": "high",
@@ -1327,7 +1328,7 @@ class SynFloodRule:
                 "rule_version": self.rule_version,
                 "src_ip": src,
                 "dst_ip": dst,
-                "src_port": record.get("src_port"),
+                "src_port": src_port,
                 "dst_port": dst_port,
                 "protocol": record.get("protocol", "TCP"),
                 # Confidence is heuristic: we count SYNs but do not verify
@@ -1358,7 +1359,7 @@ class DistributedSynFloodRule:
     """Detect high-volume initial-SYN bursts to one service from many sources."""
 
     name = "DISTRIBUTED_SYN_FLOOD"
-    rule_version = "1.7"
+    rule_version = "1.8"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 500, min_sources: int = 20,
@@ -1405,6 +1406,7 @@ class DistributedSynFloodRule:
             return None
 
         src, dst = record.get("src_ip"), record.get("dst_ip")
+        src_port = _normalize_port(record.get("src_port"))
         dst_port = _normalize_port(record.get("dst_port"))
         if not src or not dst or dst_port is None or not 1 <= dst_port <= 49151:
             return None
@@ -1460,7 +1462,7 @@ class DistributedSynFloodRule:
             "rule_version": self.rule_version,
             "src_ip": src,
             "dst_ip": dst,
-            "src_port": record.get("src_port"),
+            "src_port": src_port,
             "dst_port": dst_port,
             "protocol": "TCP",
             "severity": "high",
@@ -1494,7 +1496,7 @@ class IcmpSweepRule:
     """Detect a source probing distinct IPv4/IPv6 destinations with echo requests."""
 
     name = "ICMP_SWEEP"
-    rule_version = "1.5"
+    rule_version = "1.6"
 
     def __init__(self, threshold: int = 12, window: int = 10,
                  max_sources: int = 4096):
@@ -1546,7 +1548,7 @@ class IcmpSweepRule:
             # PCAPs are expected to be ordered; reject a late/reordered event
             # instead of letting it erase newer window state.
             history = self._history.get(src, [])
-            if history and now < max(ts for ts, _ in history):
+            if history and now < history[-1][0]:
                 return None
             history = [(ts, host) for ts, host in history
                        if 0 <= now - ts <= self.window and host != dst]
@@ -1565,7 +1567,7 @@ class IcmpSweepRule:
             if src not in self._fired and len(self._fired) >= self.max_sources:
                 self._fired.pop(next(iter(self._fired)))
             self._fired[src] = now
-            window_start = min(ts for ts, _ in history)
+            window_start = history[0][0]
 
         return {
             "rule_name": self.name,
@@ -1736,7 +1738,7 @@ class IcmpFloodRule:
 # =============================================================================
 class ArpSpoofRule:
     name = "ARP_SPOOF"
-    rule_version = "1.6"
+    rule_version = "1.7"
 
     # Per-IP cooldown: once an alert fires for a given IP, suppress repeats
     # for this many seconds to avoid alert storms. Set to 0 to disable.
@@ -1854,11 +1856,8 @@ class ArpSpoofRule:
                 return None
 
             if known_mac != mac:
-                try:
-                    now_t = float(record.get("timestamp", time.time()))
-                except (TypeError, ValueError, OverflowError):
-                    now_t = time.time()
-                if not math.isfinite(now_t):
+                now_t = _finite_record_timestamp(record)
+                if now_t is None:
                     now_t = time.time()
                 if ip in self._cooldown:
                     if now_t - self._cooldown[ip] < self.ALERT_COOLDOWN_S:
@@ -3495,7 +3494,7 @@ class SlowPortScanRule:
     """
 
     name = "SLOW_PORT_SCAN"
-    rule_version = "1.7"
+    rule_version = "1.8"
 
     def __init__(self, threshold: int = 30, window: int = 120,
                  max_states: int = 5000, cooldown: float | None = None):
@@ -3569,8 +3568,8 @@ class SlowPortScanRule:
 
         with self._lock:
             # Reject late events
-            if (self._vert.get(vkey) and now < max(t for t, _ in self._vert[vkey])) or \
-               (self._horiz.get(hkey) and now < max(t for t, _ in self._horiz[hkey])):
+            if (self._vert.get(vkey) and now < self._vert[vkey][-1][0]) or \
+               (self._horiz.get(hkey) and now < self._horiz[hkey][-1][0]):
                 return None
 
             # Capacity eviction
@@ -3599,7 +3598,7 @@ class SlowPortScanRule:
             horiz_fired = distinct_hosts >= self.threshold
 
             if vert_fired:
-                window_start = min(t for t, _ in vertical)
+                window_start = vertical[0][0]
                 self._vert.pop(vkey, None)
                 if self._allow_alert((src, "vertical"), now):
                     logger.debug(
@@ -3634,7 +3633,7 @@ class SlowPortScanRule:
                     }
 
             if horiz_fired:
-                window_start = min(t for t, _ in horizontal)
+                window_start = horizontal[0][0]
                 self._horiz.pop(hkey, None)
                 if not self._allow_alert((src, "horizontal"), now):
                     return None
@@ -3691,7 +3690,7 @@ class DataExfiltrationRule:
     - Configured TRUSTED_HOSTS.
     """
     name = "DATA_EXFIL"
-    rule_version = "1.15"
+    rule_version = "1.16"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 5000
     MAX_TRACKED_FLOW_EVENTS = 1_000_000
@@ -3913,8 +3912,8 @@ class DataExfiltrationRule:
             return None
 
         now = _finite_record_timestamp(record)
-        dst_port = record.get("dst_port")
-        src_port = record.get("src_port")
+        dst_port = _normalize_port(record.get("dst_port"))
+        src_port = _normalize_port(record.get("src_port"))
         protocol = record.get("protocol")
         try:
             tcp_flags = int(record.get("tcp_flags") or 0)
@@ -3979,7 +3978,7 @@ class DataExfiltrationRule:
                 "rule_version": self.rule_version,
                 "src_ip": src_ip,
                 "dst_ip": dst_ip,
-                "src_port": record.get("src_port"),
+                "src_port": src_port,
                 "dst_port": dst_port,
                 "protocol": protocol or "TCP",
                 "severity": "high",
@@ -4218,7 +4217,7 @@ class DataExfiltrationRule:
                     "rule_version": self.rule_version,
                     "src_ip": src_ip,
                     "dst_ip": dst_ip,
-                    "src_port": record.get("src_port"),
+                    "src_port": src_port,
                     "dst_port": dst_port,
                     "protocol": protocol or "TCP",
                     "severity": "high" if matched_sig else "medium",
@@ -4415,8 +4414,8 @@ class CleartextHttpOnTlsPortRule:
         if record.get("type") != "IP" or record.get("protocol") != "TCP":
             return None
         src, dst = record.get("src_ip"), record.get("dst_ip")
-        dst_port = _normalize_port(record.get("dst_port"))
         src_port = _normalize_port(record.get("src_port"))
+        dst_port = _normalize_port(record.get("dst_port"))
         if not src or not dst or dst_port not in (443, 8443) or _is_trusted(src):
             return None
         payload = record.get("payload", b"")
@@ -4490,7 +4489,7 @@ class CleartextHttpOnTlsPortRule:
             "rule_version": self.rule_version,
             "src_ip": src,
             "dst_ip": dst,
-            "src_port": record.get("src_port"),
+            "src_port": src_port,
             "dst_port": dst_port,
             "protocol": "TCP",
             "severity": "medium",

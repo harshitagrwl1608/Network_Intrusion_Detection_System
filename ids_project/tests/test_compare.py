@@ -47,6 +47,10 @@ class TestComparisonMatching(unittest.TestCase):
         second = dict(first, dst_port=80)
         self.assertFalse(_events_match(first, second))
 
+        # String port 443 matches integer port 443
+        third = dict(first, dst_port="443")
+        self.assertTrue(_events_match(first, third))
+
     def test_http_parser_overlap_is_reported_separately_from_exact_match(self):
         netguard = [{
             "rule_name": "CLEAR_HTTP_ON_TLS_PORT", "src_ip": "192.0.2.1",

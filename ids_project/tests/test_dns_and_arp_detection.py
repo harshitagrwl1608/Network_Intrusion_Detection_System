@@ -446,7 +446,7 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "timestamp": 101.0,
         })
         self.assertIsNotNone(alert1, "First ARP spoof event must fire")
-        self.assertEqual(alert1["rule_version"], "1.6")
+        self.assertEqual(alert1["rule_version"], "1.7")
         self.assertEqual(alert1["severity"], "medium")
         self.assertEqual(alert1["confidence"], "heuristic")
         self.assertEqual(alert1["evidence"]["classification"], "ARP_IDENTITY_CHANGE")

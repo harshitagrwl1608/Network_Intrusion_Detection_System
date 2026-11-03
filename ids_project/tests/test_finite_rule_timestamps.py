@@ -23,27 +23,27 @@ from engine.rules import (
 class TestFiniteRuleTimestamps(unittest.TestCase):
     def test_invalid_event_timestamps_do_not_mutate_rate_rule_state(self):
         cases = (
-            ("UDP_FLOOD", "1.6", lambda: UdpFloodRule(threshold=1), {
+            ("UDP_FLOOD", "1.7", lambda: UdpFloodRule(threshold=1), {
                 "type": "IP", "protocol": "UDP", "src_ip": "198.51.100.10",
                 "dst_ip": "203.0.113.10", "src_port": 50000, "dst_port": 5060,
             }, ("_history", "_cooldown")),
-            ("TCP_STEALTH_SCAN", "1.5", lambda: TcpStealthScanRule(threshold=1), {
+            ("TCP_STEALTH_SCAN", "1.6", lambda: TcpStealthScanRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.11",
                 "dst_ip": "203.0.113.11", "src_port": 50000, "dst_port": 22,
                 "tcp_flags": 0x01,
             }, ("_probes", "_fired")),
-            ("TCP_FLAG_ANOMALY", "1.5", TcpFlagAnomalyRule, {
+            ("TCP_FLAG_ANOMALY", "1.6", TcpFlagAnomalyRule, {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.12",
                 "dst_ip": "203.0.113.12", "src_port": 50000, "dst_port": 22,
                 "tcp_flags": 0x03,
             }, ("_cooldown",)),
-            ("DISTRIBUTED_SYN_FLOOD", "1.7", lambda: DistributedSynFloodRule(
+            ("DISTRIBUTED_SYN_FLOOD", "1.8", lambda: DistributedSynFloodRule(
                 threshold=1, min_sources=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.13",
                 "dst_ip": "203.0.113.13", "src_port": 50000, "dst_port": 80,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_history", "_cooldown")),
-            ("ICMP_SWEEP", "1.5", lambda: IcmpSweepRule(threshold=1), {
+            ("ICMP_SWEEP", "1.6", lambda: IcmpSweepRule(threshold=1), {
                 "type": "IP", "protocol": "ICMP", "src_ip": "198.51.100.14",
                 "dst_ip": "203.0.113.14", "icmp_type": 8, "icmp_code": 0,
             }, ("_history", "_fired")),
@@ -56,7 +56,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "dst_ip": "203.0.113.16", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_history", "_cooldown", "_seen_syns")),
-            ("SLOW_PORT_SCAN", "1.7", lambda: SlowPortScanRule(threshold=1), {
+            ("SLOW_PORT_SCAN", "1.8", lambda: SlowPortScanRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.17",
                 "dst_ip": "203.0.113.17", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
@@ -111,6 +111,72 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
         self.assertTrue(_is_initial_syn(record))
         record_syn_ack = {"initial_syn": None, "tcp_flags": 0x12}
         self.assertFalse(_is_initial_syn(record_syn_ack))
+
+    def test_arp_spoof_finite_event_timestamp_handling(self):
+        from engine.rules import ArpSpoofRule
+        import tempfile
+        with tempfile.NamedTemporaryFile("w+", suffix=".json") as f:
+            f.write("{}")
+            f.flush()
+            rule = ArpSpoofRule(f.name)
+            # Seed entry
+            self.assertIsNone(rule.check({
+                "type": "ARP", "src_ip": "192.168.1.50", "src_mac": "00:11:22:33:44:55",
+                "timestamp": None, "event_timestamp": 100.0,
+            }))
+            # Spoof entry with timestamp=None but valid event_timestamp
+            alert = rule.check({
+                "type": "ARP", "src_ip": "192.168.1.50", "src_mac": "00:11:22:33:44:66",
+                "timestamp": None, "event_timestamp": 101.0,
+            })
+            self.assertIsNotNone(alert)
+            self.assertEqual(alert["rule_version"], "1.7")
+            self.assertEqual(alert["evidence"]["new_mac"], "00:11:22:33:44:66")
+
+    def test_blocklist_whitespace_and_string_ports(self):
+        from engine.rules import BlocklistRule
+        from engine.blocklist import BlocklistData
+        rule = BlocklistRule(BlocklistData(exact={"198.51.100.55"}, networks=[]))
+        # Address with surrounding whitespace
+        alert = rule.check({
+            "type": "IP", "src_ip": "192.168.1.10", "dst_ip": "  198.51.100.55  ",
+            "src_port": "54321", "dst_port": "443", "protocol": "TCP",
+        })
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_version"], "1.2")
+        self.assertEqual(alert["src_port"], 54321)
+        self.assertEqual(alert["dst_port"], 443)
+
+    def test_tcp_flag_anomaly_string_ports(self):
+        from engine.rules import TcpFlagAnomalyRule
+        rule = TcpFlagAnomalyRule()
+        alert = rule.check({
+            "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.22",
+            "dst_ip": "203.0.113.22", "src_port": "50000", "dst_port": "80",
+            "tcp_flags": 0x03, "timestamp": 100.0,
+        })
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_version"], "1.6")
+        self.assertEqual(alert["src_port"], 50000)
+        self.assertEqual(alert["dst_port"], 80)
+
+    def test_tcp_stealth_scan_string_ports(self):
+        from engine.rules import TcpStealthScanRule
+        rule = TcpStealthScanRule(threshold=2, window=10)
+        self.assertIsNone(rule.check({
+            "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.23",
+            "dst_ip": "203.0.113.23", "src_port": "50000", "dst_port": "22",
+            "tcp_flags": 0x01, "timestamp": 100.0,
+        }))
+        alert = rule.check({
+            "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.23",
+            "dst_ip": "203.0.113.23", "src_port": "50001", "dst_port": "23",
+            "tcp_flags": 0x01, "timestamp": 101.0,
+        })
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_version"], "1.6")
+        self.assertEqual(alert["src_port"], 50001)
+        self.assertEqual(alert["dst_port"], 23)
 
 
 if __name__ == "__main__":

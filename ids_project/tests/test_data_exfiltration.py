@@ -17,13 +17,13 @@ class TestDataExfiltrationRule(unittest.TestCase):
         rules_mod.TRUSTED_HOSTS.clear()
 
     @staticmethod
-    def _pkt(src_ip, dst_ip, payload=b"", ip_len=0, ts=100.0, dst_port=9001, proto="TCP"):
+    def _pkt(src_ip, dst_ip, payload=b"", ip_len=0, ts=100.0, dst_port=9001, proto="TCP", src_port=50000):
         return {
             "type": "IP",
             "protocol": proto,
             "src_ip": src_ip,
             "dst_ip": dst_ip,
-            "src_port": 50000,
+            "src_port": src_port,
             "dst_port": dst_port,
             "payload": payload,
             "payload_len": len(payload),
@@ -286,7 +286,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNone(rule.check(late_old_syn))
         alert = rule.check(self._tcp_payload_pkt(payload, 1001, 103.0))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.15")
+        self.assertEqual(alert["rule_version"], "1.16")
         self.assertEqual(alert["evidence"]["bytes_transferred"], 1200)
 
     def test_tcp_connection_generation_state_is_bounded(self):
@@ -554,7 +554,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["sub_type"], "SIGNATURE_EXFIL")
         self.assertIn("ZIP", alert["detail"])
-        self.assertEqual(alert["rule_version"], "1.15")
+        self.assertEqual(alert["rule_version"], "1.16")
 
     def test_split_signature_is_not_joined_across_tcp_sequence_gap(self):
         rule = DataExfiltrationRule(byte_threshold=5000, window=30)
@@ -601,6 +601,25 @@ class TestDataExfiltrationRule(unittest.TestCase):
         # Prune at t=150 (30s window passed)
         self.rule.prune_stale(now=150.0)
         self.assertNotIn(("192.168.1.50", "203.0.113.10", 9001, "TCP"), self.rule._flows)
+
+    def test_string_ports_normalized_and_dns_exempt(self):
+        pkt_dns_str = self._pkt("192.168.1.50", "203.0.113.10", dst_port="53",
+                                payload=b"A" * 60000, ts=100.0)
+        self.assertIsNone(self.rule.check(pkt_dns_str))
+
+        # Port 80 as string uses web threshold (1,000,000 bytes) rather than 50,000
+        pkt_web_str = self._pkt("192.168.1.50", "203.0.113.10", src_port="50000",
+                                dst_port="80", payload=b"A" * 60000, ts=100.0)
+        self.assertIsNone(self.rule.check(pkt_web_str))
+
+        # Signature exfiltration with string ports produces integer ports in alert
+        pkt_sig_str = self._pkt("192.168.1.50", "203.0.113.10", src_port="50000",
+                                dst_port="8080", payload=b"PK\x03\x04sensitive", ts=101.0)
+        alert = self.rule.check(pkt_sig_str)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["src_port"], 50000)
+        self.assertEqual(alert["dst_port"], 8080)
+        self.assertEqual(alert["rule_version"], "1.16")
 
 
 if __name__ == "__main__":

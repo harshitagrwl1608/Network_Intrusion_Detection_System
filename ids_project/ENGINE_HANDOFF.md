@@ -1247,3 +1247,51 @@ This cycle followed the existing-rule-only constraint. No rules were added; the 
 - `_is_trusted` runs in many existing rules and reparsed every configured CIDR for each packet/rule call. The helper now compiles the configured network set once and atomically refreshes its cache when `TRUSTED_HOSTS` changes; exact-host matches and CIDR semantics are preserved.
 - A local microbenchmark with eight configured host/network entries measured 30,000 untrusted-address checks at **3.40s before / 0.27s after**, and 30,000 matching-CIDR checks at **1.52s before / 0.22s after**. This is a local comparison, not a production throughput claim.
 - Regression verifies cache invalidation when the trusted-host set changes. Focused data-exfiltration and persistence suites: **52 passed, 7 subtests passed**. Full suite: **409 passed, 92 subtests passed**; offline replay preserved **38/38** labelled detections and zero benign alerts.
+
+## Follow-up: 2026-11-03 Telemetry Normalization, Timestamp Fallback, Multi-Vector Scan Fall-Through, and Evaluation Comparator Hardening
+
+This cycle implemented substantive improvements across existing detection rules and evaluation infrastructure while strictly preserving rule count invariance (19 registered rules):
+
+### Key Improvements & Rule Refinements:
+1. **`DataExfiltrationRule` (v1.16):**
+   - Normalized `dst_port` and `src_port` using `_normalize_port`. Previously, string-typed ports (e.g. `"80"` or `"443"`) failed membership in `COMMON_WEB_PORTS` (a set of integers), causing normal web traffic to be evaluated against the strict 50 KB non-web threshold instead of the 1 MB web threshold, creating false positives.
+   - String port `"53"` now correctly satisfies the DNS exemption check (`dst_port == 53`), preventing DNS traffic from triggering data exfiltration alerts.
+   - Emitted alerts now consistently report normalized integer ports in evidence.
+
+2. **`SlowPortScanRule` (v1.8):**
+   - Fixed multi-vector scan fall-through: horizontal port scan evaluation is now properly reached and alerted even when vertical scans against the same target are suppressed by cooldown.
+   - Replaced expensive $O(N)$ linear scans (`max(t for t, _ in ...)` and `min(t for t, _ in ...)`) with $O(1)$ head/tail access (`[-1][0]` and `[0][0]`) exploiting the monotonic non-decreasing timestamp ordering of active probe lists.
+
+3. **`TcpFlagAnomalyRule` (v1.6):**
+   - Added type-safe port normalization for `src_port` and `dst_port` in alert evidence.
+
+4. **`BlocklistRule` (v1.2):**
+   - Added whitespace stripping to IP address lookup in `_in_blocklist` to guard against feed formatting anomalies.
+   - Normalized `src_port` and `dst_port` in emitted alerts.
+
+5. **`ArpSpoofRule` (v1.7):**
+   - Replaced fragile fallback `float(record.get("timestamp", time.time()))` with `_finite_record_timestamp(record)` so offline PCAP replays and test harnesses that supply `event_timestamp` or `timestamp=None` use the packet's actual timestamp delta rather than wall-clock `time.time()`.
+
+6. **`TcpStealthScanRule` (v1.6):**
+   - Normalized `src_port` and `dst_port` in alert evidence.
+   - Replaced $O(N)$ min/max scans with $O(1)$ indexed access over monotonic probe history.
+
+7. **`SynFloodRule` (v1.12) & `DistributedSynFloodRule` (v1.8):**
+   - Normalized string port telemetry and ensured emitted alerts contain integer `src_port` and `dst_port`.
+
+8. **`IcmpSweepRule` (v1.6) & `UdpFloodRule` (v1.7):**
+   - Optimized history timestamp indexing and normalized port handling.
+
+9. **`evaluation/compare.py` & Ground-Truth Matching:**
+   - Hardened `_events_match` and `_endpoint_correlations` to normalize destination ports before comparison, preventing false mismatches between string and integer port representations across Suricata EVE logs, scenario CSVs, and NetGuard SQLite databases.
+
+### Verification & Empirical Metrics:
+- **Pytest Full Suite:** **436 passed, 96 subtests passed** in 53.72s (`cd ids_project && python3 -m pytest -q -p no:cacheprovider`).
+- **Synthetic Evaluation Harness:** **38/38 labelled scenarios detected** (100.0% TP, 0 FN, 0 FP; Precision: 100.0%, Recall: 100.0%, F1: 100.0%).
+- **External Real-World Dataset Replay (CTU-13 Scenario 6 Donbot PCAP):**
+  - Dataset: 24,764 packets (5.1 MB, SHA-256: `28b49ca3e483a37c445474451b0cbe71cfa5a366cab67371031782b7a628d580`).
+  - Result: 24,764/24,764 packets processed (0 dropped); 45 `SLOW_PORT_SCAN v1.8` horizontal scan alerts detected against infected host `147.32.84.165` targeting port 25.
+- **Local Text PCAP Replays:**
+  - `test.pcap`: 9,252 entries processed, 0 dropped, 0 false positives.
+  - `test2.pcap`: 879 entries processed, 0 dropped, 0 false positives.
+- **Rule Inventory Invariance:** Exactly 19 registered rules confirmed (`len(RuleEngine.rules) == 19`).

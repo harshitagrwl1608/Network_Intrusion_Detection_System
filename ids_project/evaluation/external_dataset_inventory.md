@@ -238,10 +238,10 @@ SHA-256: `28b49ca3e483a37c445474451b0cbe71cfa5a366cab67371031782b7a628d580`.
 
 Both baseline and improved replay runs were executed:
 - Baseline database: `/tmp/netguard-donbot-baseline.db`
-- Improved database: `/tmp/netguard-donbot-improved.db`
+- Improved database: `/tmp/netguard-donbot-improved-v2.db`
 
 Both replays processed all 24,764 packets with 0 drops and produced exactly 45 alerts:
-- All 45 alerts are `SLOW_PORT_SCAN` (v1.6 in baseline, v1.7 in improved engine)
+- All 45 alerts are `SLOW_PORT_SCAN` (v1.6 in initial baseline, v1.8 in improved engine)
 - Every alert represents a low-and-slow horizontal TCP port scan from infected host `147.32.84.165` targeting port 25 (SMTP) across at least 30 distinct destination hosts per 120-second window.
-- The improved engine verified consistent detection parity while enforcing type safety, normalized port parsing, and multi-vector scan trigger fall-through during vertical cooldowns.
+- The improved engine verified consistent detection parity while enforcing type safety, normalized port parsing, $O(1)$ monotonic list timestamp access, and multi-vector scan trigger fall-through during vertical cooldowns.
 - Exactly 19 detection rules remain registered in `RuleEngine.rules`. Zero new rules or signatures were added.

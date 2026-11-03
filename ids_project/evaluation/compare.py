@@ -120,7 +120,17 @@ def _events_match(a: dict, b: dict, tolerance: float = TIMESTAMP_TOLERANCE) -> b
     family_a = _scan_family(a)
     family_b = _scan_family(b)
     semantic_scan_match = family_a is not None and family_a == family_b
-    if not semantic_scan_match and a.get("dst_port") != b.get("dst_port"):
+    port_a = a.get("dst_port")
+    port_b = b.get("dst_port")
+    try:
+        port_a = int(port_a) if port_a is not None else None
+    except (ValueError, TypeError):
+        pass
+    try:
+        port_b = int(port_b) if port_b is not None else None
+    except (ValueError, TypeError):
+        pass
+    if not semantic_scan_match and port_a != port_b:
         return False
     # Protocol check only when both sides have a non-empty value
     proto_a = (a.get("protocol") or "").upper()
@@ -171,8 +181,13 @@ def _endpoint_correlations(netguard: list[dict], suricata: list[dict]) -> list[d
             if not family:
                 continue
             protocol = str(event.get("protocol") or "").upper()
+            port = event.get("dst_port")
+            try:
+                port = int(port) if port is not None else None
+            except (ValueError, TypeError):
+                pass
             key = (family, event.get("src_ip"), event.get("dst_ip"),
-                   event.get("dst_port"), protocol)
+                   port, protocol)
             counts[key] = counts.get(key, 0) + 1
         return counts
 
