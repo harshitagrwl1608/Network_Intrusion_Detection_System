@@ -128,8 +128,8 @@ def load_suricata_alerts(eve_path: str) -> list[dict]:
                             except Exception:
                                 ts = 0.0
 
-                    src_ip = event.get("src_ip")
-                    dst_ip = event.get("dest_ip") or event.get("dst_ip")
+                    src_ip = _norm_ip(event.get("src_ip"))
+                    dst_ip = _norm_ip(event.get("dest_ip") or event.get("dst_ip"))
                     src_port = _norm_port(event.get("src_port"))
                     dst_port = _norm_port(event.get("dest_port") or event.get("dst_port"))
                     proto = str(event.get("proto") or "").strip().upper()
@@ -233,6 +233,10 @@ def _semantic_family(event: dict) -> str | None:
             return "log4shell"
         if "path_traversal" in detail or "path_traversal" in evidence_str:
             return "path_traversal"
+        if "xss" in detail or "xss" in evidence_str:
+            return "xss"
+        if "ssrf" in detail or "ssrf" in evidence_str:
+            return "ssrf"
     if "sql injection" in signature or "sqli" in signature:
         return "sql_injection"
     if "command injection" in signature or "cmd injection" in signature or "shellshock" in signature:
@@ -241,6 +245,18 @@ def _semantic_family(event: dict) -> str | None:
         return "log4shell"
     if "path traversal" in signature or "directory traversal" in signature:
         return "path_traversal"
+    if "cross-site scripting" in signature or "cross site scripting" in signature or "xss" in signature:
+        return "xss"
+    if "ssrf" in signature or "cloud metadata" in signature:
+        return "ssrf"
+
+    # Authentication brute-force
+    if rule == "BRUTE_FORCE" or "brute force" in signature or "bruteforce" in signature or "login attempt" in signature:
+        return "brute_force"
+
+    # TCP Zero-Window anomalies
+    if rule == "TCP_ZERO_WINDOW" or "zero window" in signature or "sockstress" in signature:
+        return "tcp_zero_window"
 
     # Flood families (network packet rate / count anomalies)
     if rule in ("SYN_FLOOD", "DISTRIBUTED_SYN_FLOOD") or "syn flood" in signature:

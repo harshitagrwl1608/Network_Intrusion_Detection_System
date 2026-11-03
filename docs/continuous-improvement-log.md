@@ -278,7 +278,7 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
   - `pytest ids_project/tests`: 468 passed in 51.40s.
   - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
 - **Test Results**: All 468 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly.
-- **Commit Hash**: Pending commit for Cycle 7.
+- **Commit Hash**: `df267ca` (pushed to `origin/antigravity/overnight-work`)
 - **Remaining Issues**:
   - Inspect `ids_project/evaluation/compare.py` for Suricata EVE JSON parser edge cases: malformed JSON lines, unexpected timestamp formats, missing alert/flow objects, protocol casing, and IPv6 address canonicalization.
   - Inspect `DataExfiltrationRule` and `CleartextHttpOnTlsPortRule` for directional flow accounting, proxy headers, and payload boundary truncation.
@@ -286,8 +286,38 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
 
 ---
 
+## Cycle 8 / 10
+
+- **Date/Time**: 2026-11-04 00:30:00 UTC+5:30
+- **Files Inspected**:
+  - `ids_project/evaluation/compare.py`
+  - `ids_project/tests/test_compare.py`
+- **Weakness Discovered**:
+  1. `load_suricata_alerts` in `compare.py` extracted raw string `src_ip` and `dest_ip`/`dst_ip` without passing them through `_norm_ip`, leading to potential corroboration mismatches on IPv6 formats (e.g. uncompressed vs compressed IPv6 representation or whitespace).
+  2. `_semantic_family()` lacked cross-engine corroboration mappings for web attacks (`xss`, `ssrf`), authentication brute-force (`brute_force`), and TCP anomalies (`tcp_zero_window`), preventing proper semantic alignment with Suricata ET rules and threat signatures.
+  3. `test_compare.py` lacked test cases for IPv6 canonicalization during Suricata EVE JSON ingestion and semantic family mapping for XSS, SSRF, Brute Force, and TCP Zero Window.
+- **Changes Implemented**:
+  1. Updated `ids_project/evaluation/compare.py`:
+     - Applied `_norm_ip` to `src_ip` and `dst_ip` in `load_suricata_alerts()` to guarantee canonical IPv4/IPv6 representation upon ingestion.
+     - Expanded `_semantic_family()` to support `xss`, `ssrf`, `brute_force`, and `tcp_zero_window` cross-engine corroboration across NetGuard rule names/evidence and Suricata ET signature patterns.
+  2. Updated `ids_project/tests/test_compare.py`:
+     - Added `test_load_suricata_alerts_canonicalizes_ipv6` validating that uncompressed IPv6 addresses with whitespace are canonicalized correctly on ingestion.
+     - Added assertions to `test_semantic_family_cross_engine_corroboration` verifying semantic matching for `xss`, `ssrf`, `brute_force`, and `tcp_zero_window`.
+- **Tests Executed**:
+  - `pytest ids_project/tests/test_compare.py`: 9 passed in 0.08s.
+  - `pytest ids_project/tests`: 469 passed in 49.68s.
+  - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
+- **Test Results**: All 469 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly.
+- **Commit Hash**: Pending commit for Cycle 8.
+- **Remaining Issues**:
+  - Inspect `DataExfiltrationRule` and `CleartextHttpOnTlsPortRule` in `ids_project/engine/rules.py` for directional byte accounting, window boundary handling, and cleartext HTTP verb validation.
+  - Inspect `DnsRule` and `PayloadRule` for numerical stability in entropy calculation and regex boundary safety.
+- **Next Cycle's Objective**: Inspect `DataExfiltrationRule` and `CleartextHttpOnTlsPortRule` for directional byte accounting and cleartext HTTP verb validation.
+
+---
+
 ## Next Actions Summary
 
-1. Commit Cycle 7 verified improvements to `antigravity/overnight-work`.
+1. Commit Cycle 8 verified improvements to `antigravity/overnight-work`.
 2. Push to `origin/antigravity/overnight-work`.
-3. Proceed immediately to Cycle 8: Suricata EVE JSON comparison engine hardening, parser edge cases, and IPv6 corroboration.
+3. Proceed immediately to Cycle 9: `DataExfiltrationRule` and `CleartextHttpOnTlsPortRule` hardening.

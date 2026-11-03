@@ -180,6 +180,50 @@ class TestComparisonMatching(unittest.TestCase):
         self.assertEqual(_semantic_family(ng_dns), "dns_tunnel")
         self.assertEqual(_semantic_family(sur_dns), "dns_tunnel")
 
+        # XSS corroboration
+        ng_xss = {"rule_name": "PAYLOAD_HIT", "detail": "matched DPI signature(s): XSS"}
+        sur_xss = {"signature": "ET WEB_CLIENT Cross Site Scripting Attempt"}
+        self.assertEqual(_semantic_family(ng_xss), "xss")
+        self.assertEqual(_semantic_family(sur_xss), "xss")
+
+        # SSRF corroboration
+        ng_ssrf = {"rule_name": "PAYLOAD_HIT", "detail": "matched DPI signature(s): SSRF"}
+        sur_ssrf = {"signature": "ET SCAN Suspicious AWS Cloud Metadata Access SSRF"}
+        self.assertEqual(_semantic_family(ng_ssrf), "ssrf")
+        self.assertEqual(_semantic_family(sur_ssrf), "ssrf")
+
+        # Brute-force corroboration
+        ng_bf = {"rule_name": "BRUTE_FORCE"}
+        sur_bf = {"signature": "ET SCAN Potential SSH BruteForce Attack"}
+        self.assertEqual(_semantic_family(ng_bf), "brute_force")
+        self.assertEqual(_semantic_family(sur_bf), "brute_force")
+
+        # TCP Zero-Window corroboration
+        ng_zw = {"rule_name": "TCP_ZERO_WINDOW"}
+        sur_zw = {"signature": "SURICATA TCP Zero Window advertisement flood"}
+        self.assertEqual(_semantic_family(ng_zw), "tcp_zero_window")
+        self.assertEqual(_semantic_family(sur_zw), "tcp_zero_window")
+
+    def test_load_suricata_alerts_canonicalizes_ipv6(self):
+        sample_eve = (
+            '{"event_type": "alert", "timestamp": "2023-01-01T12:00:00Z", '
+            '"src_ip": " 2001:0db8:0000:0000:0000:0000:0000:0001 ", '
+            '"dest_ip": "2001:0db8:0000:0000:0000:0000:0000:0002", '
+            '"src_port": 50000, "dest_port": 80, "proto": "TCP", '
+            '"alert": {"signature": "ET SCAN IPv6 Recon"}}\n'
+        )
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as tf:
+            tf.write(sample_eve)
+            tf_path = tf.name
+
+        try:
+            alerts = load_suricata_alerts(tf_path)
+            self.assertEqual(len(alerts), 1)
+            self.assertEqual(alerts[0]["src_ip"], "2001:db8::1")
+            self.assertEqual(alerts[0]["dst_ip"], "2001:db8::2")
+        finally:
+            if os.path.exists(tf_path):
+                os.remove(tf_path)
 
 
 if __name__ == "__main__":
