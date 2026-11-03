@@ -88,10 +88,21 @@ def _read_alerts(db_path: str) -> list:
     conn.row_factory = sqlite3.Row
     try:
         rows = [dict(r) for r in conn.execute(
-            "SELECT rule_name, src_ip, dst_ip, src_port, dst_port, "
-            "protocol, detail, severity, confidence, timestamp "
+            "SELECT rule_name, rule_version, src_ip, dst_ip, src_port, dst_port, "
+            "protocol, detail, severity, confidence, evidence_json, timestamp "
             "FROM alerts ORDER BY timestamp"
         ).fetchall()]
+        for r in rows:
+            raw_ev = r.get("evidence_json")
+            if isinstance(raw_ev, str):
+                try:
+                    r["evidence"] = json.loads(raw_ev)
+                except Exception:
+                    r["evidence"] = {}
+            elif isinstance(raw_ev, dict):
+                r["evidence"] = raw_ev
+            else:
+                r["evidence"] = {}
     except Exception as e:
         logger.warning(f"Could not read alerts from {db_path}: {e}")
         rows = []
@@ -474,6 +485,18 @@ def _report(attack_pcap, benign_pcap, labels_path, scenarios,
                   f"  {str(a.get('detail',''))[:40]}")
     print()
 
+    rule_versions = {}
+    for _, a in tp:
+        rname = a.get("rule_name")
+        rver = a.get("rule_version")
+        if rname and rver and rname not in rule_versions:
+            rule_versions[rname] = rver
+    for a in fp_attack + benign_alerts:
+        rname = a.get("rule_name")
+        rver = a.get("rule_version")
+        if rname and rver and rname not in rule_versions:
+            rule_versions[rname] = rver
+
     return {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "note": "All metrics are from SYNTHETIC test scenarios only.",
@@ -484,6 +507,7 @@ def _report(attack_pcap, benign_pcap, labels_path, scenarios,
         "precision": round(prec, 4), "recall": round(rec, 4), "f1": round(f1, 4),
         "benign_fp_by_rule": benign_by_rule,
         "per_rule": {r: dict(c) for r, c in rule_stats.items()},
+        "rule_versions": rule_versions,
     }
 
 

@@ -44,6 +44,48 @@ class TestRunEvalHarness(unittest.TestCase):
             self.assertEqual(len(scenario_rows), result["scenarios"])
             self.assertTrue(all(row["result"] == "TP" for row in scenario_rows))
 
+    def test_read_alerts_extracts_evidence_and_rule_version(self):
+        from evaluation.run_eval import _read_alerts
+        import sqlite3
+        with tempfile.NamedTemporaryFile("w+", suffix=".db") as tf:
+            conn = sqlite3.connect(tf.name)
+            conn.execute("""
+                CREATE TABLE alerts (
+                    id INTEGER PRIMARY KEY,
+                    timestamp REAL,
+                    rule_name TEXT,
+                    rule_version TEXT,
+                    src_ip TEXT,
+                    dst_ip TEXT,
+                    src_port INTEGER,
+                    dst_port INTEGER,
+                    protocol TEXT,
+                    detail TEXT,
+                    severity TEXT,
+                    confidence TEXT,
+                    evidence_json TEXT
+                )
+            """)
+            conn.execute("""
+                INSERT INTO alerts (
+                    timestamp, rule_name, rule_version, src_ip, dst_ip, src_port, dst_port,
+                    protocol, detail, severity, confidence, evidence_json
+                ) VALUES (
+                    100.0, 'SYN_FLOOD', '1.13', '192.168.1.100', '192.168.1.1', 50000, 80,
+                    'TCP', 'SYN flood detected', 'high', 'heuristic', '{"packet_count": 100, "target_port": 80}'
+                )
+            """)
+            conn.commit()
+            conn.close()
+
+            alerts = _read_alerts(tf.name)
+            self.assertEqual(len(alerts), 1)
+            self.assertEqual(alerts[0]["rule_name"], "SYN_FLOOD")
+            self.assertEqual(alerts[0]["rule_version"], "1.13")
+            self.assertIsInstance(alerts[0]["evidence"], dict)
+            self.assertEqual(alerts[0]["evidence"]["packet_count"], 100)
+            self.assertEqual(alerts[0]["evidence"]["target_port"], 80)
+
 
 if __name__ == "__main__":
     unittest.main()

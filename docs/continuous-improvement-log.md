@@ -247,7 +247,7 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
   - `pytest ids_project/tests`: 467 passed in 51.27s.
   - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
 - **Test Results**: All 467 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly.
-- **Commit Hash**: Pending commit for Cycle 6.
+- **Commit Hash**: `f9d2d23` (pushed to `origin/antigravity/overnight-work`)
 - **Remaining Issues**:
   - Inspect `ids_project/evaluation/replay.py` and external dataset sample handling for streaming memory safety and packet offset accounting.
   - Inspect `ids_project/evaluation/compare.py` for Suricata EVE JSON parser edge cases, missing alert keys, and IPv6 address canonicalization.
@@ -255,8 +255,39 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
 
 ---
 
+## Cycle 7 / 10
+
+- **Date/Time**: 2026-11-04 00:26:00 UTC+5:30
+- **Files Inspected**:
+  - `ids_project/evaluation/run_eval.py`
+  - `ids_project/evaluation/replay.py`
+  - `ids_project/capture/sniffer.py`
+  - `ids_project/storage/db.py`
+  - `ids_project/tests/test_run_eval.py`
+- **Weakness Discovered**:
+  1. `run_eval.py:_read_alerts()` did not select `rule_version` or parse `evidence_json`, omitting critical forensic metadata from automated evaluation reports and JSON exports.
+  2. `_report()` lacked `rule_versions` tracking across matched attack true positives and benign alerts, obscuring engine version provenance in evaluation artifacts.
+  3. `test_run_eval.py` lacked unit test coverage verifying that `_read_alerts()` correctly extracts, parses, and deserializes structured evidence dictionaries.
+- **Changes Implemented**:
+  1. Updated `ids_project/evaluation/run_eval.py`:
+     - Added `rule_version` and `evidence_json` selection to `_read_alerts()`, safely decoding JSON payloads into the `evidence` field.
+     - Added `rule_versions` metadata dictionary to `_report()` output mapping active rules to their executed versions.
+  2. Added regression test `test_read_alerts_extracts_evidence_and_rule_version` in `ids_project/tests/test_run_eval.py`.
+- **Tests Executed**:
+  - `pytest ids_project/tests/test_run_eval.py`: 2 passed in 8.15s.
+  - `pytest ids_project/tests`: 468 passed in 51.40s.
+  - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
+- **Test Results**: All 468 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly.
+- **Commit Hash**: Pending commit for Cycle 7.
+- **Remaining Issues**:
+  - Inspect `ids_project/evaluation/compare.py` for Suricata EVE JSON parser edge cases: malformed JSON lines, unexpected timestamp formats, missing alert/flow objects, protocol casing, and IPv6 address canonicalization.
+  - Inspect `DataExfiltrationRule` and `CleartextHttpOnTlsPortRule` for directional flow accounting, proxy headers, and payload boundary truncation.
+- **Next Cycle's Objective**: Inspect `ids_project/evaluation/compare.py` for Suricata EVE JSON parser edge cases, missing alert keys, and IPv6 address canonicalization.
+
+---
+
 ## Next Actions Summary
 
-1. Commit Cycle 6 verified improvements to `antigravity/overnight-work`.
+1. Commit Cycle 7 verified improvements to `antigravity/overnight-work`.
 2. Push to `origin/antigravity/overnight-work`.
-3. Proceed immediately to Cycle 7: Replay and evaluation runner enhancements for memory efficiency, packet offset logging, and external PCAP handling.
+3. Proceed immediately to Cycle 8: Suricata EVE JSON comparison engine hardening, parser edge cases, and IPv6 corroboration.
