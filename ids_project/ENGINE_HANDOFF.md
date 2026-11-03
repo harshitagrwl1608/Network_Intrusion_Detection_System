@@ -32,12 +32,31 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **444 passed, 102 subtests passed** in 51.60s (`python3 -m pytest -q -p no:cacheprovider`).
+- Full test suite: **446 passed, 102 subtests passed** in 49.97s (`python3 -m pytest -q -p no:cacheprovider`).
+- Unittest discover: **Ran 446 tests in 48.131s. OK.** (`python3 -m unittest discover ids_project/tests`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** Precision: 100.0%, Recall: 100.0%, F1: 100.0%. These are fixture results only and do **not** imply 100% real-world accuracy.
 - Ground-truth evaluation: **38/38 detected** (TP=38, FN=0, FP=0, Precision: 100.0%, Recall: 100.0%, F1: 100.0%).
-- External dataset replay (CTU-13 Scenario 6 / Botnet-47 Donbot, 24,764 packets): all 24,764 packets processed with 0 drops; 45 `SLOW_PORT_SCAN v1.8` horizontal scan alerts verified against infected host `147.32.84.165` targeting port 25.
+- External dataset replay (CTU-13 Scenario 6 / Botnet-47 Donbot, 24,764 packets): all 24,764 packets processed with 0 drops; 45 `SLOW_PORT_SCAN v1.9` horizontal scan alerts verified against infected host `147.32.84.165` targeting port 25.
 - Rule inventory verified: **strictly 19 rules registered in `RuleEngine.rules`**. Zero new rules, zero new Sigma/SPL rules, zero deleted rules.
 - `git diff --check` clean.
+
+## Follow-up: 2026-11-03 Illegal Flag State Detection (FIN+RST), Single-Pass IP Blocklist Parsing, and Slow Scan Set Allocation Elimination
+
+- **`TcpFlagAnomalyRule` Illegal Flag State Detection (v1.7):**
+  - Added classification for contradictory `FIN+RST` (0x05) flag combinations (`anomaly_type = "FIN_RST"` with high severity and malformed classification).
+  - Under RFC 9293 §3.4, FIN indicates an orderly end of transmissions (graceful close) while RST demands immediate connection teardown without acknowledgment. Simultaneously setting both flags violates standard protocol state machines and is actively leveraged by scanners (e.g., Nmap OS detection T4/T7 tests) and evasion tools.
+  - Added unit tests `test_fin_rst_detected` and `test_fin_rst_ack_detected` in `test_tcp_flag_anomaly.py`.
+- **`BlocklistRule` Single-Pass IP Parsing Optimization (v1.3):**
+  - Streamlined `_in_blocklist` to parse `ipaddress.ip_address(ip)` exactly once in the initial `try` block, caching the parsed `addr` object for subsequent `self._networks` CIDR membership evaluation.
+  - Avoids double-parsing strings into IP address objects on every non-exact hit in the packet processing hot path, and skips network iteration entirely when `self._networks` is empty.
+- **`SlowPortScanRule` Sliding Window Set Allocation Elimination (v1.9):**
+  - Streamlined distinct port and host calculation to `distinct_ports = len(vertical)` and `distinct_hosts = len(horizontal)`.
+  - Because each packet append operation prepends an exclusion filter (`p != dst_port` and `ip != dst_ip`), each entry in the sliding history is mathematically guaranteed to be pairwise distinct. Eliminating `{p for _, p in vertical}` and `{ip for _, ip in horizontal}` removes two heap set allocations and two full iteration passes per evaluated packet.
+- **Regressions & Verifications:**
+  - Synchronized rule version assertions in `test_finite_rule_timestamps.py` and `test_new_rules_cycle8.py`.
+  - Full test suite: **446 passed, 102 subtests passed** in 49.97s.
+  - External CTU-13 Donbot replay: 24,764/24,764 packets processed (0 dropped), 45 `SLOW_PORT_SCAN v1.9` alerts detected.
+  - Rule inventory invariant: strictly 19 rules registered in `RuleEngine.rules`.
 
 ## Follow-up: 2026-11-03 Cross-Rule Telemetry Hardening: Evidence Target Port Normalization and Robust TCP Endpoint Extraction
 

@@ -58,6 +58,22 @@ class TestTcpFlagAnomalyRule(unittest.TestCase):
         self.assertEqual(alert["evidence"]["anomaly_type"], "SYN_RST")
         self.assertEqual(alert["severity"], "high")
 
+    def test_fin_rst_detected(self):
+        alert = self.rule.check(_tcp_pkt(flags=0x05))  # FIN + RST
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_name"], "TCP_FLAG_ANOMALY")
+        self.assertEqual(alert["rule_version"], "1.7")
+        self.assertEqual(alert["evidence"]["anomaly_type"], "FIN_RST")
+        self.assertEqual(alert["severity"], "high")
+        self.assertEqual(alert["confidence"], "high")
+        self.assertEqual(alert["evidence"]["classification"], "malformed")
+
+    def test_fin_rst_ack_detected(self):
+        alert = self.rule.check(_tcp_pkt(flags=0x15))  # FIN + RST + ACK
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["anomaly_type"], "FIN_RST")
+        self.assertEqual(alert["severity"], "high")
+
     def test_kamikaze_all_flags_detected(self):
         alert = self.rule.check(_tcp_pkt(flags=0x3F))  # SYN+FIN+RST+PSH+ACK+URG
         self.assertIsNotNone(alert)

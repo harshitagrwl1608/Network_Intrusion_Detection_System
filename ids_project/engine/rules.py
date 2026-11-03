@@ -290,7 +290,7 @@ def _is_internal(ip: str) -> bool:
 
 class BlocklistRule:
     name = "BLOCKLIST"
-    rule_version = "1.2"
+    rule_version = "1.3"
 
     def __init__(self, blocklist):
         """
@@ -315,16 +315,16 @@ class BlocklistRule:
             return False
         ip = ip.strip()
         try:
-            canon = str(ipaddress.ip_address(ip))
+            addr = ipaddress.ip_address(ip)
+            canon = str(addr)
         except ValueError:
+            addr = None
             canon = ip  # not a valid IP — try raw string
         if canon in self._exact:
             return True
-        try:
-            addr = ipaddress.ip_address(ip)
+        if addr is not None and self._networks:
             return any(addr in net for net in self._networks)
-        except ValueError:
-            return False
+        return False
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP":
@@ -924,7 +924,7 @@ class TcpFlagAnomalyRule:
     """
 
     name = "TCP_FLAG_ANOMALY"
-    rule_version = "1.6"
+    rule_version = "1.7"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, cooldown: float = 60.0, max_states: int = 5000):
@@ -996,14 +996,19 @@ class TcpFlagAnomalyRule:
             anomaly_type = "SYN_RST"
             severity = "high"
             desc = "SYN+RST flags set simultaneously (illegal connection open/abort request)"
-        # 4. PSH without ACK or SYN
+        # 4. FIN + RST (0x05)
+        elif (flags & (_FIN | _RST)) == (_FIN | _RST):
+            anomaly_type = "FIN_RST"
+            severity = "high"
+            desc = "FIN+RST flags set simultaneously (illegal connection close/abort request)"
+        # 5. PSH without ACK or SYN
         elif (flags & _PSH) and not (flags & (_ACK | _SYN)):
             anomaly_type = "PSH_WITHOUT_ACK"
             confidence = "heuristic"
             classification = "unusual"
             severity = "medium"
             desc = "PSH flag set without ACK or SYN; connection state is unavailable"
-        # 5. URG without ACK
+        # 6. URG without ACK
         elif (flags & _URG) and not (flags & _ACK):
             anomaly_type = "URG_WITHOUT_ACK"
             confidence = "heuristic"
@@ -3493,7 +3498,7 @@ class SlowPortScanRule:
     """
 
     name = "SLOW_PORT_SCAN"
-    rule_version = "1.8"
+    rule_version = "1.9"
 
     def __init__(self, threshold: int = 30, window: int = 120,
                  max_states: int = 5000, cooldown: float | None = None):
@@ -3583,7 +3588,7 @@ class SlowPortScanRule:
             vertical.append((now, dst_port))
             self._vert.pop(vkey, None)
             self._vert[vkey] = vertical
-            distinct_ports = len({p for _, p in vertical})
+            distinct_ports = len(vertical)
 
             # Horizontal history update (deduplicate per host)
             horizontal = [(t, ip) for t, ip in self._horiz.get(hkey, [])
@@ -3591,7 +3596,7 @@ class SlowPortScanRule:
             horizontal.append((now, dst_ip))
             self._horiz.pop(hkey, None)
             self._horiz[hkey] = horizontal
-            distinct_hosts = len({ip for _, ip in horizontal})
+            distinct_hosts = len(horizontal)
 
             vert_fired  = distinct_ports >= self.threshold
             horiz_fired = distinct_hosts >= self.threshold

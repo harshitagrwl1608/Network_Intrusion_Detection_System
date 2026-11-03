@@ -32,7 +32,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "dst_ip": "203.0.113.11", "src_port": 50000, "dst_port": 22,
                 "tcp_flags": 0x01,
             }, ("_probes", "_fired")),
-            ("TCP_FLAG_ANOMALY", "1.6", TcpFlagAnomalyRule, {
+            ("TCP_FLAG_ANOMALY", "1.7", TcpFlagAnomalyRule, {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.12",
                 "dst_ip": "203.0.113.12", "src_port": 50000, "dst_port": 22,
                 "tcp_flags": 0x03,
@@ -56,7 +56,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "dst_ip": "203.0.113.16", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_history", "_cooldown", "_seen_syns")),
-            ("SLOW_PORT_SCAN", "1.8", lambda: SlowPortScanRule(threshold=1), {
+            ("SLOW_PORT_SCAN", "1.9", lambda: SlowPortScanRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.17",
                 "dst_ip": "203.0.113.17", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
@@ -143,7 +143,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
             "src_port": "54321", "dst_port": "443", "protocol": "TCP",
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.2")
+        self.assertEqual(alert["rule_version"], "1.3")
         self.assertEqual(alert["src_port"], 54321)
         self.assertEqual(alert["dst_port"], 443)
 
@@ -156,7 +156,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
             "tcp_flags": 0x03, "timestamp": 100.0,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.6")
+        self.assertEqual(alert["rule_version"], "1.7")
         self.assertEqual(alert["src_port"], 50000)
         self.assertEqual(alert["dst_port"], 80)
 
