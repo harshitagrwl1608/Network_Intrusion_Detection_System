@@ -419,7 +419,7 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "dns_query": qname, "timestamp": 100,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.23")
+        self.assertEqual(alert["rule_version"], "1.24")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
         self.assertEqual(alert["evidence"]["longest_label"], "a" * 61)
         self.assertEqual(alert["evidence"]["longest_label_length"], 61)
@@ -641,6 +641,43 @@ class TestDnsAndArpDetection(unittest.TestCase):
         self.assertEqual(rule._parent_domain("dept.intranet.gc.ca"), "intranet.gc.ca")
         self.assertEqual(rule._parent_domain("api.service.com.pl"), "service.com.pl")
         self.assertEqual(rule._parent_domain("dns.node.com.gr"), "node.com.gr")
+
+
+    def test_shannon_entropy_edge_cases_and_punycode(self):
+        from engine.rules import _shannon_entropy
+        # Empty and non-string inputs produce 0.0
+        self.assertEqual(_shannon_entropy(""), 0.0)
+        self.assertEqual(_shannon_entropy(None), 0.0)
+        self.assertEqual(_shannon_entropy(123), 0.0)
+        # Single-character string produces 0.0
+        self.assertEqual(_shannon_entropy("a"), 0.0)
+        # Homogeneous repetitive string produces 0.0
+        self.assertEqual(_shannon_entropy("aaaaaaa"), 0.0)
+        # Punycode prefix is stripped before calculation
+        self.assertEqual(_shannon_entropy("xn--a"), 0.0)
+        # Valid non-zero entropy
+        ent = _shannon_entropy("abcdefgh")
+        self.assertAlmostEqual(ent, 3.0, places=2)
+
+    def test_dns_prune_stale_optional_now_and_unconditional_seen_pruning(self):
+        rule = DnsRule()
+        # Plant stale seen entries (cutoff is now - 120)
+        stale_key = ("192.168.1.1", "stale.com", "DNS_DGA")
+        fresh_key = ("192.168.1.1", "fresh.com", "DNS_DGA")
+        future_key = ("192.168.1.1", "future.com", "DNS_DGA")
+
+        rule._seen[stale_key] = 10.0
+        rule._seen[fresh_key] = 900.0
+        rule._seen[future_key] = 1500.0
+
+        # Prune with now=1000.0
+        rule.prune_stale(now=1000.0)
+        self.assertNotIn(stale_key, rule._seen)
+        self.assertNotIn(future_key, rule._seen)
+        self.assertIn(fresh_key, rule._seen)
+
+        # Prune without explicit now (defaults to time.time())
+        rule.prune_stale()
 
 
 if __name__ == "__main__":

@@ -2322,7 +2322,7 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.23"
+    rule_version = "1.24"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048,
@@ -2349,7 +2349,9 @@ class PayloadRule:
         self._alerted: OrderedDict[tuple, float] = OrderedDict()
         self._max_alert_states = max(1024, self.max_streams * 32)
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.stream_timeout
         with self._stream_lock:
             for key in list(self._streams):
@@ -2806,7 +2808,12 @@ _DGA_WHITELIST_SUFFIXES: tuple[str, ...] = (
 
 def _shannon_entropy(s: str) -> float:
     """Return Shannon entropy in bits/character for string s."""
-    if not s:
+    if not s or not isinstance(s, str):
+        return 0.0
+    # Strip IDN punycode prefix 'xn--' if present so artificial prefix doesn't skew metric
+    if s.startswith("xn--"):
+        s = s[4:]
+    if len(s) <= 1:
         return 0.0
     freq = Counter(s)
     n = len(s)
@@ -2853,7 +2860,7 @@ _COMMON_MULTI_LABEL_CC_SUFFIXES = frozenset({
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.23"
+    rule_version = "1.24"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -2932,7 +2939,9 @@ class DnsRule:
             if seen_at <= cutoff or seen_at > now:
                 del self._seen[key]
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff_freq = now - self._freq_window
         cutoff_sd = now - self._subdomain_window
         with self._lock:
@@ -2952,8 +2961,7 @@ class DnsRule:
             for key, timestamp in list(self._seen_queries.items()):
                 if timestamp < retry_cutoff or timestamp > now:
                     del self._seen_queries[key]
-            if len(self._seen) > 5000:
-                self._prune_seen(now)
+            self._prune_seen(now)
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP":

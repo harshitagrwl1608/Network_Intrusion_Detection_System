@@ -199,7 +199,7 @@ class TestPayloadRule(unittest.TestCase):
         suffix.update(tcp_flags=0x18, tcp_seq=1018)
         alert = self.rule.check(suffix)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.23")
+        self.assertEqual(alert["rule_version"], "1.24")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):
@@ -661,7 +661,7 @@ class TestPayloadRule(unittest.TestCase):
                 pkt = self.packet(payload, 5404)
                 alert = rule.check(pkt)
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.23")
+                self.assertEqual(alert["rule_version"], "1.24")
                 self.assertIn("SSRF", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_usr_bin_bash_cmd_injection_detected(self):
@@ -678,7 +678,7 @@ class TestPayloadRule(unittest.TestCase):
                 pkt = self.packet(cmd, 5405)
                 alert = rule.check(pkt)
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.23")
+                self.assertEqual(alert["rule_version"], "1.24")
                 self.assertIn("CMD_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_mssql_and_memcached_dpi_ports_inspected(self):
@@ -693,7 +693,7 @@ class TestPayloadRule(unittest.TestCase):
         }
         alert = rule.check(mssql_pkt)
         self.assertIsNotNone(alert, "Payload on MSSQL port 1433 should be inspected")
-        self.assertEqual(alert["rule_version"], "1.23")
+        self.assertEqual(alert["rule_version"], "1.24")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
         # Memcached port 11211 command injection
@@ -706,8 +706,26 @@ class TestPayloadRule(unittest.TestCase):
         }
         alert2 = rule.check(memcached_pkt)
         self.assertIsNotNone(alert2, "Payload on Memcached port 11211 should be inspected")
-        self.assertEqual(alert2["rule_version"], "1.23")
+        self.assertEqual(alert2["rule_version"], "1.24")
         self.assertIn("CMD_INJECTION", [hit["signature"] for hit in alert2["evidence"]["hits"]])
+
+    def test_payload_prune_stale_optional_now_and_stale_eviction(self):
+        rule = PayloadRule()
+        flow_key = ("192.168.1.100", "192.168.1.10", "TCP", 80)
+        cooldown_key_stale = (flow_key, "SQL_INJECTION", "UNION SELECT")
+        cooldown_key_valid = (flow_key, "SQL_INJECTION", "SELECT *")
+
+        rule._alerted[cooldown_key_stale] = 10.0   # expired (< 1000 - 60)
+        rule._alerted[cooldown_key_valid] = 980.0  # active within window
+
+        # Prune with now=1000.0:
+        # Stale entry should be removed, active entry retained
+        rule.prune_stale(now=1000.0)
+        self.assertNotIn(cooldown_key_stale, rule._alerted)
+        self.assertIn(cooldown_key_valid, rule._alerted)
+
+        # prune_stale without explicit now (defaults to time.time())
+        rule.prune_stale()
 
 
 if __name__ == "__main__":

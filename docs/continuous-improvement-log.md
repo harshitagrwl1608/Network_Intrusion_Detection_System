@@ -348,16 +348,61 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
   - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
   - `pytest ids_project/tests`: 474 passed (task-544).
 - **Test Results**: All 474 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly. Exactly 19 rules preserved in `RuleEngine.rules`.
-- **Commit Hash**: Pending commit for Cycle 9.
+- **Commit Hash**: `8d95845` (pushed to `origin/antigravity/overnight-work`)
 - **Remaining Issues**:
   - Inspect `DnsRule` and `PayloadRule` for numerical stability in Shannon entropy calculation (zero-entropy edge cases, boundary handling) and regex backtracking safeguards.
 - **Next Cycle's Objective**: Cycle 10 — `DnsRule` Shannon entropy stability and `PayloadRule` regex safety and bounded inspection.
 
 ---
 
+## Cycle 10 / 10
+
+- **Date/Time**: 2026-11-04 00:42:00 UTC+5:30
+- **Files Inspected**:
+  - `ids_project/engine/rules.py` (`DnsRule`, `PayloadRule`, `_shannon_entropy`)
+  - `ids_project/tests/test_dns_and_arp_detection.py`
+  - `ids_project/tests/test_new_rules_cycle8.py`
+  - `ids_project/tests/test_payload_detection.py`
+- **Weakness Discovered**:
+  1. `_shannon_entropy`:
+     - Lacked type validation for non-string types, causing potential exceptions on malformed telemetry.
+     - Did not strip IDN punycode prefix (`xn--`), artificially inflating character count and entropy calculations on internationalized domain labels.
+     - Computed floating-point log on single-character inputs instead of returning theoretical 0.0 directly.
+  2. `DnsRule`:
+     - `prune_stale` required a positional `now: float` argument without default, breaking standard on-demand GC invocations `rule.prune_stale()`.
+     - `_prune_seen` was gated behind `len(self._seen) > 5000`, allowing thousands of stale alert deduplication keys to persist uncollected.
+  3. `PayloadRule`:
+     - `prune_stale` required a positional `now: float` argument without default, causing `TypeError` on parameterless calls.
+- **Changes Implemented**:
+  1. Updated `_shannon_entropy()`:
+     - Added strict string type and emptiness guards returning `0.0` immediately.
+     - Added IDN punycode prefix stripping (`xn--`) so ACE encoding overhead does not distort entropy measurement.
+     - Added `len(s) <= 1` fast path returning `0.0` directly without counter or logarithmic operations.
+  2. Updated `DnsRule` (v1.24):
+     - Added optional `now: float = None` with default `now = time.time()` in `prune_stale()`.
+     - Made `self._prune_seen(now)` execute unconditionally during `prune_stale()` to ensure prompt cleanup of deduplication records.
+  3. Updated `PayloadRule` (v1.24):
+     - Added optional `now: float = None` with default `now = time.time()` in `prune_stale()`.
+  4. Added regression tests:
+     - `test_dns_and_arp_detection.py`: `test_shannon_entropy_edge_cases_and_punycode`, `test_dns_prune_stale_optional_now_and_unconditional_seen_pruning`.
+     - `test_payload_detection.py`: `test_payload_prune_stale_optional_now_and_stale_eviction`.
+     - Updated rule version assertions across `test_dns_and_arp_detection.py`, `test_new_rules_cycle8.py`, and `test_payload_detection.py`.
+- **Tests Executed**:
+  - `pytest ids_project/tests/test_dns_and_arp_detection.py`: 39 passed in 0.19s.
+  - `pytest ids_project/tests/test_payload_detection.py ids_project/tests/test_new_rules_cycle8.py`: 141 passed in 0.46s.
+  - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
+  - `pytest ids_project/tests`: 477 passed (task-664).
+- **Test Results**: All 477 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly. Exactly 19 rules preserved in `RuleEngine.rules`.
+- **Commit Hash**: Pending commit for Cycle 10.
+- **Remaining Issues**:
+  - All 10 development cycles successfully completed and verified.
+- **Next Cycle's Objective**: Campaign completion, final test suite execution, final report generation, and repository synchronization.
+
+---
+
 ## Next Actions Summary
 
-1. Verify task-544 completion.
-2. Commit Cycle 9 verified improvements to `antigravity/overnight-work`.
+1. Verify task-664 completion.
+2. Commit Cycle 10 verified improvements to `antigravity/overnight-work`.
 3. Push to `origin/antigravity/overnight-work`.
-4. Proceed immediately to Cycle 10: `DnsRule` and `PayloadRule` hardening.
+4. Finalize autonomy state and compile final overnight engineering report.
