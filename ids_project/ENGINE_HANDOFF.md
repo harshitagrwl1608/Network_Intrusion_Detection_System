@@ -32,13 +32,28 @@ Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_
 
 Results verified during the current continuation on 2026-11-03 on branch `codex-existing-detection-improvements`:
 
-- Full test suite: **446 passed, 102 subtests passed** in 49.97s (`python3 -m pytest -q -p no:cacheprovider`).
-- Unittest discover: **Ran 446 tests in 48.131s. OK.** (`python3 -m unittest discover ids_project/tests`).
+- Full test suite: **448 passed, 108 subtests passed** in 53.33s (`python3 -m pytest -q -p no:cacheprovider`).
+- Unittest discover: **Ran 448 tests in 48.357s. OK.** (`python3 -m unittest discover ids_project/tests`).
 - Synthetic evaluation: **38/38 labelled scenarios detected; 0 missed scenarios; 0 unmatched attack alerts; 0 alerts on the benign fixture.** Precision: 100.0%, Recall: 100.0%, F1: 100.0%. These are fixture results only and do **not** imply 100% real-world accuracy.
 - Ground-truth evaluation: **38/38 detected** (TP=38, FN=0, FP=0, Precision: 100.0%, Recall: 100.0%, F1: 100.0%).
 - External dataset replay (CTU-13 Scenario 6 / Botnet-47 Donbot, 24,764 packets): all 24,764 packets processed with 0 drops; 45 `SLOW_PORT_SCAN v1.9` horizontal scan alerts verified against infected host `147.32.84.165` targeting port 25.
 - Rule inventory verified: **strictly 19 rules registered in `RuleEngine.rules`**. Zero new rules, zero new Sigma/SPL rules, zero deleted rules.
 - `git diff --check` clean.
+
+## Follow-up: 2026-11-03 HTTPS Metadata SSRF Detection, FHS /usr Binary Path Coverage, and DNS Subdomain Frequency Optimization
+
+- **`PayloadRule` HTTPS SSRF and Command Injection Expansion (v1.21):**
+  - Expanded `SSRF` regex to support `https?://` across all internal/cloud metadata IP targets (`127.`, `0.0.0.0`, `169.254.169.254`, `metadata.google`, `100.100.100.200`, `[::1]`, `[0::`, `[::ffff:`, `[fe80:`, `[fc`, `[fd`). Prevents protocol evasion by attackers wrapping SSRF requests in HTTPS.
+  - Expanded `CMD_INJECTION` regex from `/bin/sh|/bin/bash` to `/(?:usr/)?bin/(?:ba|da)?sh|/bin/zsh`, detecting `/usr/bin/bash`, `/usr/bin/sh`, `/bin/dash`, and `/usr/bin/dash` used across modern Linux distributions with merged `/usr` filesystems and Debian/Ubuntu container images.
+  - Added unit tests `test_https_ssrf_detected` and `test_usr_bin_bash_cmd_injection_detected` in `test_payload_detection.py`.
+- **`DnsRule` Subdomain State Optimization and Port Normalization (v1.21):**
+  - Streamlined `subdomain_count` in `_subdomain_freq` to `len(sd_history)`. Because duplicate subdomains are purged prior to append (`s != subdomain`), elements in `sd_history` are pairwise unique; eliminating `{s for _, s in sd_history}` removes a heap set allocation on every query.
+  - Standardized emitted alert `dst_port` to `dst_port or 53` instead of hardcoding `53`, accurately reflecting the destination port from the normalized record.
+- **Regressions & Verifications:**
+  - Synchronized rule version assertions across `test_dns_and_arp_detection.py`, `test_payload_detection.py`, and `test_new_rules_cycle8.py`.
+  - Full test suite: **448 passed, 108 subtests passed** in 53.33s. Unittest discover: **448 passed in 48.357s**.
+  - Synthetic evaluation harness: **38/38 detected** (100.0% precision, recall, F1; 0 FP on benign).
+  - Rule inventory invariant: strictly 19 rules registered in `RuleEngine.rules`.
 
 ## Follow-up: 2026-11-03 Illegal Flag State Detection (FIN+RST), Single-Pass IP Blocklist Parsing, and Slow Scan Set Allocation Elimination
 

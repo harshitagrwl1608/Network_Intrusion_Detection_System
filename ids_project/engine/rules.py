@@ -1975,7 +1975,7 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
     (
         "CMD_INJECTION",
         re.compile(
-            rb"(?i)(/bin/sh|/bin/bash|/etc/passwd|/etc/shadow|cmd\.exe|powershell\.exe"
+            rb"(?i)(/(?:usr/)?bin/(?:ba|da)?sh|/bin/zsh|/etc/passwd|/etc/shadow|cmd\.exe|powershell\.exe"
             # A bare command-substitution delimiter is common in quoted mail,
             # logs and templates. Require a recognizable command inside it so
             # arbitrary delimited prose does not become a shell alert.
@@ -2036,12 +2036,12 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
             rb"(?i)(?:(?:\b(?:url|uri|dest|target|callback|webhook|proxy|redirect|fetch|path)\s*[:=]\s*|[?&][\w.-]{1,32}=)"
             rb"(?:file|dict|gopher|sftp|tftp|ldap|ldaps)://"
             rb"|ftp://127\.|ftp://0\."
-            rb"|http://127\.|http://0\.0\.0\.0|http://0:"
-            rb"|http://169\.254\.169\.254|http://metadata\.google"
-            rb"|http://100\.100\.100\.200"
-            rb"|http://\[::1\]|http://\[0::|http://\[::ffff:"
-            rb"|http://\[fe80:|http://\[fc|http://\[fd"
-            rb"|url=(?:file|dict|gopher|ldap|ftp|http)://(?:127|0|169\.254|10\.|172\.1[6-9]\.|172\.2\d\.|172\.3[01]\.|192\.168\.))"
+            rb"|https?://127\.|https?://0\.0\.0\.0|https?://0:"
+            rb"|https?://169\.254\.169\.254|https?://metadata\.google"
+            rb"|https?://100\.100\.100\.200"
+            rb"|https?://\[::1\]|https?://\[0::|https?://\[::ffff:"
+            rb"|https?://\[fe80:|https?://\[fc|https?://\[fd"
+            rb"|url=(?:file|dict|gopher|ldap|ftp|https?)://(?:127|0|169\.254|10\.|172\.1[6-9]\.|172\.2\d\.|172\.3[01]\.|192\.168\.))"
         ),
         "heuristic",
     ),
@@ -2300,7 +2300,7 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.20"
+    rule_version = "1.21"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048,
@@ -2820,7 +2820,7 @@ _COMMON_MULTI_LABEL_CC_SUFFIXES = frozenset({
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.20"
+    rule_version = "1.21"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -3112,7 +3112,7 @@ class DnsRule:
                         sd_history = sd_history[-self._subdomain_threshold:]
                     self._subdomain_freq.pop(sdkey, None)
                     self._subdomain_freq[sdkey] = sd_history
-                    subdomain_count = len({s for _, s in sd_history})
+                    subdomain_count = len(sd_history)
                     if sd_history:
                         subdomain_window_start = sd_history[0][0]
                     high_subdomain = subdomain_count >= self._subdomain_threshold
@@ -3183,7 +3183,7 @@ class DnsRule:
             "src_ip": src,
             "dst_ip": record.get("dst_ip"),
             "src_port": src_port,
-            "dst_port": 53,
+            "dst_port": dst_port or 53,
             "protocol": record.get("protocol", "UDP"),
             "severity": severity,
             "confidence": "heuristic",

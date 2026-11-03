@@ -199,7 +199,7 @@ class TestPayloadRule(unittest.TestCase):
         suffix.update(tcp_flags=0x18, tcp_seq=1018)
         alert = self.rule.check(suffix)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.20")
+        self.assertEqual(alert["rule_version"], "1.21")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):
@@ -648,6 +648,35 @@ class TestPayloadRule(unittest.TestCase):
         alert = self.rule.check(pkt)
         self.assertIsNotNone(alert)
         self.assertEqual(alert["dst_port"], 80)
+
+    def test_https_ssrf_detected(self):
+        # HTTPS protocol scheme targeting cloud metadata or loopback
+        for payload in (
+            b"GET /proxy?url=https://169.254.169.254/latest/meta-data/ HTTP/1.1\r\n\r\n",
+            b"POST /fetch HTTP/1.1\r\n\r\nurl=https://127.0.0.1:8443/admin",
+            b"GET /webhook?dest=https://metadata.google/computeMetadata/v1/ HTTP/1.1\r\n\r\n",
+        ):
+            with self.subTest(payload=payload):
+                rule = PayloadRule()
+                pkt = self.packet(payload, 5404)
+                alert = rule.check(pkt)
+                self.assertIsNotNone(alert)
+                self.assertEqual(alert["rule_version"], "1.21")
+                self.assertIn("SSRF", [hit["signature"] for hit in alert["evidence"]["hits"]])
+
+    def test_usr_bin_bash_cmd_injection_detected(self):
+        # /usr/bin/bash, /usr/bin/sh, and /bin/dash in command injection
+        for cmd in (
+            b"GET /exec?cmd=;+/usr/bin/bash+-i HTTP/1.1\r\n\r\n",
+            b"GET /test?x=%26%26+/usr/bin/sh+-c+id HTTP/1.1\r\n\r\n",
+            b"GET /run?arg=;+/bin/dash+-c+whoami HTTP/1.1\r\n\r\n",
+        ):
+            with self.subTest(cmd=cmd):
+                rule = PayloadRule()
+                pkt = self.packet(cmd, 5405)
+                alert = rule.check(pkt)
+                self.assertIsNotNone(alert)
+                self.assertIn("CMD_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
 
 if __name__ == "__main__":
