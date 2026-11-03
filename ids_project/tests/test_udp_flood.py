@@ -37,7 +37,7 @@ class TestUdpFloodRule(unittest.TestCase):
 
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "UDP_FLOOD")
-        self.assertEqual(alert["rule_version"], "1.8")
+        self.assertEqual(alert["rule_version"], "1.9")
         self.assertEqual(alert["evidence"]["packet_count"], 50)
         self.assertEqual(alert["evidence"]["target_port"], 5060)
         self.assertEqual(alert["severity"], "medium")
@@ -183,6 +183,12 @@ class TestUdpFloodRule(unittest.TestCase):
         self.assertIsInstance(alert["dst_port"], int)
         self.assertEqual(alert["evidence"]["target_port"], 5060)
         self.assertIsInstance(alert["evidence"]["target_port"], int)
+
+    def test_mdns_port_5353_source_exempt(self):
+        rule = UdpFloodRule(threshold=3, window=5)
+        for i in range(10):
+            res = rule.check(self._pkt("192.168.1.150", "192.168.1.1", src_port=5353, dst_port=5060, ts=100.0 + i * 0.1))
+            self.assertIsNone(res, "Source port 5353 (mDNS) must be exempt from UDP flood detection")
 
 
 if __name__ == "__main__":

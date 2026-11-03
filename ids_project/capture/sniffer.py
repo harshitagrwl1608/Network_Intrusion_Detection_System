@@ -166,22 +166,41 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
         dns_id      = None
         icmp_type   = None
         icmp_code   = None
-        ip_len      = pkt[IP].len if not is_ipv6 else (
-            int(pkt[IPv6].plen) + 40 if pkt[IPv6].plen is not None else None
-        )
+        try:
+            if not is_ipv6:
+                ip_len = int(pkt[IP].len) if hasattr(pkt[IP], "len") and pkt[IP].len is not None else None
+            else:
+                ip_len = int(pkt[IPv6].plen) + 40 if hasattr(pkt[IPv6], "plen") and pkt[IPv6].plen is not None else None
+        except (ValueError, TypeError, OverflowError):
+            ip_len = None
 
         if TCP in pkt:
             proto = "TCP"
-            dst_port = pkt[TCP].dport
-            src_port = pkt[TCP].sport
-            flags = pkt[TCP].flags
-            tcp_seq = int(pkt[TCP].seq)
-            tcp_ack = int(pkt[TCP].ack)
-            tcp_flags = int(flags)
-            tcp_window = int(pkt[TCP].window) if hasattr(pkt[TCP], "window") else None
-            syn_flag = bool(flags & 0x02)  # SYN bit
-            initial_syn = bool(flags & 0x02) and not bool(flags & 0x10)  # SYN set, ACK clear
-            tcp_payload_seq = (tcp_seq + int(bool(flags & 0x02))) & 0xFFFFFFFF
+            try:
+                dst_port = int(pkt[TCP].dport)
+            except (ValueError, TypeError, OverflowError):
+                dst_port = None
+            try:
+                src_port = int(pkt[TCP].sport)
+            except (ValueError, TypeError, OverflowError):
+                src_port = None
+            flags = getattr(pkt[TCP], "flags", 0)
+            try:
+                tcp_flags = int(flags)
+            except (ValueError, TypeError):
+                tcp_flags = 0
+            try:
+                tcp_seq = int(pkt[TCP].seq) if pkt[TCP].seq is not None else None
+            except (ValueError, TypeError, OverflowError):
+                tcp_seq = None
+            try:
+                tcp_ack = int(pkt[TCP].ack) if pkt[TCP].ack is not None else None
+            except (ValueError, TypeError, OverflowError):
+                tcp_ack = None
+            tcp_window = int(pkt[TCP].window) if hasattr(pkt[TCP], "window") and pkt[TCP].window is not None else None
+            syn_flag = bool(tcp_flags & 0x02)  # SYN bit
+            initial_syn = bool(tcp_flags & 0x02) and not bool(tcp_flags & 0x10)  # SYN set, ACK clear
+            tcp_payload_seq = ((tcp_seq + int(bool(tcp_flags & 0x02))) & 0xFFFFFFFF) if tcp_seq is not None else None
             try:
                 tcp_payload = bytes(pkt[TCP].payload)
                 payload_len = len(tcp_payload)
@@ -193,21 +212,33 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
                 payload_len = 0
             if Raw in pkt:
                 payload = bytes(pkt[Raw].load)[: _PAYLOAD_MAX_BYTES]
-            if DNS in pkt and (dst_port == 53 or src_port == 53) and pkt[DNS].qr == 0:
+            if DNS in pkt and (dst_port == 53 or src_port == 53) and getattr(pkt[DNS], "qr", None) == 0:
                 try:
                     question = pkt[DNS].qd
                     if isinstance(question, (list, tuple)):
                         question = question[0] if question else None
                     if question is not None:
-                        dns_query = question.qname.decode("utf-8", errors="replace")
-                        dns_qtype = int(question.qtype)
-                        dns_id = int(pkt[DNS].id)
+                        qname_raw = getattr(question, "qname", None)
+                        if isinstance(qname_raw, bytes):
+                            dns_query = qname_raw.decode("utf-8", errors="replace")
+                        elif isinstance(qname_raw, str):
+                            dns_query = qname_raw
+                        else:
+                            dns_query = None
+                        dns_qtype = int(question.qtype) if hasattr(question, "qtype") and question.qtype is not None else None
+                        dns_id = int(pkt[DNS].id) if hasattr(pkt[DNS], "id") and pkt[DNS].id is not None else None
                 except Exception:
                     dns_query = None
         elif UDP in pkt:
             proto = "UDP"
-            dst_port = pkt[UDP].dport
-            src_port = pkt[UDP].sport
+            try:
+                dst_port = int(pkt[UDP].dport)
+            except (ValueError, TypeError, OverflowError):
+                dst_port = None
+            try:
+                src_port = int(pkt[UDP].sport)
+            except (ValueError, TypeError, OverflowError):
+                src_port = None
             try:
                 payload_len = len(bytes(pkt[UDP].payload))
             except Exception:
@@ -215,23 +246,39 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             if Raw in pkt:
                 payload = bytes(pkt[Raw].load)[: _PAYLOAD_MAX_BYTES]
             # --- DNS query extraction (for DnsRule) ---
-            if DNS in pkt and (dst_port == 53 or src_port == 53) and pkt[DNS].qr == 0:
+            if DNS in pkt and (dst_port == 53 or src_port == 53) and getattr(pkt[DNS], "qr", None) == 0:
                 try:
                     question = pkt[DNS].qd
                     if isinstance(question, (list, tuple)):
                         question = question[0] if question else None
                     if question is not None:
-                        dns_query = question.qname.decode("utf-8", errors="replace")
-                        dns_qtype = int(question.qtype)
-                        dns_id = int(pkt[DNS].id)
+                        qname_raw = getattr(question, "qname", None)
+                        if isinstance(qname_raw, bytes):
+                            dns_query = qname_raw.decode("utf-8", errors="replace")
+                        elif isinstance(qname_raw, str):
+                            dns_query = qname_raw
+                        else:
+                            dns_query = None
+                        dns_qtype = int(question.qtype) if hasattr(question, "qtype") and question.qtype is not None else None
+                        dns_id = int(pkt[DNS].id) if hasattr(pkt[DNS], "id") and pkt[DNS].id is not None else None
                 except Exception:
                     dns_query = None
         elif ICMP in pkt:
-            icmp_type = pkt[ICMP].type
-            icmp_code = pkt[ICMP].code
+            try:
+                icmp_type = int(pkt[ICMP].type) if pkt[ICMP].type is not None else None
+            except (ValueError, TypeError, OverflowError):
+                icmp_type = None
+            try:
+                icmp_code = int(pkt[ICMP].code) if pkt[ICMP].code is not None else None
+            except (ValueError, TypeError, OverflowError):
+                icmp_code = None
             if Raw in pkt:
-                payload_len = len(bytes(pkt[Raw].load))
-                payload = bytes(pkt[Raw].load)[: _PAYLOAD_MAX_BYTES]
+                try:
+                    raw_bytes = bytes(pkt[Raw].load)
+                    payload_len = len(raw_bytes)
+                    payload = raw_bytes[: _PAYLOAD_MAX_BYTES]
+                except Exception:
+                    payload_len = 0
         elif ICMPv6EchoRequest in pkt:
             proto = "ICMPV6"
             icmp_type = 128
@@ -334,7 +381,11 @@ def start_sniff(interface: str, rule_engine, packet_filter: str = "ip or ip6 or 
 def _parse_tcpdump_endpoint(ep: str):
     common_ports = {
         'https': 443, 'http': 80, 'domain': 53, 'ssh': 22,
-        'ntp': 123, 'ftp': 21, 'telnet': 23, 'smtp': 25, 'dns': 53
+        'ntp': 123, 'ftp': 21, 'telnet': 23, 'smtp': 25, 'dns': 53,
+        'ldap': 389, 'ldaps': 636, 'submission': 587, 'imaps': 993,
+        'pop3s': 995, 'ms-sql-s': 1433, 'ms-sql': 1433, 'mysql': 3306,
+        'postgres': 5432, 'postgresql': 5432, 'redis': 6379, 'memcache': 11211,
+        'rdp': 3389, 'snmp': 161, 'bgp': 179,
     }
     parts = ep.rsplit('.', 1)
     if len(parts) == 2:

@@ -81,7 +81,7 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
   - `pytest ids_project/tests/test_compare.py`: 8 passed in 0.13s (3 new comprehensive tests).
   - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
 - **Test Results**: All tests passed with zero regressions.
-- **Commit Hash**: Pending commit for Cycle 2.
+- **Commit Hash**: `9199d8e` (pushed to `origin/antigravity/overnight-work`)
 - **Remaining Issues**:
   - Inspect `ids_project/capture/sniffer.py` for packet decoding robustness, IPv6 extension headers, and truncation handling.
   - Review `ids_project/engine/rules.py` rules (e.g., `UdpFloodRule`, `TcpZeroWindowRule`, `TlsAnomalyRule`) for input bounds and edge cases.
@@ -89,8 +89,61 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
 
 ---
 
+## Cycle 3 / 10
+
+- **Date/Time**: 2026-11-03 23:48:30 UTC+5:30
+- **Files Inspected**:
+  - `ids_project/capture/sniffer.py`
+  - `ids_project/engine/rules.py`
+  - `ids_project/tests/test_pcap_replay_and_parsing.py`
+  - `ids_project/tests/test_data_exfiltration.py`
+  - `ids_project/evaluation/run_eval.py`
+- **Weakness Discovered**:
+  1. In `ids_project/capture/sniffer.py`, `_extract` assumed `pkt[TCP].seq` was non-None when computing `tcp_payload_seq = (tcp_seq + int(bool(flags & 0x02))) & 0xFFFFFFFF`, causing unhandled `TypeError` exceptions on truncated or malformed TCP packets.
+  2. `pkt[IP].len` and `pkt[IPv6].plen` lacked `None` and overflow guards, risking unexpected exceptions when Scapy parsed packets with omitted length fields.
+  3. `flags` in TCP could raise `ValueError`/`TypeError` if represented by unexpected flag objects; ports `dport`/`sport` in TCP and UDP lacked exception guards against invalid values.
+  4. DNS query extraction did not guard against `question.qname` being already `str` rather than `bytes`, risking `AttributeError: 'str' object has no attribute 'decode'` on certain Scapy builds or synthetic fixtures.
+  5. `_parse_tcpdump_endpoint` only supported a small set of basic port names (`http`, `https`, `domain`, `ssh`, `ntp`, `ftp`, `telnet`, `smtp`, `dns`), dropping or misclassifying critical enterprise service names like `ldap`, `ldaps`, `imaps`, `pop3s`, `ms-sql-s`, `mysql`, `postgresql`, `redis`, and `memcache` during ASCII tcpdump replays.
+  6. `DataExfiltrationRule` lacked coverage for modern ransomware staging compression (Zstandard), credential store exfiltration (KeePass password vaults), and raw network trace leaks (PCAP/PCAP-NG magic headers).
+- **Changes Implemented**:
+  1. Hardened TCP sequence and flag extraction in `sniffer.py`:
+     - Safely computed `tcp_payload_seq` only when `tcp_seq` is non-None, defaulting to `None` otherwise.
+     - Protected `tcp_flags` casting with fallback to 0.
+     - Protected `dst_port` and `src_port` casting to integer.
+  2. Protected `ip_len` extraction against `None` and overflow errors for both IPv4 and IPv6.
+  3. Hardened DNS extraction to handle both `bytes` and `str` types for `question.qname` safely.
+  4. Expanded `_parse_tcpdump_endpoint` common ports dictionary with enterprise service aliases: `ldap` (389), `ldaps` (636), `submission` (587), `imaps` (993), `pop3s` (995), `ms-sql-s`/`ms-sql` (1433), `mysql` (3306), `postgres`/`postgresql` (5432), `redis` (6379), `memcache` (11211), `rdp` (3389), `snmp` (161), and `bgp` (179).
+  5. Expanded `DataExfiltrationRule._EXFIL_SIGNATURES` (bumped to v1.19) with:
+     - `\x28\xb5\x2f\xfd`: Zstandard (zstd) compressed archive.
+     - `\x03\xd9\xa2\x9a`: KeePass password database (.kdbx) vault dump.
+     - `\xd4\xc3\xb2\xa1`: PCAP network traffic capture.
+     - `\n\r\r\n`: PCAP-NG network traffic capture.
+  6. Hardened stateful rule cooldown drift eviction and validation across:
+     - `UdpFloodRule` (v1.9): exempt mDNS source port 5353, enforce destination/source port range (1-65535), and evict future-drifted cooldown timestamps. Added test `test_mdns_port_5353_source_exempt` in `test_udp_flood.py`.
+     - `TcpFlagAnomalyRule` (v1.8): port range boundary validation (1-65535) and cooldown drift eviction.
+     - `IcmpFloodRule` (v1.7): cooldown drift eviction in `prune_stale`.
+     - `DnsRule` (v1.23): expanded ccTLD suffixes (Nigeria `.ng`, Spain `.es`, Poland `.pl`, Greece `.gr`, Canada government `.gc.ca`) and `_prune_seen` drift eviction.
+     - `TlsAnomalyRule` (v1.12): added modern reverse tunnel suffixes (`.localxpose.io`, `.tunnelto.dev`, `.hopto.org`, `.zapto.org`).
+     - `BruteForceRule` (v1.11): cooldown drift eviction in `prune_stale`.
+  7. Added comprehensive test coverage in:
+     - `ids_project/tests/test_pcap_replay_and_parsing.py`: `test_extract_handles_missing_tcp_seq_and_flags_safely`, `test_extract_handles_missing_ip_len_safely`, `test_tcpdump_endpoint_parser_resolves_extended_common_ports`.
+     - `ids_project/tests/test_data_exfiltration.py`: updated version assertions to `1.19` and verified Zstandard, KeePass, PCAP, and PCAP-NG detection.
+     - Synchronized version assertions across `test_udp_flood.py`, `test_tcp_flag_anomaly.py`, `test_icmp_flood.py`, `test_finite_rule_timestamps.py`, `test_new_rules_cycle8.py`, `test_dns_and_arp_detection.py`, and `test_tls_anomaly.py`.
+- **Tests Executed**:
+  - `pytest ids_project/tests`: 462 passed in 56.47s.
+  - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
+- **Test Results**: All 462 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly.
+- **Commit Hash**: Pending commit for Cycle 3.
+- **Remaining Issues**:
+  - Inspect `TcpZeroWindowRule` for flow eviction, state growth bounds, and Sockstress detection robustness.
+  - Inspect `UdpScanRule` and `PortScanRule` saturation handling.
+  - Investigate external dataset evaluation scripts (`replay.py`, `analysis/aggregator.py`).
+- **Next Cycle's Objective**: Inspect `TcpZeroWindowRule` and flow tracking in `ids_project/engine/rules.py` for window scale factor handling, RST teardown handling, and flow state bounding.
+
+---
+
 ## Next Actions Summary
 
-1. Commit Cycle 2 verified improvements to `antigravity/overnight-work`.
+1. Commit Cycle 3 verified improvements to `antigravity/overnight-work`.
 2. Push to `origin/antigravity/overnight-work`.
-3. Proceed immediately to Cycle 3: Packet decoding robustness and protocol layer parsing safety in `ids_project/capture/sniffer.py`.
+3. Proceed immediately to Cycle 4: Inspect and harden `TcpZeroWindowRule` for window scale, flow state bounding, and RST cleanup.

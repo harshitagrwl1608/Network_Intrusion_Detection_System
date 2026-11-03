@@ -96,7 +96,7 @@ class TestTlsAnomalyRule(unittest.TestCase):
         alert = self.rule.check(self._pkt(payload=payload, ts=100.0))
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "TLS_ANOMALY")
-        self.assertEqual(alert["rule_version"], "1.11")
+        self.assertEqual(alert["rule_version"], "1.12")
         self.assertEqual(alert["severity"], "high")
         self.assertEqual(alert["confidence"], "high")
         self.assertEqual(alert["evidence"]["anomaly_type"], "DIRECT_IP_SNI")
@@ -114,7 +114,7 @@ class TestTlsAnomalyRule(unittest.TestCase):
                 self.assertEqual(rule._hello_prefixes, {})
                 alert = rule.check(self._pkt(payload=payload, ts=100.0))
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.11")
+                self.assertEqual(alert["rule_version"], "1.12")
 
     def test_suspicious_tunnel_sni_triggers_alert(self):
         for i, domain in enumerate(("c2-node.ngrok-free.app", "beacon.duckdns.org", "tunnel.localtunnel.me", "drop.serveo.net")):
@@ -122,20 +122,20 @@ class TestTlsAnomalyRule(unittest.TestCase):
             alert = self.rule.check(self._pkt(dst=f"203.0.113.{100 + i}", payload=payload, ts=100.0))
             self.assertIsNotNone(alert, f"Expected alert for suspicious SNI {domain}")
             self.assertEqual(alert["rule_name"], "TLS_ANOMALY")
-            self.assertEqual(alert["rule_version"], "1.11")
+            self.assertEqual(alert["rule_version"], "1.12")
             self.assertEqual(alert["severity"], "medium")
             self.assertEqual(alert["confidence"], "heuristic")
             self.assertEqual(alert["evidence"]["anomaly_type"], "SUSPICIOUS_TUNNEL_SNI")
             self.assertEqual(alert["evidence"]["sni"], domain)
 
     def test_apex_and_modern_tunnel_services_detected(self):
-        # Apex domain and newer reverse proxy tunnels (Pinggy, Packetriot, Telebit, Playit, Ngrok dev)
-        for i, domain in enumerate(("trycloudflare.com", "ngrok.io", "tunnel.pinggy.link", "c2.packetriot.net", "tunnel.playit.gg", "app.ngrok.dev")):
+        # Apex domain and newer reverse proxy tunnels (Pinggy, Packetriot, Telebit, Playit, Ngrok dev, LocalXpose, Tunnelto, Hopto, Zapto)
+        for i, domain in enumerate(("trycloudflare.com", "ngrok.io", "tunnel.pinggy.link", "c2.packetriot.net", "tunnel.playit.gg", "app.ngrok.dev", "test.localxpose.io", "c2.tunnelto.dev", "bad.hopto.org", "host.zapto.org")):
             with self.subTest(domain=domain):
                 payload = make_tls_client_hello(domain)
                 alert = self.rule.check(self._pkt(dst=f"203.0.113.{150 + i}", payload=payload, ts=100.0))
                 self.assertIsNotNone(alert, f"Expected alert for {domain}")
-                self.assertEqual(alert["rule_version"], "1.11")
+                self.assertEqual(alert["rule_version"], "1.12")
                 self.assertEqual(alert["evidence"]["anomaly_type"], "SUSPICIOUS_TUNNEL_SNI")
 
     def test_legitimate_domain_sni_does_not_fire(self):

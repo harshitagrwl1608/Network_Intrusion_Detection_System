@@ -62,7 +62,7 @@ class TestTcpFlagAnomalyRule(unittest.TestCase):
         alert = self.rule.check(_tcp_pkt(flags=0x05))  # FIN + RST
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "TCP_FLAG_ANOMALY")
-        self.assertEqual(alert["rule_version"], "1.7")
+        self.assertEqual(alert["rule_version"], "1.8")
         self.assertEqual(alert["evidence"]["anomaly_type"], "FIN_RST")
         self.assertEqual(alert["severity"], "high")
         self.assertEqual(alert["confidence"], "high")

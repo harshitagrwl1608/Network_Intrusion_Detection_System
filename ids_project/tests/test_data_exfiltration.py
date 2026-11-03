@@ -286,7 +286,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNone(rule.check(late_old_syn))
         alert = rule.check(self._tcp_payload_pkt(payload, 1001, 103.0))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.18")
+        self.assertEqual(alert["rule_version"], "1.19")
         self.assertEqual(alert["evidence"]["bytes_transferred"], 1200)
 
     def test_tcp_connection_generation_state_is_bounded(self):
@@ -554,7 +554,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["sub_type"], "SIGNATURE_EXFIL")
         self.assertIn("ZIP", alert["detail"])
-        self.assertEqual(alert["rule_version"], "1.18")
+        self.assertEqual(alert["rule_version"], "1.19")
 
     def test_split_signature_is_not_joined_across_tcp_sequence_gap(self):
         rule = DataExfiltrationRule(byte_threshold=5000, window=30)
@@ -619,7 +619,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["src_port"], 50000)
         self.assertEqual(alert["dst_port"], 8080)
-        self.assertEqual(alert["rule_version"], "1.18")
+        self.assertEqual(alert["rule_version"], "1.19")
 
     def test_elf_and_binary_signatures_exfil_triggers_alert(self):
         # Linux ELF executable, Java class, and Mach-O exfiltration
@@ -627,6 +627,10 @@ class TestDataExfiltrationRule(unittest.TestCase):
             (b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 32, "ELF"),
             (b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + b"\x00" * 32, "Java"),
             (b"\xcf\xfa\xed\xfe\x07\x00\x00\x01" + b"\x00" * 32, "Mach-O"),
+            (b"\x28\xb5\x2f\xfd" + b"\x00" * 32, "Zstandard"),
+            (b"\x03\xd9\xa2\x9a" + b"\x00" * 32, "KeePass"),
+            (b"\xd4\xc3\xb2\xa1" + b"\x00" * 32, "PCAP"),
+            (b"\n\r\r\n" + b"\x00" * 32, "PCAP-NG"),
         ):
             with self.subTest(magic=magic[:4]):
                 rule = DataExfiltrationRule(byte_threshold=50000, window=30)
@@ -634,9 +638,10 @@ class TestDataExfiltrationRule(unittest.TestCase):
                 alert = rule.check(pkt)
                 self.assertIsNotNone(alert)
                 self.assertEqual(alert["rule_name"], "DATA_EXFIL")
-                self.assertEqual(alert["rule_version"], "1.18")
+                self.assertEqual(alert["rule_version"], "1.19")
                 self.assertEqual(alert["evidence"]["sub_type"], "SIGNATURE_EXFIL")
                 self.assertIn(expected_desc, alert["detail"])
+
 
 
 if __name__ == "__main__":

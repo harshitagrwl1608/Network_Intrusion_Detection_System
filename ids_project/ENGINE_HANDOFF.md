@@ -40,6 +40,49 @@ Results verified during the current continuation on 2026-11-03 on branch `codex-
 - Rule inventory verified: **strictly 19 rules registered in `RuleEngine.rules`**. Zero new rules, zero new Sigma/SPL rules, zero deleted rules.
 - `git diff --check` clean.
 
+## Follow-up: 2026-11-03 Packet Decoding Robustness, TCP Sequence Safety, Endpoint Parser Expansion, and Archive/Credential Exfil Signatures (Cycle 3)
+
+- **`capture/sniffer.py` Field Extraction Resilience:**
+  - Hardened TCP sequence and flag extraction: guarded against `NoneType` errors when calculating `tcp_payload_seq = (tcp_seq + int(bool(flags & 0x02))) & 0xFFFFFFFF`, only evaluating when `tcp_seq` is not `None`.
+  - Protected `tcp_flags` bitwise operations by coercing to `int` safely with a 0 fallback.
+  - Added boundary and type validation when extracting `dst_port` and `src_port` in TCP and UDP layers.
+  - Safe extraction of `ip_len` handling `NoneType` and overflow cases across IPv4 and IPv6 layers.
+  - Resilient DNS query decoding handling both `bytes` and `str` types for `question.qname`.
+- **Text Log Endpoint Parser Expansion:**
+  - Expanded `_parse_tcpdump_endpoint` common ports mapping to recognize standard enterprise service aliases: `ldap` (389), `ldaps` (636), `submission` (587), `imaps` (993), `pop3s` (995), `ms-sql-s`/`ms-sql` (1433), `mysql` (3306), `postgres`/`postgresql` (5432), `redis` (6379), `memcache` (11211), `rdp` (3389), `snmp` (161), and `bgp` (179).
+- **`DataExfiltrationRule` Archive, Credential Vault, and Capture Dump Coverage (v1.19):**
+  - Expanded `_EXFIL_SIGNATURES` with:
+    - Zstandard (`\x28\xb5\x2f\xfd`): high-speed modern compression favored in ransomware staging.
+    - KeePass database dump (`\x03\xd9\xa2\x9a`): enterprise and personal credential vaults.
+    - PCAP network traffic capture (`\xd4\xc3\xb2\xa1`): packet capture leaks.
+    - PCAP-NG network traffic capture (`\n\r\r\n`): next-generation packet capture leaks.
+  - Added test cases in `test_data_exfiltration.py`.
+- **`UdpFloodRule` mDNS Port Exemption, Boundary Validation, and Drift Eviction (v1.9):**
+  - Added port 5353 (mDNS) to `_EXEMPT_SRC_PORTS` to prevent multicast DNS queries/responses from triggering flood alerts.
+  - Enforced valid port boundaries (`1 <= port <= 65535`) on destination and source ports.
+  - Hardened `prune_stale` with future-drift timestamp eviction (`or self._cooldown[key] > now`).
+  - Added unit test `test_mdns_port_5353_source_exempt` in `test_udp_flood.py`.
+- **`TcpFlagAnomalyRule` Port Validation and Cooldown Drift Protection (v1.8):**
+  - Enforced valid port boundaries (`1 <= port <= 65535`) on emitted alert fields.
+  - Hardened `prune_stale` against future clock drift.
+- **`IcmpFloodRule` and `BruteForceRule` Cooldown Drift Eviction (v1.7, v1.11):**
+  - Protected sliding window cooldown caches against clock skew and future timestamps in `prune_stale`.
+- **`DnsRule` International Multi-Label Expansion & Drift Handling (v1.23):**
+  - Expanded `_COMMON_MULTI_LABEL_CC_SUFFIXES` with Nigeria (`.ng`), Spain (`.es`), Poland (`.pl`), Greece (`.gr`), and Canada government (`.gc.ca`).
+  - Added timestamp drift checks in `_prune_seen`.
+- **`TlsAnomalyRule` Reverse Tunnel Suffix Expansion (v1.12):**
+  - Added modern reverse-tunneling and dynamic DNS endpoints to `_SUSPICIOUS_TLS_SUFFIXES`: `.localxpose.io`, `.tunnelto.dev`, `.hopto.org`, and `.zapto.org`.
+- **Regressions & Verifications:**
+  - Added test suite in `ids_project/tests/test_pcap_replay_and_parsing.py`:
+    - `test_extract_handles_missing_tcp_seq_and_flags_safely`
+    - `test_extract_handles_missing_ip_len_safely`
+    - `test_tcpdump_endpoint_parser_resolves_extended_common_ports`
+  - Full test suite: **462 passed in 56.47s** (`pytest ids_project/tests`).
+  - Synthetic ground-truth evaluation: **38/38 detected** (100.0% precision, 100.0% recall, 0 false positives).
+  - Rule inventory invariant: strictly 19 rules registered in `RuleEngine.rules`.
+
+
+
 ## Follow-up: 2026-11-03 Suricata EVE Ingestion Resilience, Semantic Corroboration Families, and IP/Port Canonicalization (Cycle 2)
 
 - **`compare.py` Suricata EVE JSON Loader Hardening:**

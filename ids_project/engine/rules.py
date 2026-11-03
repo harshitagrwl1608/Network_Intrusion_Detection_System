@@ -649,9 +649,9 @@ class UdpFloodRule:
     """
 
     name = "UDP_FLOOD"
-    rule_version = "1.8"
+    rule_version = "1.9"
     ALERT_COOLDOWN_S: float = 60.0
-    _EXEMPT_SRC_PORTS: set[int] = {53, 67, 68, 123}
+    _EXEMPT_SRC_PORTS: set[int] = {53, 67, 68, 123, 5353}
 
     def __init__(self, threshold: int = 50, window: int = 5,
                  max_flows: int = 4096, cooldown: float = 60.0,
@@ -681,7 +681,7 @@ class UdpFloodRule:
                 else:
                     del self._history[key]
             for key in list(self._cooldown):
-                if self._cooldown[key] < cutoff_cd:
+                if self._cooldown[key] < cutoff_cd or self._cooldown[key] > now:
                     del self._cooldown[key]
 
     def check(self, record: dict) -> dict | None:
@@ -707,6 +707,10 @@ class UdpFloodRule:
         if src_port in self._EXEMPT_SRC_PORTS:
             return None
         dst_port = _normalize_port(record.get("dst_port"))
+        if dst_port is not None and not (1 <= dst_port <= 65535):
+            return None
+        if src_port is not None and not (1 <= src_port <= 65535):
+            return None
         effective_threshold = (
             self.web_threshold if (src_port == 443 or dst_port == 443) else self.threshold
         )
@@ -926,7 +930,7 @@ class TcpFlagAnomalyRule:
     """
 
     name = "TCP_FLAG_ANOMALY"
-    rule_version = "1.7"
+    rule_version = "1.8"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, cooldown: float = 60.0, max_states: int = 5000):
@@ -942,7 +946,7 @@ class TcpFlagAnomalyRule:
         cutoff = now - self.cooldown
         with self._lock:
             for key in list(self._cooldown):
-                if self._cooldown[key] < cutoff:
+                if self._cooldown[key] < cutoff or self._cooldown[key] > now:
                     del self._cooldown[key]
 
     def check(self, record: dict) -> dict | None:
@@ -1039,7 +1043,11 @@ class TcpFlagAnomalyRule:
 
         dst = record.get("dst_ip", "")
         dst_port = _normalize_port(record.get("dst_port"))
+        if dst_port is not None and not (1 <= dst_port <= 65535):
+            dst_port = None
         src_port = _normalize_port(record.get("src_port"))
+        if src_port is not None and not (1 <= src_port <= 65535):
+            src_port = None
 
         logger.debug(f"{self.name} fired: {src}→{dst}:{dst_port} {anomaly_type} (flags=0x{flags:02x})")
 
@@ -1622,7 +1630,7 @@ class IcmpFloodRule:
     """
 
     name = "ICMP_FLOOD"
-    rule_version = "1.6"
+    rule_version = "1.7"
     ALERT_COOLDOWN_S: float = 60.0
 
     def __init__(self, threshold: int = 50, window: int = 5,
@@ -1650,7 +1658,7 @@ class IcmpFloodRule:
                 else:
                     del self._history[key]
             for key in list(self._cooldown):
-                if self._cooldown[key] < cutoff_cd:
+                if self._cooldown[key] < cutoff_cd or self._cooldown[key] > now:
                     del self._cooldown[key]
 
     def check(self, record: dict) -> dict | None:
@@ -2833,12 +2841,17 @@ _COMMON_MULTI_LABEL_CC_SUFFIXES = frozenset({
     "com.pe", "org.pe", "gob.pe", "edu.pe",
     "com.ve", "org.ve", "gob.ve", "edu.ve",
     "com.ec", "org.ec", "gob.ec", "edu.ec",
+    "com.ng", "org.ng", "gov.ng", "edu.ng",
+    "gc.ca",
+    "com.es", "nom.es", "org.es", "gob.es", "edu.es",
+    "com.pl", "net.pl", "org.pl",
+    "com.gr", "edu.gr",
 })
 
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.22"
+    rule_version = "1.23"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -2914,7 +2927,7 @@ class DnsRule:
     def _prune_seen(self, now: float):
         cutoff = now - 120
         for key, seen_at in list(self._seen.items()):
-            if seen_at <= cutoff:
+            if seen_at <= cutoff or seen_at > now:
                 del self._seen[key]
 
     def prune_stale(self, now: float):
@@ -3261,10 +3274,13 @@ _BRUTE_FORCE_AUTH_PORTS: frozenset = frozenset({
     993,   # IMAPS (Secure IMAP over TLS)
     995,   # POP3S (Secure POP3 over TLS)
     1433,  # Microsoft SQL Server (TDS protocol)
+    1521,  # Oracle TNS Listener
     3306,  # MySQL
     3389,  # RDP
     5432,  # PostgreSQL
     5900,  # VNC
+    5985,  # WinRM HTTP
+    5986,  # WinRM HTTPS
     6379,  # Redis
     27017, # MongoDB
     11211, # Memcached
@@ -3296,7 +3312,7 @@ class BruteForceRule:
     """
 
     name = "BRUTE_FORCE"
-    rule_version = "1.10"
+    rule_version = "1.11"
 
     # Per-(src, dst, port) cooldown after firing. Prevents re-alerting for the
     # same ongoing brute-force burst; renewed bursts after the cooldown will fire.
@@ -3359,7 +3375,7 @@ class BruteForceRule:
                     self._saturated_history.discard(key)
             cooldown_cutoff = now - self.ALERT_COOLDOWN_S
             for key, last_alert in list(self._cooldown.items()):
-                if last_alert <= cooldown_cutoff:
+                if last_alert <= cooldown_cutoff or last_alert > now:
                     del self._cooldown[key]
             for syn_key, first_seen in list(self._seen_syns.items()):
                 if not (cutoff <= first_seen <= now):
@@ -3718,7 +3734,7 @@ class DataExfiltrationRule:
     - Configured TRUSTED_HOSTS.
     """
     name = "DATA_EXFIL"
-    rule_version = "1.18"
+    rule_version = "1.19"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 5000
     MAX_TRACKED_FLOW_EVENTS = 1_000_000
@@ -3758,6 +3774,13 @@ class DataExfiltrationRule:
         (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "MS Office OLE compound document"),
         # PDF: credential documents, internal reports
         (b"%PDF-", "PDF document"),
+        # Zstandard: high-speed modern compression favored in ransomware staging
+        (b"\x28\xb5\x2f\xfd", "Zstandard (zstd) compressed archive"),
+        # KeePass password database dump
+        (b"\x03\xd9\xa2\x9a", "KeePass password database dump"),
+        # PCAP / PCAP-NG: network traffic capture exfiltration
+        (b"\xd4\xc3\xb2\xa1", "PCAP network traffic capture"),
+        (b"\n\r\r\n", "PCAP-NG network traffic capture"),
     ]
 
     def __init__(self, byte_threshold: int = 50000, window: int = 30,
@@ -4572,6 +4595,7 @@ _SUSPICIOUS_TLS_SUFFIXES: tuple[str, ...] = (
     # Modern reverse-proxy tunnels (CISA, MITRE ATT&CK T1572 / T1090)
     ".pinggy.link", ".pinggy.io", ".packetriot.net", ".telebit.io", ".loophole.site",
     ".playit.gg", ".ngrok.dev", ".serveousercontent.com",
+    ".localxpose.io", ".tunnelto.dev", ".hopto.org", ".zapto.org",
 )
 
 
@@ -4660,7 +4684,7 @@ class TlsAnomalyRule:
     Port expansion covers: XMPP-SSL (5223), MQTT-TLS (8083), alternative HTTPS C2 (4443, 9443).
     """
     name = "TLS_ANOMALY"
-    rule_version = "1.11"
+    rule_version = "1.12"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
     MAX_CLIENT_HELLO_BYTES = 16_389

@@ -378,6 +378,42 @@ class TestPcapReplayAndParsing(unittest.TestCase):
 
         self.assertIsNotNone(alert, "Port scan should fire across historical packet window")
 
+    def test_extract_handles_missing_tcp_seq_and_flags_safely(self):
+        pkt = Ether() / IP(src="192.168.1.5", dst="192.168.1.10") / TCP(sport=50000, dport=80)
+        pkt[TCP].seq = None
+        record = _extract(pkt, capture_ts=100.0)
+        self.assertIsNotNone(record)
+        self.assertIsNone(record["tcp_seq"])
+        self.assertIsNone(record["tcp_payload_seq"])
+        self.assertEqual(record["dst_port"], 80)
+
+    def test_extract_handles_missing_ip_len_safely(self):
+        pkt = Ether() / IP(src="192.168.1.5", dst="192.168.1.10") / UDP(sport=50000, dport=53)
+        pkt[IP].len = None
+        record = _extract(pkt, capture_ts=100.0)
+        self.assertIsNotNone(record)
+        self.assertIsNone(record["ip_len"])
+        self.assertEqual(record["protocol"], "UDP")
+
+    def test_tcpdump_endpoint_parser_resolves_extended_common_ports(self):
+        from capture.sniffer import _parse_tcpdump_endpoint
+        host, port = _parse_tcpdump_endpoint("192.168.1.1.ms-sql-s")
+        self.assertEqual(host, "192.168.1.1")
+        self.assertEqual(port, 1433)
+
+        host, port = _parse_tcpdump_endpoint("10.0.0.1.mysql")
+        self.assertEqual(host, "10.0.0.1")
+        self.assertEqual(port, 3306)
+
+        host, port = _parse_tcpdump_endpoint("10.0.0.1.redis")
+        self.assertEqual(host, "10.0.0.1")
+        self.assertEqual(port, 6379)
+
+        host, port = _parse_tcpdump_endpoint("10.0.0.1.ldaps")
+        self.assertEqual(host, "10.0.0.1")
+        self.assertEqual(port, 636)
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -419,7 +419,7 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "dns_query": qname, "timestamp": 100,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.22")
+        self.assertEqual(alert["rule_version"], "1.23")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
         self.assertEqual(alert["evidence"]["longest_label"], "a" * 61)
         self.assertEqual(alert["evidence"]["longest_label_length"], 61)
@@ -633,6 +633,14 @@ class TestDnsAndArpDetection(unittest.TestCase):
         self.assertEqual(alert["src_port"], 53000)
         self.assertIsInstance(alert["src_port"], int)
         self.assertEqual(alert["dst_port"], 53)
+
+    def test_cctld_multi_label_parent_domain_grouping(self):
+        rule = DnsRule()
+        self.assertEqual(rule._parent_domain("host.company.com.ng"), "company.com.ng")
+        self.assertEqual(rule._parent_domain("portal.service.com.es"), "service.com.es")
+        self.assertEqual(rule._parent_domain("dept.intranet.gc.ca"), "intranet.gc.ca")
+        self.assertEqual(rule._parent_domain("api.service.com.pl"), "service.com.pl")
+        self.assertEqual(rule._parent_domain("dns.node.com.gr"), "node.com.gr")
 
 
 if __name__ == "__main__":
