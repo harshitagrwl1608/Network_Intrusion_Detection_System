@@ -3743,7 +3743,7 @@ class DataExfiltrationRule:
     - Configured TRUSTED_HOSTS.
     """
     name = "DATA_EXFIL"
-    rule_version = "1.19"
+    rule_version = "1.20"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 5000
     MAX_TRACKED_FLOW_EVENTS = 1_000_000
@@ -3756,7 +3756,7 @@ class DataExfiltrationRule:
 
     # Archive / DB file signatures: (magic_bytes, format_name)
     # Extended with common exfiltration file types (Suricata ET POLICY / ET HUNTING):
-    # executables, office documents, PDFs, and additional compressed archives.
+    # executables, office documents, PDFs, private key exports, and compressed archives.
     _EXFIL_SIGNATURES: list[tuple[bytes, str]] = [
         (b"SQLite format 3\x00", "SQLite database file dump"),
         (b"PK\x03\x04", "ZIP archive"),
@@ -3790,6 +3790,11 @@ class DataExfiltrationRule:
         # PCAP / PCAP-NG: network traffic capture exfiltration
         (b"\xd4\xc3\xb2\xa1", "PCAP network traffic capture"),
         (b"\n\r\r\n", "PCAP-NG network traffic capture"),
+        # Private key exports: critical credential exfiltration (Suricata ET POLICY / ET HUNTING)
+        (b"-----BEGIN OPENSSH PRIVATE KEY-----", "OpenSSH private key export"),
+        (b"-----BEGIN RSA PRIVATE KEY-----", "RSA private key export"),
+        (b"-----BEGIN EC PRIVATE KEY-----", "EC private key export"),
+        (b"-----BEGIN PRIVATE KEY-----", "PKCS#8 private key export"),
     ]
 
     def __init__(self, byte_threshold: int = 50000, window: int = 30,
@@ -3906,26 +3911,32 @@ class DataExfiltrationRule:
         with self._lock:
             for key in list(self._flows):
                 dq = self._flows[key]
-                expired_events = 0
-                while dq and dq[0][0] < cutoff:
-                    _, expired_bytes = dq.popleft()
-                    self._flow_totals[key] -= expired_bytes
-                    expired_events += 1
-                self._flow_event_count -= expired_events
-                if not dq:
+                initial_count = len(dq)
+                active_events = []
+                active_bytes = 0
+                while dq:
+                    ts, size = dq.popleft()
+                    if cutoff <= ts <= now:
+                        active_events.append((ts, size))
+                        active_bytes += size
+                self._flow_event_count -= (initial_count - len(active_events))
+                if not active_events:
                     del self._flows[key]
                     self._flow_totals.pop(key, None)
                     self._flow_saturated.discard(key)
                 else:
+                    self._flows[key] = deque(active_events)
+                    self._flow_totals[key] = active_bytes
                     flow_threshold = (
                         self.web_byte_threshold if key[2] in self.COMMON_WEB_PORTS
                         else self.byte_threshold
                     )
-                    if self._flow_totals[key] < flow_threshold:
+                    if active_bytes < flow_threshold:
                         self._flow_saturated.discard(key)
+            self._flow_saturated.intersection_update(self._flows)
             cooldown_cutoff = now - self.ALERT_COOLDOWN_S
             for key in list(self._cooldown):
-                if self._cooldown[key] < cooldown_cutoff:
+                if self._cooldown[key] < cooldown_cutoff or self._cooldown[key] > now:
                     del self._cooldown[key]
             for key, (_, _, timestamp) in list(self._fragment_ports.items()):
                 if timestamp < cutoff or timestamp > now:
@@ -4321,14 +4332,19 @@ class CleartextHttpOnTlsPortRule:
     """Flag repeated plaintext HTTP requests sent to conventional TLS ports."""
 
     name = "CLEAR_HTTP_ON_TLS_PORT"
-    rule_version = "1.10"
+    rule_version = "1.11"
     MAX_REQUEST_LINE_BYTES = 2064
     STREAM_TIMEOUT_S = 30.0
     MAX_SEEN_REQUEST_IDENTITIES = 32_768
-    _METHOD_PREFIXES = (b"GET ", b"POST ", b"PUT ", b"DELETE ",
-                        b"PATCH ", b"OPTIONS ", b"HEAD ", b"CONNECT ", b"TRACE ")
+    TLS_PORTS = frozenset({443, 8443, 4443, 9443})
+    _METHOD_PREFIXES = (
+        b"GET ", b"POST ", b"PUT ", b"DELETE ",
+        b"PATCH ", b"OPTIONS ", b"HEAD ", b"CONNECT ", b"TRACE ",
+        b"PRI ", b"PROPFIND ", b"PROPPATCH ", b"MKCOL ", b"COPY ",
+        b"MOVE ", b"LOCK ", b"UNLOCK ",
+    )
     _REQUEST_LINE = re.compile(
-        rb"(?i)^(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD|CONNECT|TRACE)\s+[^\r\n]{1,2048}\s+HTTP/1\.[01]\r?\n"
+        rb"(?i)^(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD|CONNECT|TRACE|PRI|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK)\s+[^\r\n]{1,2048}\s+HTTP/(?:1\.[01]|2\.0)\r?\n"
     )
 
     def __init__(self, cooldown: float = 600.0, window: float = 600.0,
@@ -4369,7 +4385,7 @@ class CleartextHttpOnTlsPortRule:
                         self._tcp_prefixes.pop(direct_key, None)
             return match.group(0).strip()
 
-        if not src or not dst or src_port is None or dst_port not in (443, 8443) or not (1 <= src_port <= 65535):
+        if not src or not dst or src_port is None or dst_port not in self.TLS_PORTS or not (1 <= src_port <= 65535):
             return None
         seq = record.get("tcp_payload_seq")
         if seq is None:
@@ -4451,7 +4467,9 @@ class CleartextHttpOnTlsPortRule:
                 self._tcp_prefixes.move_to_end(key)
         return None
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.cooldown
         history_cutoff = now - self.window
         with self._lock:
@@ -4468,6 +4486,7 @@ class CleartextHttpOnTlsPortRule:
                 else:
                     del self._history[key]
                     self._saturated.discard(key)
+            self._saturated.intersection_update(self._history)
             for key, seen_at in list(self._seen_requests.items()):
                 if seen_at < history_cutoff or seen_at > now:
                     del self._seen_requests[key]
@@ -4481,7 +4500,7 @@ class CleartextHttpOnTlsPortRule:
         src, dst = record.get("src_ip"), record.get("dst_ip")
         src_port = _normalize_port(record.get("src_port"))
         dst_port = _normalize_port(record.get("dst_port"))
-        if not src or not dst or dst_port not in (443, 8443) or _is_trusted(src):
+        if not src or not dst or dst_port not in self.TLS_PORTS or _is_trusted(src):
             return None
         payload = record.get("payload", b"")
         if not isinstance(payload, bytes):

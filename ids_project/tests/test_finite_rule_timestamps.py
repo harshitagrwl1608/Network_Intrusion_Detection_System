@@ -61,7 +61,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "dst_ip": "203.0.113.17", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_vert", "_horiz", "_alert_cooldown")),
-            ("CLEAR_HTTP_ON_TLS_PORT", "1.10", lambda: CleartextHttpOnTlsPortRule(
+            ("CLEAR_HTTP_ON_TLS_PORT", "1.11", lambda: CleartextHttpOnTlsPortRule(
                 min_requests=2), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.18",
                 "dst_ip": "203.0.113.18", "src_port": 50000, "dst_port": 443,

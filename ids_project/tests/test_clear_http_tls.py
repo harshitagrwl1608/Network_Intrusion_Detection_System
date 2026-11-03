@@ -250,7 +250,7 @@ class TestCleartextHttpOnTlsPortRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["src_port"], 50001)
         self.assertIsInstance(alert["src_port"], int)
-        self.assertEqual(alert["rule_version"], "1.10")
+        self.assertEqual(alert["rule_version"], "1.11")
 
     def test_connect_and_trace_methods_detected(self):
         for method in (b"CONNECT proxy.internal:8080 HTTP/1.1\r\nHost: proxy.internal:8080\r\n\r\n",
@@ -261,7 +261,42 @@ class TestCleartextHttpOnTlsPortRule(unittest.TestCase):
                 alert = rule.check(self.packet(method, src_port=51001, event_timestamp=201.0))
                 self.assertIsNotNone(alert)
                 self.assertEqual(alert["rule_name"], "CLEAR_HTTP_ON_TLS_PORT")
-                self.assertEqual(alert["rule_version"], "1.10")
+                self.assertEqual(alert["rule_version"], "1.11")
+
+    def test_http2_preface_and_webdav_methods_detected(self):
+        for method in (
+            b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
+            b"PROPFIND /webdav HTTP/1.1\r\nHost: webdav.example\r\n\r\n",
+            b"MKCOL /newdir HTTP/1.1\r\nHost: webdav.example\r\n\r\n",
+        ):
+            with self.subTest(sample=method[:8]):
+                rule = CleartextHttpOnTlsPortRule(min_requests=2)
+                self.assertIsNone(rule.check(self.packet(method, src_port=52000, event_timestamp=300.0)))
+                alert = rule.check(self.packet(method, src_port=52001, event_timestamp=301.0))
+                self.assertIsNotNone(alert)
+                self.assertEqual(alert["rule_name"], "CLEAR_HTTP_ON_TLS_PORT")
+                self.assertEqual(alert["rule_version"], "1.11")
+
+    def test_alternative_tls_ports_4443_and_9443_detected(self):
+        payload = b"GET /c2 HTTP/1.1\r\nHost: c2.test\r\n\r\n"
+        for port in (4443, 9443):
+            with self.subTest(port=port):
+                rule = CleartextHttpOnTlsPortRule(min_requests=2)
+                self.assertIsNone(rule.check(self.packet(payload, dst_port=port, src_port=53000, event_timestamp=400.0)))
+                alert = rule.check(self.packet(payload, dst_port=port, src_port=53001, event_timestamp=401.0))
+                self.assertIsNotNone(alert)
+                self.assertEqual(alert["dst_port"], port)
+                self.assertEqual(alert["rule_version"], "1.11")
+
+    def test_prune_stale_optional_now_and_clears_orphaned_saturated(self):
+        rule = CleartextHttpOnTlsPortRule(min_requests=2)
+        orphaned = ("192.0.2.10", "198.51.100.99", 443)
+        rule._saturated.add(orphaned)
+        self.assertIn(orphaned, rule._saturated)
+
+        # prune_stale called with default now=None
+        rule.prune_stale()
+        self.assertNotIn(orphaned, rule._saturated)
 
 
 if __name__ == "__main__":
