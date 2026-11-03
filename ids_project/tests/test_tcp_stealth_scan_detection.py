@@ -41,7 +41,7 @@ class TestTcpStealthScanRule(unittest.TestCase):
             if alert:
                 alerts.append(alert)
         self.assertEqual(len(alerts), 1)
-        self.assertEqual(alerts[0]["rule_version"], "1.7")
+        self.assertEqual(alerts[0]["rule_version"], "1.8")
         self.assertLessEqual(len(rule._fired), rule.max_states)
 
         later = None
@@ -127,6 +127,23 @@ class TestTcpStealthScanRule(unittest.TestCase):
         self.assertEqual(rule.max_states, 10_000)
         self.assertIsNone(rule.check(self.packet(80, 100, 0x01)))
         self.assertEqual(len(rule._probes[("203.0.113.44", "203.0.113.80")]), 1)
+
+    def test_prune_stale_optional_now_and_lru_order(self):
+        rule = TcpStealthScanRule(threshold=10, window=5, max_states=2)
+        # Populate 2 keys
+        rule.check(self.packet(80, 100, 0x01, src="198.51.100.1"))
+        rule.check(self.packet(80, 101, 0x01, src="198.51.100.2"))
+        # Access key 1 again to refresh LRU recency
+        rule.check(self.packet(81, 102, 0x01, src="198.51.100.1"))
+        # Add key 3, which should evict key 2 (least recently used)
+        rule.check(self.packet(80, 103, 0x01, src="198.51.100.3"))
+        self.assertIn(("198.51.100.1", "203.0.113.80"), rule._probes)
+        self.assertNotIn(("198.51.100.2", "203.0.113.80"), rule._probes)
+        self.assertIn(("198.51.100.3", "203.0.113.80"), rule._probes)
+
+        # prune_stale with default now=None should run without error
+        rule.prune_stale()
+        self.assertEqual(len(rule._probes), 0)
 
 
 if __name__ == "__main__":

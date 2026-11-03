@@ -62,7 +62,7 @@ class TestTcpFlagAnomalyRule(unittest.TestCase):
         alert = self.rule.check(_tcp_pkt(flags=0x05))  # FIN + RST
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "TCP_FLAG_ANOMALY")
-        self.assertEqual(alert["rule_version"], "1.8")
+        self.assertEqual(alert["rule_version"], "1.9")
         self.assertEqual(alert["evidence"]["anomaly_type"], "FIN_RST")
         self.assertEqual(alert["severity"], "high")
         self.assertEqual(alert["confidence"], "high")
@@ -159,6 +159,12 @@ class TestTcpFlagAnomalyRule(unittest.TestCase):
         self.rule.check(_tcp_pkt(src="10.1.1.1", flags=0x03, timestamp=base))
         self.assertEqual(len(self.rule._cooldown), 1)
         self.rule.prune_stale(base + 1000)
+        self.assertEqual(len(self.rule._cooldown), 0)
+
+        # Test prune_stale with default now=None
+        self.rule.check(_tcp_pkt(src="10.1.1.2", flags=0x03, timestamp=base - 1000))
+        self.assertEqual(len(self.rule._cooldown), 1)
+        self.rule.prune_stale()
         self.assertEqual(len(self.rule._cooldown), 0)
 
     def test_active_cooldown_survives_key_churn(self):

@@ -27,12 +27,12 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "type": "IP", "protocol": "UDP", "src_ip": "198.51.100.10",
                 "dst_ip": "203.0.113.10", "src_port": 50000, "dst_port": 5060,
             }, ("_history", "_cooldown")),
-            ("TCP_STEALTH_SCAN", "1.7", lambda: TcpStealthScanRule(threshold=1), {
+            ("TCP_STEALTH_SCAN", "1.8", lambda: TcpStealthScanRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.11",
                 "dst_ip": "203.0.113.11", "src_port": 50000, "dst_port": 22,
                 "tcp_flags": 0x01,
             }, ("_probes", "_fired")),
-            ("TCP_FLAG_ANOMALY", "1.8", TcpFlagAnomalyRule, {
+            ("TCP_FLAG_ANOMALY", "1.9", TcpFlagAnomalyRule, {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.12",
                 "dst_ip": "203.0.113.12", "src_port": 50000, "dst_port": 22,
                 "tcp_flags": 0x03,
@@ -156,7 +156,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
             "tcp_flags": 0x03, "timestamp": 100.0,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.8")
+        self.assertEqual(alert["rule_version"], "1.9")
         self.assertEqual(alert["src_port"], 50000)
         self.assertEqual(alert["dst_port"], 80)
 
@@ -174,7 +174,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
             "tcp_flags": 0x01, "timestamp": 101.0,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.7")
+        self.assertEqual(alert["rule_version"], "1.8")
         self.assertEqual(alert["src_port"], 50001)
         self.assertEqual(alert["dst_port"], 23)
 

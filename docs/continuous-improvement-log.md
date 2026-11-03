@@ -434,16 +434,53 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
   - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
   - `pytest ids_project/tests`: 479 passed (task-769).
 - **Test Results**: All 479 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly. Exactly 19 rules preserved in `RuleEngine.rules`.
-- **Commit Hash**: Pending commit for Cycle 11.
+- **Commit Hash**: `17c3d31` (pushed to `origin/antigravity/overnight-work`)
 - **Remaining Issues**:
   - Inspect `TcpStealthScanRule` and `TcpFlagAnomalyRule` for TCP flag combination bounds, probe eviction, and port validation.
 - **Next Cycle's Objective**: Cycle 12 — `TcpStealthScanRule` and `TcpFlagAnomalyRule` state bounding and flag combination resilience.
 
 ---
 
+## Cycle 12 / 15
+
+- **Date/Time**: 2026-11-04 01:00:00 UTC+5:30
+- **Files Inspected**:
+  - `ids_project/engine/rules.py` (`TcpStealthScanRule`, `TcpFlagAnomalyRule`)
+  - `ids_project/tests/test_finite_rule_timestamps.py`
+  - `ids_project/tests/test_tcp_stealth_scan_detection.py`
+  - `ids_project/tests/test_tcp_flag_anomaly.py`
+- **Weakness Discovered**:
+  1. `TcpStealthScanRule`:
+     - `self._probes` used a plain `dict` with `pop(next(iter(self._probes)))`, which did not maintain deterministic LRU recency ordering upon repeated probe updates.
+     - `prune_stale` required a positional `now: float` parameter without default `now = time.time()`.
+     - `_fired` pruning in `prune_stale` used direct `del` inside a loop instead of safe `pop(key, None)`.
+  2. `TcpFlagAnomalyRule`:
+     - `prune_stale` required a positional `now: float` parameter without default `now = time.time()`.
+- **Changes Implemented**:
+  1. Updated `TcpStealthScanRule` (v1.8):
+     - Converted `self._probes` to `OrderedDict` with deterministic $O(1)$ LRU eviction via `popitem(last=False)` and `move_to_end(key)` on probe updates.
+     - Added optional `now: float = None` with default `now = time.time()` in `prune_stale()`.
+     - Hardened `_fired` eviction using `self._fired.pop(key, None)`.
+  2. Updated `TcpFlagAnomalyRule` (v1.9):
+     - Added optional `now: float = None` with default `now = time.time()` in `prune_stale()`.
+  3. Added regression tests:
+     - `test_tcp_stealth_scan_detection.py`: `test_prune_stale_optional_now_and_lru_order`.
+     - `test_tcp_flag_anomaly.py`: updated `test_prune_stale` to verify default `now=None`.
+     - Updated rule version assertions across `test_finite_rule_timestamps.py`, `test_tcp_stealth_scan_detection.py`, and `test_tcp_flag_anomaly.py`.
+- **Tests Executed**:
+  - `pytest ids_project/tests/test_tcp_stealth_scan_detection.py ids_project/tests/test_tcp_flag_anomaly.py ids_project/tests/test_finite_rule_timestamps.py`: 34 passed in 0.27s.
+  - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
+  - `pytest ids_project/tests`: 480 passed in 52.99s (task-857).
+- **Test Results**: All 480 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly. Exactly 19 rules preserved in `RuleEngine.rules`.
+- **Commit Hash**: Pending commit for Cycle 12.
+- **Remaining Issues**:
+  - Inspect `IcmpSweepRule` and `IcmpFloodRule` for ICMPv6 echo handling, clock-drift eviction, and optional `now=None` GC defaults.
+- **Next Cycle's Objective**: Cycle 13 — `IcmpSweepRule` and `IcmpFloodRule` hardening with ICMPv6 echo support and garbage collection defaults.
+
+---
+
 ## Next Actions Summary
 
-1. Verify task-769 completion.
-2. Commit Cycle 11 verified improvements to `antigravity/overnight-work`.
-3. Push to `origin/antigravity/overnight-work`.
-4. Proceed immediately to Cycle 12: `TcpStealthScanRule` and `TcpFlagAnomalyRule` hardening.
+1. Commit Cycle 12 verified improvements to `antigravity/overnight-work`.
+2. Push to `origin/antigravity/overnight-work`.
+3. Proceed immediately to Cycle 13: `IcmpSweepRule` and `IcmpFloodRule` hardening.

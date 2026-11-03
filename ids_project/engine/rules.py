@@ -812,7 +812,7 @@ class TcpStealthScanRule:
     """Detect vertical FIN, NULL, and Xmas TCP probes."""
 
     name = "TCP_STEALTH_SCAN"
-    rule_version = "1.7"
+    rule_version = "1.8"
     _FIN, _SYN, _RST, _PSH, _ACK, _URG, _ECE, _CWR = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80
     _XMAS_FLAGS = _FIN | _PSH | _URG
     _DISALLOWED_FLAGS = _SYN | _RST | _ACK | _ECE | _CWR
@@ -825,7 +825,7 @@ class TcpStealthScanRule:
         self.max_states = _positive_setting(
             max_states, 10_000, "TCP_STEALTH_SCAN_MAX_STATES")
         self._lock = threading.RLock()
-        self._probes: dict[tuple, list[tuple[float, int, str]]] = {}
+        self._probes: OrderedDict[tuple, list[tuple[float, int, str]]] = OrderedDict()
         self._fired: OrderedDict[tuple, float] = OrderedDict()
         self._alert_cooldown = float(self.window)
 
@@ -873,9 +873,10 @@ class TcpStealthScanRule:
                       if cutoff <= ts <= now and port != dst_port]
             active.append((now, dst_port, probe_type))
             if key not in self._probes and len(self._probes) >= self.max_states:
-                self._probes.pop(next(iter(self._probes)))
+                self._probes.popitem(last=False)
             self._probes.pop(key, None)
             self._probes[key] = active
+            self._probes.move_to_end(key)
             distinct_ports = len(active)
             if distinct_ports < self.threshold:
                 return None
@@ -922,7 +923,9 @@ class TcpStealthScanRule:
                 "window_end": now,
             }
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         with self._lock:
             for key in list(self._probes):
@@ -931,10 +934,10 @@ class TcpStealthScanRule:
                 if active:
                     self._probes[key] = active
                 else:
-                    del self._probes[key]
+                    self._probes.pop(key, None)
             for key, fired_at in list(self._fired.items()):
                 if fired_at <= cutoff or fired_at > now:
-                    del self._fired[key]
+                    self._fired.pop(key, None)
 
 
 # =============================================================================
@@ -961,7 +964,7 @@ class TcpFlagAnomalyRule:
     """
 
     name = "TCP_FLAG_ANOMALY"
-    rule_version = "1.8"
+    rule_version = "1.9"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, cooldown: float = 60.0, max_states: int = 5000):
@@ -973,7 +976,9 @@ class TcpFlagAnomalyRule:
         # (src_ip, anomaly_type) → last_alert_timestamp
         self._cooldown: OrderedDict[tuple, float] = OrderedDict()
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.cooldown
         with self._lock:
             for key in list(self._cooldown):
