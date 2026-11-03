@@ -226,6 +226,33 @@ class TestTcpZeroWindowRule(unittest.TestCase):
         self.assertIsNone(self.rule.check(packet))
         self.assertEqual(self.rule._history, {})
 
+    def test_rst_packet_clears_initiator_state(self):
+        # Learn initiator via SYN
+        self.rule.check(self._pkt(
+            src="192.168.1.50", dst="192.168.1.1", sport=50000,
+            dport=443, win=65535, ts=100.0, tcp_flags=0x02))
+        conn_key = self.rule._connection_key("192.168.1.50", 50000, "192.168.1.1", 443)
+        self.assertIn(conn_key, self.rule._initiators)
+
+        # Send RST from either endpoint -> initiator entry should be purged
+        rst_pkt = self._pkt(
+            src="192.168.1.1", dst="192.168.1.50", sport=443,
+            dport=50000, win=0, ts=101.0, tcp_flags=0x04)
+        self.assertIsNone(self.rule.check(rst_pkt))
+        self.assertNotIn(conn_key, self.rule._initiators)
+
+    def test_prune_stale_clears_future_drifted_cooldown_and_initiators(self):
+        conn_key = self.rule._connection_key("192.168.1.50", 50000, "192.168.1.1", 443)
+        self.rule._initiators[conn_key] = (("192.168.1.50", 50000), 200.0)
+        fired_key = ("192.168.1.50", "192.168.1.1", "initiator")
+        self.rule._fired[fired_key] = 200.0
+
+        # Clock now is 100.0 (simulating time drift / reset)
+        self.rule.prune_stale(now=100.0)
+        self.assertNotIn(conn_key, self.rule._initiators)
+        self.assertNotIn(fired_key, self.rule._fired)
+
+
 
 if __name__ == "__main__":
     unittest.main()

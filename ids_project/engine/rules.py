@@ -4911,7 +4911,7 @@ class TcpZeroWindowRule:
     indicate Sockstress, but ordinary receiver backpressure is also possible.
     """
     name = "TCP_ZERO_WINDOW"
-    rule_version = "1.9"
+    rule_version = "1.10"
 
     def __init__(self, threshold: int = 20, window: int = 10, cooldown: float = 60.0,
                  max_tracked: int = 4096, enabled: bool = True,
@@ -4942,9 +4942,15 @@ class TcpZeroWindowRule:
     @staticmethod
     def _connection_key(src_ip: str, src_port, dst_ip: str, dst_port):
         try:
-            source = (str(src_ip), int(src_port))
-            destination = (str(dst_ip), int(dst_port))
-        except (TypeError, ValueError):
+            if src_port is None or dst_port is None:
+                return None
+            sp = int(src_port)
+            dp = int(dst_port)
+            if not (1 <= sp <= 65535 and 1 <= dp <= 65535):
+                return None
+            source = (str(src_ip), sp)
+            destination = (str(dst_ip), dp)
+        except (TypeError, ValueError, OverflowError):
             return None
         return tuple(sorted((source, destination)))
 
@@ -4960,10 +4966,10 @@ class TcpZeroWindowRule:
                 if not dq:
                     del self._history[k]
             for k in list(self._fired):
-                if self._fired[k] < cooldown_cutoff:
+                if self._fired[k] < cooldown_cutoff or self._fired[k] > now:
                     del self._fired[k]
             for key, (_, timestamp) in list(self._initiators.items()):
-                if timestamp < handshake_cutoff:
+                if timestamp < handshake_cutoff or timestamp > now:
                     del self._initiators[key]
 
     def check(self, record: dict) -> dict | None:
@@ -4977,8 +4983,6 @@ class TcpZeroWindowRule:
             tcp_flags = int(tcp_flags)
         except (TypeError, ValueError, OverflowError):
             return None
-        if tcp_flags & 0x04:  # RST does not advertise receiver capacity.
-            return None
 
         src_ip = record.get("src_ip", "")
         dst_ip = record.get("dst_ip", "")
@@ -4986,11 +4990,21 @@ class TcpZeroWindowRule:
         dst_port = _normalize_port(record.get("dst_port"))
         if not src_ip or not dst_ip:
             return None
+        if src_port is not None and not (1 <= src_port <= 65535):
+            return None
+        if dst_port is not None and not (1 <= dst_port <= 65535):
+            return None
 
         now = _finite_record_timestamp(record)
         if now is None:
             return None
         connection_key = self._connection_key(src_ip, src_port, dst_ip, dst_port)
+
+        if tcp_flags & 0x04:  # RST does not advertise receiver capacity.
+            if connection_key is not None:
+                with self._lock:
+                    self._initiators.pop(connection_key, None)
+            return None
 
         # Learn direction from the initial SYN so an alert can distinguish
         # client-side zero windows from receiver-side backpressure.

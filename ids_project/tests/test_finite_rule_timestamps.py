@@ -67,7 +67,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
                 "dst_ip": "203.0.113.18", "src_port": 50000, "dst_port": 443,
                 "payload": b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n",
             }, ("_history", "_seen", "_saturated", "_tcp_prefixes", "_seen_requests")),
-            ("TCP_ZERO_WINDOW", "1.9", lambda: TcpZeroWindowRule(threshold=1), {
+            ("TCP_ZERO_WINDOW", "1.10", lambda: TcpZeroWindowRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.19",
                 "dst_ip": "203.0.113.19", "src_port": 50000, "dst_port": 443,
                 "tcp_flags": 0x10, "tcp_window": 0,
