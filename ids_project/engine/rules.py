@@ -374,7 +374,7 @@ class BlocklistRule:
 
 class PortScanRule:
     name = "PORT_SCAN"
-    rule_version = "1.12"
+    rule_version = "1.13"
 
     def __init__(self, threshold: int = 15, window: int = 10, protocol: str = "TCP",
                  max_states: int = 10_000):
@@ -426,10 +426,12 @@ class PortScanRule:
                             self._vert_saturated.discard(key)
                         else:
                             self._horiz_saturated.discard(key)
-            # Evict stale cooldown entries
+            self._vert_saturated.intersection_update(self._vert)
+            self._horiz_saturated.intersection_update(self._horiz)
+            # Evict stale cooldown entries and future-drifted anomalies
             for fired in (self._vert_fired, self._horiz_fired):
                 for key in list(fired):
-                    if fired[key] < cutoff:
+                    if fired[key] < (now - self._alert_cooldown) or fired[key] > now:
                         del fired[key]
 
     def check(self, record: dict) -> dict | None:
@@ -627,7 +629,7 @@ class UdpScanRule(PortScanRule):
     """UDP scan detector sharing the TCP scanner's vertical/horizontal logic."""
 
     name = "UDP_SCAN"
-    rule_version = "1.3"
+    rule_version = "1.4"
 
     def __init__(self, threshold: int = 15, window: int = 10,
                  max_states: int = 10_000):
@@ -649,7 +651,7 @@ class UdpFloodRule:
     """
 
     name = "UDP_FLOOD"
-    rule_version = "1.9"
+    rule_version = "1.10"
     ALERT_COOLDOWN_S: float = 60.0
     _EXEMPT_SRC_PORTS: set[int] = {53, 67, 68, 123, 5353}
 

@@ -213,8 +213,8 @@ class TestPortScanDetection(unittest.TestCase):
 
     def test_malformed_timestamps_are_ignored_without_corrupting_scan_window(self):
         for rule_cls, protocol, version in (
-            (PortScanRule, "TCP", "1.12"),
-            (UdpScanRule, "UDP", "1.3"),
+            (PortScanRule, "TCP", "1.13"),
+            (UdpScanRule, "UDP", "1.4"),
         ):
             for invalid_time in ("bad-time", float("nan"), float("inf")):
                 with self.subTest(rule=rule_cls.__name__, timestamp=invalid_time):
@@ -570,6 +570,25 @@ class TestPortScanDetection(unittest.TestCase):
         })
         self.assertIsNone(alert)
         self.assertEqual(len(rule._history[("203.0.113.80", 443)][0]), 1)
+
+    def test_port_scan_prune_stale_clears_future_drifted_cooldown_and_orphaned_saturated(self):
+        rule = PortScanRule(threshold=3, window=10)
+        # Manually populate cooldown with future drift and stale past
+        vkey_stale = ("192.0.2.1", "198.51.100.1")
+        vkey_future = ("192.0.2.2", "198.51.100.2")
+        rule._vert_fired[vkey_stale] = 50.0   # older than cutoff (now=100, window=10 -> cutoff=90)
+        rule._vert_fired[vkey_future] = 200.0  # future drift relative to now=100
+        rule._vert_saturated.add(vkey_stale)
+        rule._vert_saturated.add(vkey_future)
+
+        rule.prune_stale(now=100.0)
+
+        # Both stale past and future drift should be pruned from _vert_fired
+        self.assertNotIn(vkey_stale, rule._vert_fired)
+        self.assertNotIn(vkey_future, rule._vert_fired)
+        # Saturated sets should not retain orphaned keys
+        self.assertNotIn(vkey_stale, rule._vert_saturated)
+        self.assertNotIn(vkey_future, rule._vert_saturated)
 
 
 if __name__ == "__main__":

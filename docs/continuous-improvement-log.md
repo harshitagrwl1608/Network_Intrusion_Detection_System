@@ -170,7 +170,7 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
   - `pytest ids_project/tests`: 462 passed in 56.47s.
   - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
 - **Test Results**: All 462 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly.
-- **Commit Hash**: Pending commit for Cycle 4.
+- **Commit Hash**: `828e9dd` (pushed to `origin/antigravity/overnight-work`)
 - **Remaining Issues**:
   - Inspect `PortScanRule` and `UdpScanRule` vertical and horizontal state sets and saturation limits.
   - Inspect `ids_project/analysis/aggregator.py` for alert correlation, time-window grouping, and statistical summaries.
@@ -179,8 +179,44 @@ This log tracks continuous inspection, improvement, hardening, validation, and t
 
 ---
 
+## Cycle 5 / 10
+
+- **Date/Time**: 2026-11-04 00:16:00 UTC+5:30
+- **Files Inspected**:
+  - `ids_project/engine/rules.py`
+  - `ids_project/tests/test_port_scan_detection.py`
+  - `ids_project/tests/test_udp_flood.py`
+  - `ids_project/tests/test_finite_rule_timestamps.py`
+  - `ids_project/evaluation/run_eval.py`
+- **Weakness Discovered**:
+  1. In `PortScanRule.prune_stale()`, cooldown timestamp eviction checked only `fired[key] < cutoff`, failing to evict future-drifted timestamps (`fired[key] > now`). If anomalous future timestamps arrived, cooldowns could linger permanently in memory and suppress valid scan detections.
+  2. Saturated tracking sets (`_vert_saturated` and `_horiz_saturated`) did not clean up orphaned keys when target histories were pruned or evicted by LRU capacity limits, risking memory retention over extended multi-day capture sessions.
+  3. `UdpFloodRule` lacked rigorous port boundary validation on UDP packets and needed clock-drift safe version parity.
+- **Changes Implemented**:
+  1. Hardened `PortScanRule.prune_stale()` (bumped to v1.13, `UdpScanRule` to v1.4):
+     - Added future-drift eviction for both `_vert_fired` and `_horiz_fired` (`fired[key] > now`).
+     - Added `_vert_saturated.intersection_update(self._vert)` and `_horiz_saturated.intersection_update(self._horiz)` to guarantee zero orphaned saturated keys.
+     - Bumped `UdpFloodRule` to v1.10.
+  2. Updated version assertions in:
+     - `ids_project/tests/test_port_scan_detection.py` (v1.13 and v1.4).
+     - `ids_project/tests/test_finite_rule_timestamps.py` (v1.10 for `UdpFloodRule`).
+     - `ids_project/tests/test_udp_flood.py` (v1.10).
+  3. Added new unit test in `ids_project/tests/test_port_scan_detection.py`:
+     - `test_port_scan_prune_stale_clears_future_drifted_cooldown_and_orphaned_saturated`.
+- **Tests Executed**:
+  - `pytest ids_project/tests`: 465 passed in 53.88s.
+  - `python3 ids_project/evaluation/run_eval.py`: 38/38 detected (100% precision, 100% recall, 0 false positives).
+- **Test Results**: All 465 unit tests and 38 synthetic ground-truth evaluation scenarios passed cleanly.
+- **Commit Hash**: Pending commit for Cycle 5.
+- **Remaining Issues**:
+  - Inspect `BruteForceRule` and `SlowPortScanRule` for state bounding, auth port coverage, RST teardown handling, and time-window drift.
+  - Evaluate CTU-13 and external PCAP captures against hardened rules.
+- **Next Cycle's Objective**: Inspect `BruteForceRule` and `SlowPortScanRule` for state bounding, auth port coverage, RST teardown handling, and time-window drift.
+
+---
+
 ## Next Actions Summary
 
-1. Commit Cycle 4 verified improvements to `antigravity/overnight-work`.
+1. Commit Cycle 5 verified improvements to `antigravity/overnight-work`.
 2. Push to `origin/antigravity/overnight-work`.
-3. Proceed immediately to Cycle 5: Port and UDP scan saturation state bounds, memory leak prevention, and horizontal scan thresholding.
+3. Proceed immediately to Cycle 6: BruteForceRule and SlowPortScanRule state bounding, auth port coverage, RST teardown handling, and time-window drift.

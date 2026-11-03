@@ -37,7 +37,7 @@ class TestUdpFloodRule(unittest.TestCase):
 
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "UDP_FLOOD")
-        self.assertEqual(alert["rule_version"], "1.9")
+        self.assertEqual(alert["rule_version"], "1.10")
         self.assertEqual(alert["evidence"]["packet_count"], 50)
         self.assertEqual(alert["evidence"]["target_port"], 5060)
         self.assertEqual(alert["severity"], "medium")
