@@ -95,6 +95,7 @@ Thread safety:
   and GC thread (prune_stale) cannot race.
 """
 
+import bisect
 import json
 import hashlib
 import math
@@ -434,7 +435,9 @@ class PortScanRule:
         # Re-fire cooldown = one full window (avoids alerting every packet once over threshold)
         self._alert_cooldown: float = float(self.window)
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         with self._lock:
             for d in (self._vert, self._horiz):
@@ -505,9 +508,18 @@ class PortScanRule:
         with self._lock:
             vertical = self._vert.get(vkey)
             horizontal = self._horiz.get(hkey)
-            if (vertical and now < next(reversed(vertical.values()))) or \
-               (horizontal and now < next(reversed(horizontal.values()))):
-                return None  # don't let late events skew an active window
+            if vertical:
+                latest_v = next(reversed(vertical.values()))
+                if latest_v - now > self.window:
+                    vertical.clear()
+                elif now < latest_v:
+                    return None
+            if horizontal:
+                latest_h = next(reversed(horizontal.values()))
+                if latest_h - now > self.window:
+                    horizontal.clear()
+                elif now < latest_h:
+                    return None
             # Always update BOTH vertical and horizontal histories first,
             # then check thresholds. This ensures a packet contributes to
             # both scan dimensions even when one threshold fires. (P2 §4)
@@ -704,7 +716,9 @@ class UdpFloodRule:
         # (src_ip, dst_ip) → last_alert_time
         self._cooldown: OrderedDict[tuple, float] = OrderedDict()
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         cutoff_cd = now - self.cooldown
         with self._lock:
@@ -767,8 +781,12 @@ class UdpFloodRule:
                 self._history.popitem(last=False)
 
             history = self._history.get(key, [])
-            if history and now < history[-1]:
-                return None
+            if history:
+                latest = history[-1]
+                if latest - now > self.window:
+                    history = []
+                elif now < latest:
+                    return None
             history = [t for t in history if 0 <= now - t <= self.window]
             history.append(now)
             self._history[key] = history
@@ -873,8 +891,12 @@ class TcpStealthScanRule:
         cutoff = now - self.window
         with self._lock:
             history = self._probes.get(key, [])
-            if history and now < history[-1][0]:
-                return None
+            if history:
+                latest = history[-1][0]
+                if latest - now > self.window:
+                    history = []
+                elif now < latest:
+                    return None
             active = [(ts, port, kind) for ts, port, kind in history
                       if cutoff <= ts <= now and port != dst_port]
             active.append((now, dst_port, probe_type))
@@ -1356,8 +1378,12 @@ class SynFloodRule:
                 self._history.pop(evicted)
                 self._syn_cooldown.pop(evicted, None)
             history = self._history.get(key, [])
-            if history and now < history[-1]:
-                return None  # ignore reordered events; they cannot be in this window
+            if history:
+                latest = history[-1]
+                if latest - now > self.window:
+                    history = []
+                elif now < latest:
+                    return None
             history = [t for t in history if 0 <= now - t <= self.window]
             history.append(now)
             count = len(history)
@@ -1616,11 +1642,13 @@ class IcmpSweepRule:
         if now is None:
             return None
         with self._lock:
-            # PCAPs are expected to be ordered; reject a late/reordered event
-            # instead of letting it erase newer window state.
             history = self._history.get(src, [])
-            if history and now < history[-1][0]:
-                return None
+            if history:
+                latest = history[-1][0]
+                if latest - now > self.window:
+                    history = []
+                elif now < latest:
+                    return None
             history = [(ts, host) for ts, host in history
                        if 0 <= now - ts <= self.window and host != dst]
             history.append((now, dst))
@@ -1759,8 +1787,12 @@ class IcmpFloodRule:
                 self._history.popitem(last=False)
 
             history = self._history.get(key, [])
-            if history and now < history[-1]:
-                return None  # reject out-of-order timestamps
+            if history:
+                latest = history[-1]
+                if latest - now > self.window:
+                    history = []
+                elif now < latest:
+                    return None
             history = [t for t in history if 0 <= now - t <= self.window]
             history.append(now)
             self._history.pop(key, None)
@@ -1996,7 +2028,7 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
     (
         "SQL_INJECTION",
         re.compile(
-            rb"(?i)(union\s+(?:all\s+)?select|select\s+(?:\*|null|@@version|user\s*\()|drop\s+table|drop\s+database"
+            rb"(?i)(union(?:\s+|\()+(?:all(?:\s+|\()+)?select|select(?:\s+|\()+(?:\*|null|@@version|user\s*\()|drop\s+table|drop\s+database"
             rb"|insert\s+into|update\s+\w+\s+set"
             rb"|or\s+[\x27\x22]?\s*[\w]+\s*=\s*[\x27\x22]?\s*[\w]"
             rb"|or\s+1\s*=\s*1|or\s+\x27\w+\x27\s*=\s*\x27\w+\x27"
@@ -2087,8 +2119,8 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
             # NOTE: %252e%252e (double URL-encoded) handled by multi-pass URL decoder
             # URL-encoded backslash traversal: ..%5c..%5c (Windows)
             rb"|\.\.%5[cC]|%2[eE]%2[eE]%5[cC]"
-            # Overlong UTF-8 encoding: %c0%ae = '.', %c1%9c = '\'
-            rb"|%c0%[aA][eE]%c0%[aA][eE]|%c1%9[cC]"
+            # Overlong UTF-8 encoding: %c0%ae = '.', %c0%af = '/', %c1%9c = '\'
+            rb"|%c0%[aA][eE]%c0%[aA][eE]|%c0%[aA][fF]|%c1%9[cC]"
             # Fullwidth slash bypass: \uFF0F (HTML entity / URL %ef%bc%8f)
             rb"|%[eE][fF]%[bB][cC]%8[fF]"
             # Nginx/Tomcat specific: /..;/ bypass
@@ -2297,13 +2329,13 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
     (
         "HTTP_METHOD_TAMPERING",
         re.compile(
-            rb"(?i)(?:^|\r\n)\s*(TRACE|TRACK|DEBUG|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK|SEARCH)\s+/[^\r\n]*\s+HTTP/[0-9.]+|Translate:\s*f\b"
+            rb"(?i)(?:^|[\r\n])\s*(TRACE|TRACK|DEBUG|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK|SEARCH)\s+/[^\r\n]*\s+HTTP/[0-9.]+|Translate:\s*f\b"
             # CONNECT to internal IPs (proxy abuse for internal SSRF tunneling)
-            rb"|(?:^|\r\n)\s*CONNECT\s+(?:localhost|127\.0\.0\.1|192\.168\.|10\.|172\.1[6-9]\.|172\.2\d\.|172\.3[01]\.)"
+            rb"|(?:^|[\r\n])\s*CONNECT\s+(?:localhost|127\.0\.0\.1|192\.168\.|10\.|172\.1[6-9]\.|172\.2\d\.|172\.3[01]\.)"
             # DELETE/PATCH on management paths.  Generic REST user endpoints
             # are common application traffic and do not by themselves imply
             # method tampering.
-            rb"|(?:^|\r\n)\s*(?:DELETE|PATCH)\s+/(?:admin|api/(?:v[0-9]+/)?(?:admin|config)|config|actuator|manage)(?=[/?\s])[^\r\n]*\s+HTTP/",
+            rb"|(?:^|[\r\n])\s*(?:DELETE|PATCH)\s+/(?:admin|api/(?:v[0-9]+/)?(?:admin|config)|config|actuator|manage)(?=[/?\s])[^\r\n]*\s+HTTP/",
         ),
         "high",
     ),
@@ -2326,6 +2358,16 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
             rb"Server\.CreateObject\s*\(\s*[\x27\x22](?:WScript\.Shell|Scripting\.FileSystemObject)|"
             # Generic base64-encoded cmd execution markers
             rb"(?:fromCharCode|atob)\s*\([^)]{10,}\)\s*\))"
+        ),
+        "high",
+    ),
+    # ICS / SCADA Safety System Exploitation — TRITON/TRISIS malware targeting Schneider Electric
+    # Triconex TriStation 1131 protocol (UDP port 1502).
+    # Detects unauthorized firmware program injection (Function Code 0x42) and program execution (0x37).
+    (
+        "ICS_TRISTATION_EXPLOIT",
+        re.compile(
+            rb"(?s)^\x05\x00.{4}[\x42\x37]"
         ),
         "high",
     ),
@@ -2360,6 +2402,7 @@ _DPI_PORTS: set[int] = {
     9090,           # Prometheus / Cockpit
     7547,           # TR-069 (CPE WAN management — Mirai target)
     8291,           # Winbox (MikroTik — routerOS exploits)
+    1502,           # Triconex TriStation 1131 (ICS/SCADA safety controller — TRITON/TRISIS)
 }
 
 
@@ -3008,6 +3051,29 @@ class DnsRule:
             return bool(labels) and all(len(label) == 1 and label in "0123456789abcdef" for label in labels)
         return False
 
+    def _calc_entropy(self, label: str) -> float:
+        """Calculate effective DGA entropy for a label.
+
+        Compound hyphenated hostnames (e.g. 'student-halls-boddington-pc125-169')
+        falsely inflate standard Shannon entropy because concatenating multiple
+        natural words and numbers separated by hyphens yields an artificially broad
+        character distribution. Real-world DGAs generate randomized tokens without
+        hyphens, or position random tokens inside sub-components.
+
+        When a label contains hyphens, we require at least one hyphen-separated
+        segment of length >= 8 to independently exhibit DGA-level randomness
+        (entropy >= entropy_threshold). If none does, the effective DGA entropy
+        is bounded by the maximum segment entropy, suppressing false positives on
+        compound hostnames while preserving attack recall.
+        """
+        base_ent = _shannon_entropy(label)
+        if "-" in label:
+            segments = [seg for seg in label.split("-") if seg]
+            seg_ents = [_shannon_entropy(seg) for seg in segments if len(seg) >= 8]
+            if not seg_ents or max(seg_ents) < self.entropy_threshold:
+                return max([_shannon_entropy(seg) for seg in segments], default=0.0)
+        return base_ent
+
     def _prune_seen(self, now: float):
         cutoff = now - 120
         for key, seen_at in list(self._seen.items()):
@@ -3088,12 +3154,12 @@ class DnsRule:
         # measuring public-suffix labels such as "co" or "uk".
         entropy_labels = labels[:registrable_index + 1]
         entropy_candidates = [
-            (label, _shannon_entropy(label))
+            (label, self._calc_entropy(label))
             for label in entropy_labels if len(label) >= 8
         ]
         entropy_label, entropy = max(
             entropy_candidates, key=lambda item: item[1],
-            default=(subdomain, _shannon_entropy(subdomain)),
+            default=(subdomain, self._calc_entropy(subdomain)),
         )
         # Total QNAME length includes every dot and the registered domain,
         # which makes ordinary multi-label hostnames exceed modest settings.
@@ -3174,8 +3240,12 @@ class DnsRule:
             with self._lock:
                 fkey = (src, parent)
                 history = self._freq.get(fkey, [])
-                if history and now < history[-1]:
-                    return None  # ignore late observations instead of corrupting the window
+                if history:
+                    latest = history[-1]
+                    if latest - now > self._freq_window:
+                        history = []
+                    elif now < latest:
+                        return None
                 history = [
                     t for t in history if 0 <= now - t <= self._freq_window
                 ]
@@ -3198,7 +3268,7 @@ class DnsRule:
                     if len(history) >= self._freq_threshold:
                         query_count_saturated = True
                         history = history[-(self._freq_threshold - 1):] if self._freq_threshold > 1 else []
-                    history.append(now)
+                    bisect.insort(history, now)
                     self._freq.pop(fkey, None)
                     self._freq[fkey] = history
                 query_count = len(history)
@@ -3451,7 +3521,9 @@ class BruteForceRule:
         self._saturated_history.discard(key)
         self._cooldown.pop(key, None)
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         with self._lock:
             for key in list(self._history):
@@ -3520,8 +3592,6 @@ class BruteForceRule:
             if key not in self._history and len(self._history) >= self.max_states:
                 self._evict_history_key(next(iter(self._history)))
             history = self._history.get(key, [])
-            if history and now < history[-1]:
-                return None  # reject reordered events
             if syn_identity is not None:
                 first_seen = self._seen_syns.get(syn_identity)
                 if first_seen is not None and 0 <= now - first_seen <= self.window:
@@ -3531,10 +3601,10 @@ class BruteForceRule:
                 self._seen_syns.move_to_end(syn_identity)
                 while len(self._seen_syns) > self._max_seen_syns:
                     self._seen_syns.popitem(last=False)
-            history = [t for t in history if 0 <= now - t <= self.window]
+            history = [t for t in history if t <= now + 5.0 and 0 <= now - t <= self.window]
             if len(history) < self.threshold:
                 self._saturated_history.discard(key)
-            history.append(now)
+            bisect.insort(history, now)
             if len(history) > self.threshold:
                 history = history[-self.threshold:]
                 self._saturated_history.add(key)
@@ -3651,7 +3721,9 @@ class SlowPortScanRule:
         # campaign can cross hundreds of destination keys in one capture.
         self._alert_cooldown: OrderedDict[tuple[str, str], float] = OrderedDict()
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         with self._lock:
             for d in (self._vert, self._horiz):
@@ -3706,30 +3778,27 @@ class SlowPortScanRule:
         hkey = (src, dst_port)
 
         with self._lock:
-            # Reject late events
-            if (self._vert.get(vkey) and now < self._vert[vkey][-1][0]) or \
-               (self._horiz.get(hkey) and now < self._horiz[hkey][-1][0]):
-                return None
-
             # Capacity eviction
             if vkey not in self._vert and len(self._vert) >= self.max_states:
                 self._vert.popitem(last=False)
             if hkey not in self._horiz and len(self._horiz) >= self.max_states:
                 self._horiz.popitem(last=False)
 
-            # Vertical history update (deduplicate per port)
+            # Vertical history update (deduplicate per port, prune future drift)
             vertical = [(t, p) for t, p in self._vert.get(vkey, [])
-                        if 0 <= now - t <= self.window and p != dst_port]
+                        if t <= now + 5.0 and 0 <= now - t <= self.window and p != dst_port]
             vertical.append((now, dst_port))
+            vertical.sort(key=lambda x: x[0])
             self._vert.pop(vkey, None)
             self._vert[vkey] = vertical
             self._vert.move_to_end(vkey)
             distinct_ports = len(vertical)
 
-            # Horizontal history update (deduplicate per host)
+            # Horizontal history update (deduplicate per host, prune future drift)
             horizontal = [(t, ip) for t, ip in self._horiz.get(hkey, [])
-                          if 0 <= now - t <= self.window and ip != dst_ip]
+                          if t <= now + 5.0 and 0 <= now - t <= self.window and ip != dst_ip]
             horizontal.append((now, dst_ip))
+            horizontal.sort(key=lambda x: x[0])
             self._horiz.pop(hkey, None)
             self._horiz[hkey] = horizontal
             self._horiz.move_to_end(hkey)
@@ -5080,7 +5149,9 @@ class TcpZeroWindowRule:
             return None
         return tuple(sorted((source, destination)))
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         cooldown_cutoff = now - self.cooldown
         handshake_cutoff = now - self._handshake_ttl
@@ -5267,7 +5338,7 @@ class NonDnsTrafficOnDnsPortRule:
     - High-ratio printable ASCII command streams on port 53 that fail DNS message parsing
     """
     name = "NON_DNS_TRAFFIC_ON_DNS_PORT"
-    rule_version = "1.0"
+    rule_version = "1.1"
     DNS_PORT = 53
     MAX_TRACKED_FLOWS = 4096
 
@@ -5316,6 +5387,7 @@ class NonDnsTrafficOnDnsPortRule:
 
     @staticmethod
     def _is_valid_dns_message(payload: bytes, is_tcp: bool) -> bool:
+        offset = 0
         if is_tcp:
             if len(payload) < 14:
                 return False
@@ -5323,10 +5395,12 @@ class NonDnsTrafficOnDnsPortRule:
             if msg_len == 0 or msg_len > 65535:
                 return False
             dns_header = payload[2:14]
+            offset = 14
         else:
             if len(payload) < 12:
                 return False
             dns_header = payload[:12]
+            offset = 12
 
         flags = int.from_bytes(dns_header[2:4], "big")
         opcode = (flags >> 11) & 0x0F
@@ -5344,6 +5418,34 @@ class NonDnsTrafficOnDnsPortRule:
             return False
         if qdcount == 0 and ancount == 0 and nscount == 0 and arcount == 0:
             return False
+
+        # RFC 1035 §4.1.2 Question section QNAME validation
+        if qdcount > 0:
+            p_len = len(payload)
+            curr = offset
+            for _ in range(qdcount):
+                if curr >= p_len:
+                    return False
+                labels_read = 0
+                while curr < p_len:
+                    lbl_len = payload[curr]
+                    if lbl_len == 0:
+                        curr += 1
+                        break
+                    # Compression pointer in Question section (RFC 1035 §4.1.4)
+                    if (lbl_len & 0xC0) == 0xC0:
+                        curr += 2
+                        break
+                    if lbl_len > 63 or curr + 1 + lbl_len > p_len:
+                        return False
+                    curr += 1 + lbl_len
+                    labels_read += 1
+                    if labels_read > 128:
+                        return False
+                # 2 bytes QTYPE + 2 bytes QCLASS
+                if curr + 4 > p_len:
+                    return False
+                curr += 4
         return True
 
     def prune_stale(self, now: float = None):
@@ -5384,14 +5486,6 @@ class NonDnsTrafficOnDnsPortRule:
         if payload.startswith((b"\x16\x03\x01", b"\x16\x03\x02", b"\x16\x03\x03")):
             return None
 
-        # If already parsed as a valid DNS query or response by Scapy layer
-        if record.get("dns_query") is not None:
-            return None
-
-        is_tcp = (proto == "TCP")
-        if self._is_valid_dns_message(payload, is_tcp):
-            return None
-
         # Inspect for non-DNS payload indicators
         anomaly_type = None
         severity = "medium"
@@ -5399,7 +5493,8 @@ class NonDnsTrafficOnDnsPortRule:
         detail = ""
         matched_sig = None
 
-        # 1. Check for interactive shell or command signatures
+        # 1. Check for interactive shell or command signatures unconditionally
+        # (prevents evasion via spoofed DNS headers or crafted QNAMEs)
         for sig in self.SHELL_SIGNATURES:
             if sig in payload:
                 anomaly_type = "INTERACTIVE_SHELL"
@@ -5411,6 +5506,15 @@ class NonDnsTrafficOnDnsPortRule:
                     f"over DNS port 53 ({proto}) to {dst_ip} — possible reverse shell or firewall bypass"
                 )
                 break
+
+        if not anomaly_type:
+            # If already parsed as a valid DNS query or response by Scapy layer
+            if record.get("dns_query") is not None:
+                return None
+
+            is_tcp = (proto == "TCP")
+            if self._is_valid_dns_message(payload, is_tcp):
+                return None
 
         # 2. Check for cleartext HTTP traffic on port 53
         if not anomaly_type:

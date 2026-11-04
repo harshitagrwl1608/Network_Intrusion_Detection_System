@@ -727,6 +727,57 @@ class TestPayloadRule(unittest.TestCase):
         # prune_stale without explicit now (defaults to time.time())
         rule.prune_stale()
 
+    def test_sqli_whitespace_evasion_union_select_parentheses(self):
+        """Verifies detection of SQLi using parentheses instead of whitespace (EV-03)."""
+        rule = PayloadRule()
+        pkt = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.5", "dst_ip": "192.168.1.1",
+            "src_port": 54321, "dst_port": 80, "payload": b"GET /users?id=1 UNION(SELECT(1)) HTTP/1.1\r\n\r\n", "timestamp": 100.0
+        }
+        alert = rule.check(pkt)
+        self.assertIsNotNone(alert, "UNION(SELECT(1)) must be detected without whitespace")
+        sigs = [hit["signature"] for hit in alert["evidence"]["hits"]]
+        self.assertIn("SQL_INJECTION", sigs)
+
+    def test_path_traversal_overlong_slash_c0_af(self):
+        """Verifies detection of path traversal using overlong UTF-8 slash %c0%af (EV-04)."""
+        rule = PayloadRule()
+        pkt = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.5", "dst_ip": "192.168.1.1",
+            "src_port": 54321, "dst_port": 80, "payload": b"GET /..%c0%af..%c0%afetc/passwd HTTP/1.1\r\n\r\n", "timestamp": 100.0
+        }
+        alert = rule.check(pkt)
+        self.assertIsNotNone(alert, "Overlong slash %c0%af must be detected as PATH_TRAVERSAL")
+        sigs = [hit["signature"] for hit in alert["evidence"]["hits"]]
+        self.assertIn("PATH_TRAVERSAL", sigs)
+
+    def test_http_method_tampering_bare_lf(self):
+        """Verifies detection of HTTP method tampering preceded by bare LF rather than CRLF (EV-04)."""
+        rule = PayloadRule()
+        pkt = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.5", "dst_ip": "192.168.1.1",
+            "src_port": 54321, "dst_port": 80, "payload": b"X-Pad: foo\nTRACE / HTTP/1.1\n\n", "timestamp": 100.0
+        }
+        alert = rule.check(pkt)
+        self.assertIsNotNone(alert, "TRACE method preceded by bare LF must be detected")
+        sigs = [hit["signature"] for hit in alert["evidence"]["hits"]]
+        self.assertIn("HTTP_METHOD_TAMPERING", sigs)
+
+    def test_ics_tristation_exploit_payload_on_udp_1502(self):
+        """Verifies detection of Schneider Electric Triconex TriStation 1131 program injection (TRITON)."""
+        rule = PayloadRule()
+        # Header: \x05\x00 (TriStation), 2 bytes length, 2 bytes flags, Function Code \x42 (Write Program)
+        triton_write_pkt = {
+            "type": "IP", "protocol": "UDP", "src_ip": "192.168.1.88", "dst_ip": "192.168.1.2",
+            "src_port": 33279, "dst_port": 1502,
+            "payload": b"\x05\x00\x00\x18\x00\x00\x42" + b"\x00" * 20,
+            "timestamp": 100.0,
+        }
+        alert = rule.check(triton_write_pkt)
+        self.assertIsNotNone(alert, "TriStation function code 0x42 on UDP port 1502 must trigger ICS alert")
+        sigs = [hit["signature"] for hit in alert["evidence"]["hits"]]
+        self.assertIn("ICS_TRISTATION_EXPLOIT", sigs)
+
 
 if __name__ == "__main__":
     unittest.main()

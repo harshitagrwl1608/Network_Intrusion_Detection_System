@@ -296,6 +296,29 @@ class TestNonDnsTrafficOnDnsPortRule(unittest.TestCase):
         self.rule.prune_stale(now=7065.0)  # >60s
         self.assertEqual(len(self.rule._seen), 0)
 
+    def test_dns_header_prefixing_evasion_detected(self):
+        """Verifies that an attacker prepending a fake DNS header before a shell payload is detected (EV-01)."""
+        rule_udp = NonDnsTrafficOnDnsPortRule()
+        dns_hdr_udp = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+        shell_payload = b"root@kali:~# whoami\n"
+        rec_udp = {
+            "type": "IP", "protocol": "UDP", "src_ip": "10.0.0.5", "dst_ip": "10.0.0.1",
+            "src_port": 53, "dst_port": 54321, "payload": dns_hdr_udp + shell_payload, "timestamp": 100.0,
+        }
+        alert_udp = rule_udp.check(rec_udp)
+        self.assertIsNotNone(alert_udp, "UDP shell with fake DNS header must be detected")
+        self.assertEqual(alert_udp["evidence"]["anomaly_type"], "INTERACTIVE_SHELL")
+
+        rule_tcp = NonDnsTrafficOnDnsPortRule()
+        dns_hdr_tcp = b"\x00\x25\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+        rec_tcp = {
+            "type": "IP", "protocol": "TCP", "src_ip": "10.0.0.5", "dst_ip": "10.0.0.1",
+            "src_port": 53, "dst_port": 54321, "payload": dns_hdr_tcp + shell_payload, "timestamp": 100.0,
+        }
+        alert_tcp = rule_tcp.check(rec_tcp)
+        self.assertIsNotNone(alert_tcp, "TCP shell with fake DNS header must be detected")
+        self.assertEqual(alert_tcp["evidence"]["anomaly_type"], "INTERACTIVE_SHELL")
+
 
 if __name__ == "__main__":
     unittest.main()

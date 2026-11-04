@@ -614,6 +614,29 @@ class TestPortScanDetection(unittest.TestCase):
         self.assertNotIn(vkey_stale, rule._vert_saturated)
         self.assertNotIn(vkey_future, rule._vert_saturated)
 
+    def test_clock_skew_future_poison_does_not_blind_port_scan(self):
+        """Verifies that an injected future-timestamp packet does not blind PortScanRule (EV-02)."""
+        rule = PortScanRule(threshold=5, window=10)
+        # Attacker injects a single packet with a distant future timestamp
+        pkt_future = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.100", "dst_ip": "192.168.1.1",
+            "src_port": 50000, "dst_port": 80, "initial_syn": True, "timestamp": 200.0,
+        }
+        rule.check(pkt_future)
+
+        # Attacker then proceeds with real scan at current chronological time (105.0)
+        alerts = []
+        for port in range(81, 90):
+            pkt = {
+                "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.100", "dst_ip": "192.168.1.1",
+                "src_port": 50000 + port, "dst_port": port, "initial_syn": True, "timestamp": 105.0,
+            }
+            res = rule.check(pkt)
+            if res:
+                alerts.append(res)
+        self.assertGreaterEqual(len(alerts), 1, "Future timestamp packet must not blind PortScanRule")
+        self.assertEqual(alerts[0]["rule_name"], "PORT_SCAN")
+
 
 if __name__ == "__main__":
     unittest.main()
