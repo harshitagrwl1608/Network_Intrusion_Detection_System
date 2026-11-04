@@ -294,8 +294,10 @@ def _semantic_family(event: dict) -> str | None:
         return "blocklist_threat_intel"
     if rule == "ARP_SPOOF" or "arp spoof" in signature or "arp cache poisoning" in signature:
         return "arp_spoof"
-    if any(k in signature for k in ["irc ", "irc pong", "irc user", "irc nick", "irc c2", "botnet"]):
+    if rule == "IRC_C2_BEACONING" or any(k in signature for k in ["irc ", "irc pong", "irc user", "irc nick", "irc c2", "botnet"]):
         return "botnet_c2"
+    if rule == "IP_FRAGMENT_ANOMALY" or any(k in signature for k in ["teardrop", "fragment overlap", "tiny fragment", "oversized fragment", "ping of death"]):
+        return "ip_fragment_anomaly"
     if any(k in signature for k in ["executable", "elf file download", "malware download"]):
         return "malicious_binary_transfer"
 

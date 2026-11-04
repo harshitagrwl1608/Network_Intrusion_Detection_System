@@ -384,6 +384,21 @@ class TestComparisonMatching(unittest.TestCase):
                 os.remove(lbl_path)
 
 
+    def test_semantic_family_irc_and_fragment(self):
+        """Verify _semantic_family maps IRC_C2_BEACONING and IP_FRAGMENT_ANOMALY correctly."""
+        irc_ng = {"rule_name": "IRC_C2_BEACONING", "src_ip": "10.0.0.1", "dst_ip": "1.2.3.4"}
+        self.assertEqual(_semantic_family(irc_ng), "botnet_c2")
+
+        sur_irc = {"signature": "ET CHAT IRC PONG response", "src_ip": "10.0.0.1"}
+        self.assertEqual(_semantic_family(sur_irc), "botnet_c2")
+
+        frag_ng = {"rule_name": "IP_FRAGMENT_ANOMALY", "src_ip": "10.0.0.1"}
+        self.assertEqual(_semantic_family(frag_ng), "ip_fragment_anomaly")
+
+        sur_frag = {"signature": "SURICATA IP fragment overlap attack detected"}
+        self.assertEqual(_semantic_family(sur_frag), "ip_fragment_anomaly")
+
+
 if __name__ == "__main__":
     unittest.main()
 

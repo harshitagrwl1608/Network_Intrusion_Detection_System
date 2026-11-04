@@ -7,8 +7,8 @@ This file is a working handoff for the next engineer or AI agent. It summarizes 
 - Repository: `/home/harshitgarg/Downloads/Networking_Project`
 - Engine package: `ids_project/`
 - Authorized branch: `antigravity/overnight-work` (strictly tracking `origin/antigravity/overnight-work`).
-- Rule Governance Invariant: The historical 19-rule limit is retired. NetGuard registers **22 evidence-driven detection rules** in `RuleEngine.rules` under strict distinct value governance, comprehensive positive/negative unit tests, and deterministic $O(1)$ LRU bounding via `prune_stale(now)`.
-- Evaluation status: 587/587 unit tests passing, 38/38 synthetic ground-truth scenarios (100% precision, 100% recall, 0 false alarms), 16 verified real-world PCAPs evaluated across 6 independent publishers.
+- Rule Governance Invariant: The historical 19-rule limit is retired. NetGuard registers **23 evidence-driven detection rules** in `RuleEngine.rules` under strict distinct value governance, comprehensive positive/negative unit tests, and deterministic $O(1)$ LRU bounding via `prune_stale(now)`.
+- Evaluation status: 606/606 unit tests passing (+ 216 subtests), 38/38 synthetic ground-truth scenarios (100% precision, 100% recall, 0 false alarms), 16 verified real-world PCAPs evaluated across 6 independent publishers.
 - Dashboard/UI work is out of scope for the current improvement effort.
 - Never test with live capture. Use saved PCAPs and isolated output paths. Do not execute malware found in captures.
 
@@ -23,9 +23,9 @@ The earlier cycles are documented in the repository-level [`OVERNIGHT_STATUS.md`
 - **Suricata agreement comparator:** improved matching for recognized TCP scan families, and tests/documentation clarify that Suricata is a comparison baseline, not ground truth.
 - **Regression coverage:** added/updated tests for the above rules, DNS/ARP behavior, PCAP parsing, TCP zero-window, UDP flood and agreement matching.
 
-### Current rule inventory (22 registered under evidence-driven governance)
+### Current rule inventory (23 registered under evidence-driven governance)
 
-`BLOCKLIST`, `TCP_FLAG_ANOMALY`, `PORT_SCAN`, `UDP_SCAN`, `UDP_FLOOD`, `TCP_STEALTH_SCAN`, `SYN_FLOOD`, `DISTRIBUTED_SYN_FLOOD`, `ICMP_SWEEP`, `ICMP_FLOOD`, `ARP_SPOOF`, `PAYLOAD_HIT`, `DNS_ANOMALY`, `BRUTE_FORCE`, `SLOW_PORT_SCAN`, `DATA_EXFIL`, `TLS_ANOMALY`, `CLEAR_HTTP_ON_TLS_PORT`, `TCP_ZERO_WINDOW`, `NON_DNS_TRAFFIC_ON_DNS_PORT`, `ICMP_TUNNEL`, and `IP_FRAGMENT_ANOMALY`.
+`BLOCKLIST`, `TCP_FLAG_ANOMALY`, `PORT_SCAN`, `UDP_SCAN`, `UDP_FLOOD`, `TCP_STEALTH_SCAN`, `SYN_FLOOD`, `DISTRIBUTED_SYN_FLOOD`, `ICMP_SWEEP`, `ICMP_FLOOD`, `ARP_SPOOF`, `PAYLOAD_HIT`, `DNS_ANOMALY`, `BRUTE_FORCE`, `SLOW_PORT_SCAN`, `DATA_EXFIL`, `TLS_ANOMALY`, `CLEAR_HTTP_ON_TLS_PORT`, `TCP_ZERO_WINDOW`, `NON_DNS_TRAFFIC_ON_DNS_PORT`, `ICMP_TUNNEL`, `IP_FRAGMENT_ANOMALY`, and `IRC_C2_BEACONING`.
 
 Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_project/config.py` before changing thresholds. Do not assume a rule name corresponds to one detection signature: `PAYLOAD_HIT` contains multiple signatures, and `DNS_ANOMALY` covers several DNS heuristics.
 

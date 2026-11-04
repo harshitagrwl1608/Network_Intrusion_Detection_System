@@ -288,4 +288,4 @@ This registry records all external network traffic datasets acquired, verified, 
 | **Total NetGuard Allocation** | $\approx 0.19$ GiB | $\le 450$ GiB | **PASS** |
 | **Independent Publishers** | 6 (Stratosphere CTU, Wireshark, Nozomi Networks, Fox-IT, m-rau5, OISF) | $\ge 2$ | **PASS** |
 | **Distinct Verified Captures** | 16 | Multi-scenario | **PASS** |
-| **Registered Detection Rules** | 22 | Distinct & Tested | **PASS** |
+| **Registered Detection Rules** | 23 | Distinct & Tested | **PASS** |
