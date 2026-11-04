@@ -12,8 +12,8 @@
 1. [30-Second Elevator Pitch](#1-the-30-second-elevator-pitch)
 2. [Slide-by-Slide Presentation Deck & Verbatim Script](#2-slide-by-slide-presentation-deck--verbatim-script)
 3. [Deep Architecture & Data Pipeline](#3-deep-architecture--data-pipeline)
-4. [The 19 Detection Rules: Complete Technical Inventory](#4-the-19-detection-rules-complete-technical-inventory)
-5. [The 17 Deep Packet Inspection (DPI) Signatures](#5-the-17-deep-packet-inspection-dpi-signatures)
+4. [The 21 Detection Rules: Complete Technical Inventory](#4-the-21-detection-rules-complete-technical-inventory)
+5. [The 18 Deep Packet Inspection (DPI) Signatures](#5-the-18-deep-packet-inspection-dpi-signatures)
 6. [Plain-Language SOC Aggregator & Dashboard UI](#6-plain-language-soc-aggregator--dashboard-ui)
 7. [Experimental Benchmarks & Validation](#7-experimental-benchmarks--validation)
 8. [Live Demonstration Playbook (Step-by-Step)](#8-live-demonstration-playbook-step-by-step)
@@ -25,7 +25,7 @@
 
 > *"Respected evaluators and professors: Enterprise Intrusion Detection Systems like Snort and Suricata are heavy, complex, and flood analysts with cryptic hex dumps and false positives. Small-to-medium organizations and junior analysts drown in raw data without understanding what is actually happening.*  
 >  
-> *To solve this, I designed and built **NetGuard IDS** from first principles in Python. NetGuard couples a dual-layer detection engine—19 stateful network and transport rules plus 17 application-layer Deep Packet Inspection signatures—with an intelligent aggregation layer that translates raw packet anomalies into plain-language executive narratives. Operating with zero external runtime dependencies, NetGuard achieves 100% precision and 100% recall across 37 benchmark attack scenarios, backed by a real-time reactive SOC dashboard."*
+> *To solve this, I designed and built **NetGuard IDS** from first principles in Python. NetGuard couples a dual-layer detection engine—21 stateful network and transport rules plus 18 application-layer Deep Packet Inspection signatures—with an intelligent aggregation layer that translates raw packet anomalies into plain-language executive narratives. Operating with zero external runtime dependencies, NetGuard achieves 100% precision and 100% recall across 38 benchmark attack scenarios, backed by 560 automated unit tests, 16 real-world PCAP evaluations, and a real-time reactive SOC dashboard."*
 
 ---
 
@@ -171,20 +171,21 @@
 ### Slide 8: Evaluation & Empirical Results
 * **Slide Title:** Performance Validation & Benchmarking
 * **On-Slide Content:**
-  * **Synthetic Benchmark Suite:** 37 distinct scenarios, 806 raw packets.
+  * **Synthetic Benchmark Suite:** 38 distinct scenarios, 1,163 attack packets + 832 benign packets.
   * **Results Summary:**
-    * Scenarios Tested: **37** | Detected: **37**
+    * Scenarios Tested: **38** | Detected: **38**
     * **Precision:** **100.0%**
     * **Recall:** **100.0%**
     * **F1-Score:** **100.0%**
     * **Benign False Positives:** **0** on clean baseline traffic
-  * **Unit & Integration Testing:** **251 / 251 test cases passing** across all modules.
-  * **Throughput & Efficiency:** Handles standard PCAP replay at wire speed without packet drops on standard commodity hardware.
+  * **Unit & Integration Testing:** **560 / 560 test cases passing** (plus 210 subtests) in 65s.
+  * **Real-World PCAP Corpus:** 16 verified captures across 6 publishers (~195.9 MB) with cross-engine corroboration against Suricata and Zeek.
+  * **Throughput & Efficiency:** Handles streaming PCAP replay at wire speed without packet drops under $O(1)$ LRU state bounding.
 * **Suggested Timing:** 1.5 minutes
 * **Verbatim Script to Speak:**
-  > "To validate NetGuard scientifically, we created a comprehensive synthetic evaluation suite comprising 37 distinct attack scenarios and 806 packets. The test suite evaluates port scans, distributed floods, stealth scans, DNS tunneling, ARP spoofing, and 17 web application exploits.
+  > "To validate NetGuard scientifically, we created a comprehensive synthetic evaluation suite comprising 38 distinct attack scenarios and 1,163 packets. The test suite evaluates port scans, distributed floods, stealth scans, DNS tunneling, ARP spoofing, ICMP covert channels, non-DNS port 53 shells, and 18 application exploits.
   >
-  > NetGuard achieved 100% precision, 100% recall, and zero false positives against our benign traffic baseline. Furthermore, our automated unit test suite contains 251 tests covering every rule, the aggregator, database locking, and dashboard API endpoints."
+  > NetGuard achieved 100% precision, 100% recall, and zero false positives against our benign traffic baseline. Furthermore, our automated unit test suite contains 560 tests covering every rule, the aggregator, database locking, and dashboard API endpoints, complemented by real-world validation against 16 multi-publisher PCAPs."
 
 ---
 
@@ -233,9 +234,10 @@
 * **Slide Title:** Summary & Key Takeaways
 * **On-Slide Content:**
   * Developed a fully functional, zero-external-dependency IDS in Python.
-  * 19 stateful network rules + 17 application-layer DPI signatures.
+  * 21 evidence-driven detection rules + 18 application-layer DPI signatures.
   * Automated plain-language narrative aggregator solving alert fatigue.
-  * 100% detection rate across 37 benchmark attack scenarios; 251 passing tests.
+  * 100% detection rate across 38 benchmark attack scenarios; 560 passing tests.
+  * Multi-publisher validation across 16 PCAPs with Suricata and Zeek corroboration.
   * Real-time SOC dashboard built with vanilla CSS/JS and Server-Sent Events.
 * **Suggested Timing:** 1 minute
 * **Verbatim Script to Speak:**
@@ -302,7 +304,7 @@
 
 ---
 
-## 4. The 19 Detection Rules: Complete Technical Inventory
+## 4. The 21 Detection Rules: Complete Technical Inventory
 
 | # | Rule Name | Category | Detection Logic & Trigger Threshold | Default Threshold | Severity | Plain-Language SOC Meaning |
 |---|---|---|---|---|---|---|
@@ -317,7 +319,7 @@
 | 9 | `ICMP_SWEEP` | Reconnaissance | Single source IP sends ICMP Echo Requests (pings) to $> N$ distinct destination hosts. | 12 hosts in 10s | `MEDIUM` | Network ping sweep actively mapping live hosts across the subnet. |
 | 10 | `ICMP_FLOOD` | Denial of Service | Source IP transmits excessive ICMP echo requests to a single destination. | 50 pkts in 5s | `HIGH` | Ping flood attempting bandwidth consumption or CPU starvation on target. |
 | 11 | `ARP_SPOOF` | L2 / MitM | Detects conflicting MAC addresses claiming ownership of an already bound IP address. | IP mapped to different MAC | `CRITICAL` | Man-in-the-Middle (MitM) ARP poisoning redirecting network traffic. |
-| 12 | `PAYLOAD_HIT` | Application DPI | Unencrypted payload matches one of 17 compiled regex signatures on ports 80, 8080, 21, 23, etc. | Regex Match | `HIGH` | Exploit payload detected targeting web server, database, or shell. |
+| 12 | `PAYLOAD_HIT` | Application DPI | Unencrypted payload matches one of 18 compiled regex signatures on ports 80, 8080, 21, 23, 1502, etc. | Regex Match | `HIGH` | Exploit payload detected targeting web server, database, shell, or ICS controller. |
 | 13 | `DNS_ANOMALY` | Covert Channels | Checks DNS query length ($>60$), query frequency ($>20$/min), or Shannon entropy ($>3.8$). | Entropy $> 3.8$ or Len $> 60$ | `HIGH` | High-entropy DNS tunneling or Domain Generation Algorithm (DGA) malware. |
 | 14 | `BRUTE_FORCE` | Credential Attack | Connection attempts to authentication ports (SSH: 22, RDP: 3389, FTP: 21, Telnet: 23) exceed threshold. | 20 attempts in 60s | `HIGH` | Automated password guessing attack against remote administrative services. |
 | 15 | `SLOW_PORT_SCAN` | Stealth Recon | Single source probes $> N$ distinct ports over an extended sliding window to bypass short thresholds. | 30 ports in 120s | `MEDIUM` | Low-and-slow reconnaissance deliberately timed to evade basic IDS filters. |
@@ -325,12 +327,14 @@
 | 17 | `TLS_ANOMALY` | Evasion / Malware | TLS ClientHello with missing/invalid SNI or mismatching protocol version indicators. | Malformed ClientHello | `MEDIUM` | Suspicious encrypted session lacking standard browser TLS characteristics. |
 | 18 | `CLEAR_HTTP_ON_TLS_PORT` | Misconfiguration | Plaintext HTTP requests (`GET`, `POST`) sent to port 443 instead of encrypted TLS handshake. | $\ge 2$ requests in 300s | `MEDIUM` | Security misconfiguration or malware abusing port 443 with plaintext protocol. |
 | 19 | `TCP_ZERO_WINDOW` | Denial of Service | Sender repeatedly advertises TCP window size of 0 (`win=0`), freezing connection buffers. | 20 pkts in 10s | `HIGH` | TCP zero-window resource starvation attack exhausting server worker threads. |
+| 20 | `NON_DNS_TRAFFIC_ON_DNS_PORT` | Evasion / C2 | Detects non-DNS protocols, interactive command shells (`cmd.exe`, `/bin/sh`), and unauthorized communications operating on port 53; RFC 1035 QNAME validation prevents header evasion. | Instant Trigger | `CRITICAL` | Interactive command shell or non-DNS protocol abusing port 53 for firewall bypass. |
+| 21 | `ICMP_TUNNEL` | Covert Channels | Detects covert tunneling channels, reverse shells (`icmpsh`), Base64 exfiltration chunks, and embedded PE/ELF executables within oversized high-entropy ICMP Echo packets. | Len $\ge 64$B & Entropy $\ge 4.5$ | `HIGH` | Covert data exfiltration or reverse shell tunnel operating over ICMP echo requests/replies. |
 
 ---
 
-## 5. The 17 Deep Packet Inspection (DPI) Signatures
+## 5. The 18 Deep Packet Inspection (DPI) Signatures
 
-Inspected over unencrypted L7 application protocols (HTTP, FTP, Telnet, SMTP):
+Inspected over unencrypted L7 application protocols (HTTP, FTP, Telnet, SMTP, TriStation):
 
 1. **`SQL_INJECTION`**: Detects SQL injection statements (`UNION SELECT`, `OR 1=1`, `DROP TABLE`, `SLEEP()`, `WAITFOR DELAY`, `--`).
 2. **`XSS`**: Detects Cross-Site Scripting tags and vectors (`<script>`, `javascript:`, `onerror=`, `onload=`, `document.cookie`).
@@ -349,6 +353,7 @@ Inspected over unencrypted L7 application protocols (HTTP, FTP, Telnet, SMTP):
 15. **`REVERSE_SHELL_CRADLE`**: Flags outbound payload download cradles (`curl ... | sh`, `wget ... | bash`, `powershell -enc`).
 16. **`HTTP_METHOD_TAMPERING`**: Detects unauthorized administrative HTTP verbs (`TRACE`, `TRACK`, `DEBUG`, `PROPFIND`).
 17. **`WEBSHELL_INJECTION`**: Flags PHP/JSP backdoor code injection (`<?php eval($_POST[...])`, `Runtime.getRuntime().exec()`).
+18. **`ICS_TRISTATION_EXPLOIT`**: Industrial Control Systems (ICS) / SCADA Schneider Electric Triconex TriStation 1131 program injection on UDP port 1502 (TRITON / TRISIS malware mitigation).
 
 ---
 
