@@ -1,0 +1,24 @@
+{
+  "name": "netguard-workbench",
+  "displayName": "NetGuard Engineering Workbench",
+  "version": "1.0.0",
+  "description": "Comprehensive engineering environment for NetGuard IDS: PCAP forensics, rule verification, Suricata differential testing, and lifecycle safeguards.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Run PCAP forensics and extract flow metadata for sample capture",
+    "Perform Suricata differential validation on detection alerts",
+    "Audit rule engine state bounding and run regression test suite"
+  ],
+  "author": {
+    "name": "NetGuard IDS Engineering Team"
+  },
+  "keywords": [
+    "netguard",
+    "ids",
+    "pcap",
+    "suricata",
+    "zeek",
+    "network-security"
+  ],
+  "license": "MIT"
+}
