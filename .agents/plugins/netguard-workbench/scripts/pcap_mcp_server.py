@@ -9,6 +9,12 @@ Provides dedicated JSON-RPC 2.0 stdio MCP interface for packet capture inspectio
 - dns_inventory
 - suricata_eve_summary
 - dataset_hash_verify
+
+Hardened for security:
+- Strict path resolution and traversal prevention (os.path.realpath).
+- Bounds checking and file size limits (100 MB max).
+- Safe error handling for truncated and malformed captures.
+- Strictly read-only file operations.
 """
 
 import hashlib
@@ -16,12 +22,29 @@ import json
 import math
 import os
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 
 try:
-    from scapy.all import rdpcap, IP, IPv6, TCP, UDP, ICMP, ARP, DNS, DNSQR, Raw
+    from scapy.all import rdpcap, IP, IPv6, TCP, UDP, ICMP, ARP, DNS
 except ImportError:
     rdpcap = None
+
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+PLUGIN_DIR = os.path.abspath(os.path.join(SCRIPTS_DIR, ".."))
+
+
+def find_workspace_root():
+    d = PLUGIN_DIR
+    while d and d != os.path.dirname(d):
+        if os.path.exists(os.path.join(d, ".git")):
+            return d
+        d = os.path.dirname(d)
+    return PLUGIN_DIR
+
+
+WORKSPACE_ROOT = find_workspace_root()
+MAX_PCAP_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB limit
+MAX_TEXT_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB limit for logs/hashes
 
 
 def calc_shannon_entropy(s: str) -> float:
@@ -32,17 +55,70 @@ def calc_shannon_entropy(s: str) -> float:
     return -sum((cnt / length) * math.log2(cnt / length) for cnt in freq.values())
 
 
+def validate_and_resolve_path(raw_path: str, max_size_bytes: int = MAX_PCAP_SIZE_BYTES) -> tuple[str | None, str | None]:
+    """
+    Validates, resolves, and checks security boundaries for input file paths.
+    Resolves paths relative to CWD and WORKSPACE_ROOT.
+    Guarantees no traversal outside approved roots.
+    """
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None, "File path must be a non-empty string."
+
+    candidate = os.path.expanduser(raw_path.strip())
+
+    # Resolve candidate
+    if not os.path.isabs(candidate):
+        if os.path.isfile(candidate):
+            resolved = os.path.abspath(candidate)
+        else:
+            cand_ws = os.path.join(WORKSPACE_ROOT, candidate)
+            if os.path.isfile(cand_ws):
+                resolved = os.path.abspath(cand_ws)
+            else:
+                return None, f"File not found: {raw_path}"
+    else:
+        if not os.path.isfile(candidate):
+            return None, f"File not found: {raw_path}"
+        resolved = os.path.abspath(candidate)
+
+    # Realpath to resolve symlinks and canonicalize
+    real_path = os.path.realpath(resolved)
+
+    # Restrict to workspace root, /tmp, or /var/tmp
+    allowed_roots = [
+        os.path.realpath(WORKSPACE_ROOT),
+        "/tmp",
+        "/var/tmp"
+    ]
+    if not any(real_path == ar or real_path.startswith(ar + os.sep) for ar in allowed_roots):
+        return None, f"Access denied: path '{raw_path}' resolves outside allowed workspace boundaries."
+
+    # Size check
+    try:
+        sz = os.path.getsize(real_path)
+        if sz > max_size_bytes:
+            return None, f"File size ({sz} bytes) exceeds maximum permitted limit ({max_size_bytes} bytes)."
+    except OSError as e:
+        return None, f"Cannot access file: {e}"
+
+    return real_path, None
+
+
 # Tool implementations
 def tool_pcap_metadata(pcap_path: str):
-    if not os.path.isfile(pcap_path):
-        return {"error": f"File not found: {pcap_path}"}
+    real_path, err = validate_and_resolve_path(pcap_path, MAX_PCAP_SIZE_BYTES)
+    if err:
+        return {"error": err}
     if rdpcap is None:
         return {"error": "Scapy library not installed."}
 
-    file_size = os.path.getsize(pcap_path)
-    packets = rdpcap(pcap_path)
-    total_packets = len(packets)
+    file_size = os.path.getsize(real_path)
+    try:
+        packets = rdpcap(real_path)
+    except Exception as e:
+        return {"error": f"Failed to parse PCAP file: {e}"}
 
+    total_packets = len(packets)
     timestamps = [float(p.time) for p in packets if hasattr(p, "time")]
     if timestamps:
         start_ts = min(timestamps)
@@ -52,7 +128,7 @@ def tool_pcap_metadata(pcap_path: str):
         start_ts, end_ts, duration = 0.0, 0.0, 0.0
 
     return {
-        "pcap_path": os.path.abspath(pcap_path),
+        "pcap_path": real_path,
         "file_size_bytes": file_size,
         "total_packets": total_packets,
         "first_timestamp": start_ts,
@@ -62,12 +138,17 @@ def tool_pcap_metadata(pcap_path: str):
 
 
 def tool_protocol_distribution(pcap_path: str):
-    if not os.path.isfile(pcap_path):
-        return {"error": f"File not found: {pcap_path}"}
+    real_path, err = validate_and_resolve_path(pcap_path, MAX_PCAP_SIZE_BYTES)
+    if err:
+        return {"error": err}
     if rdpcap is None:
         return {"error": "Scapy library not installed."}
 
-    packets = rdpcap(pcap_path)
+    try:
+        packets = rdpcap(real_path)
+    except Exception as e:
+        return {"error": f"Failed to parse PCAP file: {e}"}
+
     proto_counts = Counter()
 
     for p in packets:
@@ -95,18 +176,30 @@ def tool_protocol_distribution(pcap_path: str):
             proto_counts["NON_IP"] += 1
 
     return {
+        "pcap_path": real_path,
         "total_packets": len(packets),
         "protocol_breakdown": dict(proto_counts)
     }
 
 
 def tool_flow_summary(pcap_path: str, top_n: int = 10):
-    if not os.path.isfile(pcap_path):
-        return {"error": f"File not found: {pcap_path}"}
+    real_path, err = validate_and_resolve_path(pcap_path, MAX_PCAP_SIZE_BYTES)
+    if err:
+        return {"error": err}
     if rdpcap is None:
         return {"error": "Scapy library not installed."}
 
-    packets = rdpcap(pcap_path)
+    # Validate top_n
+    try:
+        top_n = max(1, min(int(top_n), 100))
+    except (ValueError, TypeError):
+        top_n = 10
+
+    try:
+        packets = rdpcap(real_path)
+    except Exception as e:
+        return {"error": f"Failed to parse PCAP file: {e}"}
+
     flows = Counter()
     talkers = Counter()
 
@@ -125,6 +218,7 @@ def tool_flow_summary(pcap_path: str, top_n: int = 10):
         flows[flow_key] += 1
 
     return {
+        "pcap_path": real_path,
         "total_unique_flows": len(flows),
         "top_talkers": talkers.most_common(top_n),
         "top_flows": [{"flow": k, "packet_count": v} for k, v in flows.most_common(top_n)]
@@ -132,12 +226,17 @@ def tool_flow_summary(pcap_path: str, top_n: int = 10):
 
 
 def tool_tcp_flags(pcap_path: str):
-    if not os.path.isfile(pcap_path):
-        return {"error": f"File not found: {pcap_path}"}
+    real_path, err = validate_and_resolve_path(pcap_path, MAX_PCAP_SIZE_BYTES)
+    if err:
+        return {"error": err}
     if rdpcap is None:
         return {"error": "Scapy library not installed."}
 
-    packets = rdpcap(pcap_path)
+    try:
+        packets = rdpcap(real_path)
+    except Exception as e:
+        return {"error": f"Failed to parse PCAP file: {e}"}
+
     flag_counts = Counter()
     anomalies = []
 
@@ -163,20 +262,22 @@ def tool_tcp_flags(pcap_path: str):
                 flag_counts["RST"] += 1
 
             # Anomaly checks
+            src_ip = p[IP].src if IP in p else (p[IPv6].src if IPv6 in p else "unknown")
             if flags == 0:
                 flag_counts["ANOMALY_NULL"] += 1
                 if len(anomalies) < 10:
-                    anomalies.append(f"Packet #{idx}: NULL flags (0x00) from {p[IP].src}")
+                    anomalies.append(f"Packet #{idx}: NULL flags (0x00) from {src_ip}")
             elif is_syn and is_fin:
                 flag_counts["ANOMALY_SYN_FIN"] += 1
                 if len(anomalies) < 10:
-                    anomalies.append(f"Packet #{idx}: SYN+FIN flags from {p[IP].src}")
+                    anomalies.append(f"Packet #{idx}: SYN+FIN flags from {src_ip}")
             elif is_fin and is_psh and is_urg:
                 flag_counts["ANOMALY_XMAS"] += 1
                 if len(anomalies) < 10:
-                    anomalies.append(f"Packet #{idx}: XMAS scan flags (FIN+PSH+URG) from {p[IP].src}")
+                    anomalies.append(f"Packet #{idx}: XMAS scan flags (FIN+PSH+URG) from {src_ip}")
 
     return {
+        "pcap_path": real_path,
         "flag_distribution": dict(flag_counts),
         "anomalies_detected": anomalies,
         "total_anomalous_flags": sum(v for k, v in flag_counts.items() if k.startswith("ANOMALY_"))
@@ -184,19 +285,28 @@ def tool_tcp_flags(pcap_path: str):
 
 
 def tool_dns_inventory(pcap_path: str):
-    if not os.path.isfile(pcap_path):
-        return {"error": f"File not found: {pcap_path}"}
+    real_path, err = validate_and_resolve_path(pcap_path, MAX_PCAP_SIZE_BYTES)
+    if err:
+        return {"error": err}
     if rdpcap is None:
         return {"error": "Scapy library not installed."}
 
-    packets = rdpcap(pcap_path)
+    try:
+        packets = rdpcap(real_path)
+    except Exception as e:
+        return {"error": f"Failed to parse PCAP file: {e}"}
+
     queries = []
     domains = Counter()
 
     for p in packets:
         if DNS in p and p[DNS].qr == 0 and p[DNS].qd:
-            qname = p[DNS].qd.qname.decode("utf-8", errors="replace").rstrip(".")
-            qtype = p[DNS].qd.qtype
+            try:
+                qname = p[DNS].qd.qname.decode("utf-8", errors="replace").rstrip(".")
+                qtype = int(p[DNS].qd.qtype)
+            except Exception:
+                continue
+
             entropy = calc_shannon_entropy(qname)
             domains[qname] += 1
             queries.append({
@@ -208,6 +318,7 @@ def tool_dns_inventory(pcap_path: str):
             })
 
     return {
+        "pcap_path": real_path,
         "total_dns_queries": len(queries),
         "unique_domains": len(domains),
         "top_queried_domains": domains.most_common(10),
@@ -216,8 +327,9 @@ def tool_dns_inventory(pcap_path: str):
 
 
 def tool_suricata_eve_summary(eve_path: str):
-    if not os.path.isfile(eve_path):
-        return {"error": f"File not found: {eve_path}"}
+    real_path, err = validate_and_resolve_path(eve_path, MAX_TEXT_SIZE_BYTES)
+    if err:
+        return {"error": err}
 
     total_records = 0
     alert_count = 0
@@ -226,32 +338,35 @@ def tool_suricata_eve_summary(eve_path: str):
     top_src = Counter()
     top_dst = Counter()
 
-    with open(eve_path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            total_records += 1
-            try:
-                record = json.loads(line)
-            except Exception:
-                continue
+    try:
+        with open(real_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                total_records += 1
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
 
-            if record.get("event_type") == "alert":
-                alert_count += 1
-                alert_data = record.get("alert") or {}
-                sig = alert_data.get("signature", "Unknown")
-                cat = alert_data.get("category", "Uncategorized")
-                src = record.get("src_ip", "0.0.0.0")
-                dst = record.get("dest_ip") or record.get("dst_ip", "0.0.0.0")
+                if record.get("event_type") == "alert":
+                    alert_count += 1
+                    alert_data = record.get("alert") or {}
+                    sig = alert_data.get("signature", "Unknown")
+                    cat = alert_data.get("category", "Uncategorized")
+                    src = record.get("src_ip", "0.0.0.0")
+                    dst = record.get("dest_ip") or record.get("dst_ip", "0.0.0.0")
 
-                signatures[sig] += 1
-                categories[cat] += 1
-                top_src[src] += 1
-                top_dst[dst] += 1
+                    signatures[sig] += 1
+                    categories[cat] += 1
+                    top_src[src] += 1
+                    top_dst[dst] += 1
+    except Exception as e:
+        return {"error": f"Failed reading EVE log: {e}"}
 
     return {
-        "eve_path": os.path.abspath(eve_path),
+        "eve_path": real_path,
         "total_eve_records": total_records,
         "total_alerts": alert_count,
         "top_signatures": signatures.most_common(10),
@@ -262,24 +377,28 @@ def tool_suricata_eve_summary(eve_path: str):
 
 
 def tool_dataset_hash_verify(file_path: str, expected_sha256: str = None):
-    if not os.path.isfile(file_path):
-        return {"error": f"File not found: {file_path}"}
+    real_path, err = validate_and_resolve_path(file_path, MAX_TEXT_SIZE_BYTES)
+    if err:
+        return {"error": err}
 
     sha256_h = hashlib.sha256()
     md5_h = hashlib.md5()
     size = 0
 
-    with open(file_path, "rb") as f:
-        while chunk := f.read(65536):
-            size += len(chunk)
-            sha256_h.update(chunk)
-            md5_h.update(chunk)
+    try:
+        with open(real_path, "rb") as f:
+            while chunk := f.read(65536):
+                size += len(chunk)
+                sha256_h.update(chunk)
+                md5_h.update(chunk)
+    except Exception as e:
+        return {"error": f"Failed hashing file: {e}"}
 
     computed_sha256 = sha256_h.hexdigest()
     computed_md5 = md5_h.hexdigest()
 
     result = {
-        "file_path": os.path.abspath(file_path),
+        "file_path": real_path,
         "file_size_bytes": size,
         "sha256": computed_sha256,
         "md5": computed_md5
@@ -392,7 +511,7 @@ def handle_request(req):
                 },
                 "serverInfo": {
                     "name": "netguard-pcap-mcp",
-                    "version": "1.0.0"
+                    "version": "1.1.0"
                 }
             }
         }
