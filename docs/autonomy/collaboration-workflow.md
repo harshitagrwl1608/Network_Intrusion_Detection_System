@@ -62,3 +62,4 @@ When communicating across agent boundaries:
   2. `evidence`: Concrete file paths, packet numbers, timestamps, or test outputs.
   3. `invariants_checked`: Explicit confirmation that the 19-rule invariant and Git branch discipline were respected.
   4. `verdict`: `PASS`, `FAIL`, or `REQUIRES_REVISION`.
+

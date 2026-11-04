@@ -683,14 +683,17 @@ class UdpFloodRule:
     rule_version = "1.10"
     ALERT_COOLDOWN_S: float = 60.0
     _EXEMPT_SRC_PORTS: set[int] = {53, 67, 68, 123, 5353}
+    _CORE_SERVICE_PORTS: set[int] = {53, 67, 68, 123, 5353}
 
     def __init__(self, threshold: int = 50, window: int = 5,
                  max_flows: int = 4096, cooldown: float = 60.0,
-                 web_threshold: int = 500):
+                 web_threshold: int = 500, service_threshold: int = 250):
         self.threshold = _positive_setting(
             threshold, 50, "UDP_FLOOD_THRESHOLD")
         self.web_threshold = max(self.threshold, _positive_setting(
             web_threshold, 500, "UDP_FLOOD_WEB_THRESHOLD"))
+        self.service_threshold = max(self.threshold, _positive_setting(
+            service_threshold, 250, "UDP_FLOOD_SERVICE_THRESHOLD"))
         self.window = _positive_setting(window, 5, "UDP_FLOOD_WINDOW")
         self.max_flows = _positive_setting(max_flows, 4096, "UDP_FLOOD_MAX_FLOWS")
         self.cooldown = _nonnegative_float_setting(
@@ -742,9 +745,12 @@ class UdpFloodRule:
             return None
         if src_port is not None and not (1 <= src_port <= 65535):
             return None
-        effective_threshold = (
-            self.web_threshold if (src_port == 443 or dst_port == 443) else self.threshold
-        )
+        if src_port == 443 or dst_port == 443:
+            effective_threshold = self.web_threshold
+        elif dst_port in self._CORE_SERVICE_PORTS:
+            effective_threshold = self.service_threshold
+        else:
+            effective_threshold = self.threshold
 
         now = _finite_record_timestamp(record)
         if now is None:
@@ -2986,6 +2992,22 @@ class DnsRule:
             return ".".join(labels[-3:])
         return ".".join(labels[-2:]) if len(labels) >= 2 else domain
 
+    @staticmethod
+    def _is_valid_reverse_mapping(domain_lower: str) -> bool:
+        """Validate that reverse mapping queries conform to RFC 1035 / RFC 3596 reverse PTR syntax.
+
+        Prevents adversaries from tunneling alphanumeric exfiltration payloads under .in-addr.arpa or .ip6.arpa.
+        """
+        if domain_lower.endswith(".in-addr.arpa"):
+            prefix = domain_lower[:-len(".in-addr.arpa")].strip(".")
+            labels = [l for l in prefix.split(".") if l]
+            return bool(labels) and all(label.isdigit() and 0 <= int(label) <= 255 for label in labels)
+        elif domain_lower.endswith(".ip6.arpa"):
+            prefix = domain_lower[:-len(".ip6.arpa")].strip(".")
+            labels = [l for l in prefix.split(".") if l]
+            return bool(labels) and all(len(label) == 1 and label in "0123456789abcdef" for label in labels)
+        return False
+
     def _prune_seen(self, now: float):
         cutoff = now - 120
         for key, seen_at in list(self._seen.items()):
@@ -3124,10 +3146,15 @@ class DnsRule:
         # reached, larger exact counts do not change the detection decision.
         # This bounds a single hot domain even when queries arrive at line rate.
         # A disabled frequency rule must not allocate or retain per-domain state.
+        # Reverse DNS lookup infrastructure zones (RFC 1035 / RFC 3596) map IP addresses
+        # to PTR records; diverse queries under in-addr.arpa or ip6.arpa are standard reverse
+        # lookups, not repeated beaconing or exfiltration under an attacker-controlled domain.
+        # Strict syntax validation prevents covert exfiltration tunneled under .arpa.
+        is_reverse_mapping = self._is_valid_reverse_mapping(dl)
         query_count = 0
         freq_window_start = None
         query_count_saturated = False
-        if has_valid_time and self._freq_threshold > 0:
+        if has_valid_time and self._freq_threshold > 0 and not is_reverse_mapping:
             query_identity = None
             try:
                 dns_id = int(record["dns_id"])
@@ -3187,7 +3214,7 @@ class DnsRule:
         subdomain_count = 0
         subdomain_count_saturated = False
         subdomain_window_start = None
-        if has_valid_time and self._subdomain_threshold > 0:
+        if has_valid_time and self._subdomain_threshold > 0 and not is_reverse_mapping:
             with self._lock:
                 sdkey = (src, parent)
                 if sdkey not in self._subdomain_freq and len(self._subdomain_freq) >= self._max_frequency_keys:

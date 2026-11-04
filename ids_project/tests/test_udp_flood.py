@@ -190,6 +190,68 @@ class TestUdpFloodRule(unittest.TestCase):
             res = rule.check(self._pkt("192.168.1.150", "192.168.1.1", src_port=5353, dst_port=5060, ts=100.0 + i * 0.1))
             self.assertIsNone(res, "Source port 5353 (mDNS) must be exempt from UDP flood detection")
 
+    def test_dns_client_queries_dst_port_53_exempt(self):
+        """Outbound DNS query bursts targeting dst_port 53 must be exempt from UDP flood."""
+        rule = UdpFloodRule(threshold=50, window=5)
+        alerts = []
+        for i in range(60):
+            alert = rule.check(self._pkt(
+                "192.168.1.100", "8.8.8.8",
+                src_port=50000 + i, dst_port=53,
+                ts=100.0 + i * 0.02
+            ))
+            if alert:
+                alerts.append(alert)
+
+        self.assertEqual(alerts, [], "Outbound DNS queries to port 53 must not trigger UDP_FLOOD")
+
+    def test_mdns_client_queries_dst_port_5353_exempt(self):
+        """Outbound mDNS query bursts targeting dst_port 5353 must be exempt from UDP flood."""
+        rule = UdpFloodRule(threshold=50, window=5)
+        alerts = []
+        for i in range(60):
+            alert = rule.check(self._pkt(
+                "192.168.1.100", "192.168.1.1",
+                src_port=50000 + i, dst_port=5353,
+                ts=100.0 + i * 0.02
+            ))
+            if alert:
+                alerts.append(alert)
+
+        self.assertEqual(alerts, [], "Outbound mDNS queries to port 5353 must not trigger UDP_FLOOD")
+
+    def test_ntp_and_dhcp_client_dst_ports_exempt(self):
+        """Outbound NTP (port 123) and DHCP server (port 67) queries must be exempt from UDP flood."""
+        rule = UdpFloodRule(threshold=50, window=5)
+        for port in (123, 67):
+            with self.subTest(dst_port=port):
+                alerts = []
+                for i in range(60):
+                    alert = rule.check(self._pkt(
+                        "192.168.1.100", "192.168.1.1",
+                        src_port=50000 + i, dst_port=port,
+                        ts=100.0 + i * 0.02
+                    ))
+                    if alert:
+                        alerts.append(alert)
+                self.assertEqual(alerts, [], f"Outbound UDP queries to dst_port {port} must not trigger UDP_FLOOD")
+
+    def test_massive_dns_query_flood_triggers_alert(self):
+        """Massive volumetric query flood to port 53 exceeding service_threshold must alert."""
+        rule = UdpFloodRule(threshold=50, service_threshold=250, window=5)
+        alert = None
+        for i in range(260):
+            res = rule.check(self._pkt(
+                "192.168.1.100", "8.8.8.8",
+                src_port=50000 + i, dst_port=53,
+                ts=100.0 + i * 0.01
+            ))
+            if res:
+                alert = res
+
+        self.assertIsNotNone(alert, "Volumetric DNS query flood exceeding service threshold must alert")
+        self.assertEqual(alert["evidence"]["threshold"], 250)
+
 
 if __name__ == "__main__":
     unittest.main()

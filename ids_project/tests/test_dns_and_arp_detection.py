@@ -679,6 +679,88 @@ class TestDnsAndArpDetection(unittest.TestCase):
         # Prune without explicit now (defaults to time.time())
         rule.prune_stale()
 
+    def test_reverse_dns_ptr_queries_do_not_trigger_false_exfil_or_freq(self):
+        """Standard IPv4/IPv6 reverse PTR queries must not alert as DNS_EXFIL or DNS_FREQ."""
+        rule = DnsRule()
+        alerts = []
+        # Send 25 distinct reverse DNS lookups in 60 seconds
+        for i in range(25):
+            rec = {
+                "type": "IP",
+                "src_ip": "192.168.1.50",
+                "dst_ip": "192.168.1.1",
+                "dst_port": 53,
+                "dns_query": f"{i}.1.168.192.in-addr.arpa",
+                "timestamp": 1000.0 + i,
+            }
+            alert = rule.check(rec)
+            if alert:
+                alerts.append(alert)
+
+        self.assertEqual(len(alerts), 0, f"Expected 0 alerts on reverse DNS lookups, got: {alerts}")
+
+        # In contrast, 25 distinct subdomains under an attacker domain MUST trigger DNS_EXFIL
+        exfil_alerts = []
+        for i in range(25):
+            rec = {
+                "type": "IP",
+                "src_ip": "192.168.1.50",
+                "dst_ip": "192.168.1.1",
+                "dst_port": 53,
+                "dns_query": f"chunk{i}.attacker-domain.com",
+                "timestamp": 1000.0 + i,
+            }
+            alert = rule.check(rec)
+            if alert:
+                exfil_alerts.append(alert)
+
+        self.assertGreaterEqual(len(exfil_alerts), 1, "Exfiltration to attacker-domain.com must alert")
+        self.assertIn("attacker-domain.com", exfil_alerts[0]["detail"])
+
+    def test_reverse_dns_ipv6_ip6_arpa_exemption_from_subdomain_exfil(self):
+        """IPv6 PTR lookups (*.ip6.arpa) must not trigger DNS_EXFIL or accumulate state in _subdomain_freq."""
+        rule = DnsRule(subdomain_threshold=20, subdomain_window=60)
+        alerts = []
+        for i in range(25):
+            rec = {
+                "type": "IP",
+                "protocol": "UDP",
+                "src_ip": "192.168.1.50",
+                "dst_ip": "8.8.8.8",
+                "src_port": 50000,
+                "dst_port": 53,
+                "dns_query": f"{i % 16:x}.{i // 16:x}.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa",
+                "timestamp": 1000.0 + i * 0.1,
+            }
+            alert = rule.check(rec)
+            if alert:
+                alerts.append(alert)
+
+        self.assertEqual(len(alerts), 0, f"Expected 0 alerts for ip6.arpa reverse DNS, got: {alerts}")
+        self.assertEqual(len(rule._subdomain_freq), 0, "Reverse DNS lookups must not accumulate state in _subdomain_freq")
+
+    def test_covert_tunneling_under_in_addr_arpa_triggers_exfil(self):
+        """Covert exfiltration tunneling alphanumeric data under in-addr.arpa must alert as DNS_EXFIL."""
+        rule = DnsRule(subdomain_threshold=20, subdomain_window=60)
+        alerts = []
+        for i in range(25):
+            rec = {
+                "type": "IP",
+                "protocol": "UDP",
+                "src_ip": "192.168.1.50",
+                "dst_ip": "8.8.8.8",
+                "src_port": 50000,
+                "dst_port": 53,
+                "dns_query": f"covertchunk{i:02d}.tunnel.in-addr.arpa",
+                "timestamp": 1000.0 + i * 0.1,
+            }
+            alert = rule.check(rec)
+            if alert:
+                alerts.append(alert)
+
+        self.assertGreaterEqual(len(alerts), 1, "Exfiltration masquerading under in-addr.arpa must alert")
+        self.assertEqual(alerts[0]["evidence"]["sub_type"], "DNS_EXFIL")
+
 
 if __name__ == "__main__":
     unittest.main()
