@@ -122,6 +122,26 @@ class TestIcmpTunnelRule(unittest.TestCase):
         self.assertEqual(alert["evidence"]["anomaly_type"], "HIGH_ENTROPY_TUNNEL")
         self.assertGreaterEqual(alert["evidence"]["entropy"], 4.5)
 
+    def test_detects_covert_base64_icmp_tunnel_chunk(self):
+        """Detects 100-byte high-entropy Base64 data exfiltration chunk in ICMP Echo (m_rau5)."""
+        rule = IcmpTunnelRule()  # uses default min_bytes=64
+        payload = b"PMpjoOZnR8KJ5txLR60yUY0q8G1WoN8HroObMEttyHPM6DT7HvLTZQw9UyxC3QE5RMMq2vyhinGtrDumiGpVGmC57QKxV1iOe234"
+        record = {
+            "type": "IP",
+            "protocol": "ICMP",
+            "icmp_type": 8,
+            "icmp_code": 0,
+            "src_ip": "192.168.0.35",
+            "dst_ip": "192.168.1.1",
+            "payload": payload,
+            "timestamp": 4100.0,
+        }
+        alert = rule.check(record)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["rule_name"], "ICMP_TUNNEL")
+        self.assertEqual(alert["evidence"]["anomaly_type"], "HIGH_ENTROPY_TUNNEL")
+        self.assertGreaterEqual(alert["evidence"]["entropy"], 4.5)
+
     def test_detects_ipv6_icmpv6_tunnel(self):
         """Detects covert tunnel transported over ICMPv6 Echo Request (type 128)."""
         payload = b"root@victim:/# cat /etc/shadow\n"

@@ -389,6 +389,59 @@ def get_candidate_queue() -> list[dict]:
             "ground_truth": "CTU-IoT-Malware-Capture-20-1 authentic Torii execution",
             "compression": None,
         },
+        {
+            "id": "m_rau5_icmp_tunnel",
+            "name": "Covert ICMP Base64 Exfiltration Tunnel",
+            "publisher": "m-rau5 Security Research",
+            "url": "https://raw.githubusercontent.com/m-rau5/cover-channel-analyzer/main/test_data/mock_covert_channels.pcap",
+            "type": "pcap",
+            "size_est_bytes": 1956,
+            "category": "Covert ICMP Tunneling",
+            "attack_type": "Base64 exfiltration payload chunks in ICMP Echo requests",
+            "target_rules": ["ICMP_TUNNEL", "DATA_EXFIL"],
+            "ground_truth": "128-byte base64 chunks carried in ICMP Echo requests (Type 8 Code 0)",
+            "compression": None,
+        },
+        {
+            "id": "foxit_log4shell",
+            "name": "Fox-IT Log4Shell JNDI RCE Exploit",
+            "publisher": "Fox-IT / NCC Group",
+            "url": "https://raw.githubusercontent.com/fox-it/log4shell-pcaps/main/log4shell-ldap-pcaps/ldap-uri-params-ev0.pcap",
+            "type": "pcap",
+            "size_est_bytes": 56278,
+            "category": "Web Exploit Payloads",
+            "attack_type": "Log4Shell CVE-2021-44228 JNDI LDAP lookup & bytecode delivery",
+            "target_rules": ["PAYLOAD_HIT"],
+            "ground_truth": "HTTP GET with nested obfuscated JNDI LDAP lookup in query param",
+            "compression": None,
+        },
+        {
+            "id": "oisf_tls_sni_anomaly",
+            "name": "OISF Suricata TLS SNI Enforcement",
+            "publisher": "Open Information Security Foundation (OISF)",
+            "url": "https://raw.githubusercontent.com/OISF/suricata-verify/master/tests/firewall/ruletype-firewall-160-tls-sni-firewall-enforcement/input.pcap",
+            "type": "pcap",
+            "size_est_bytes": 3596,
+            "category": "TLS SNI Anomaly",
+            "attack_type": "Non-standard TLS ClientHello SNI anomalies & omissions",
+            "target_rules": ["TLS_ANOMALY"],
+            "ground_truth": "Differential ClientHello with unauthorized SNI and omitted SNI extensions",
+            "compression": None,
+        },
+        {
+            "id": "ws_nmap_stealth_scan",
+            "name": "Wireshark Nmap Stealth & OS Scan",
+            "publisher": "Wireshark Foundation",
+            "url": "https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/NMap-Captures.zip",
+            "type": "zip",
+            "size_est_bytes": 114641,
+            "category": "TCP Stealth Scan",
+            "attack_type": "Nmap NULL, XMAS, and illegal TCP flag combinations",
+            "target_rules": ["TCP_STEALTH_SCAN", "TCP_FLAG_ANOMALY"],
+            "ground_truth": "RFC 793 illegal flag combinations (0x0000 NULL, 0x0029 XMAS, 0x002b)",
+            "compression": "zip",
+            "archive_member": "nmap_OS_scan_succesful",
+        },
     ]
 
 
@@ -510,6 +563,22 @@ class PipelineCoordinator:
             with gzip.open(incoming_path, "rb") as f_in, open(tmp_decomp, "wb") as f_out:
                 shutil.copyfileobj(f_in, f_out, length=64 * 1024)
             os.replace(tmp_decomp, verified_pcap)
+        elif candidate.get("compression") == "zip":
+            logger.info(f"[{cid}] Extracting ZIP archive safely...")
+            import zipfile
+            tmp_decomp = incoming_path + ".decomp"
+            with zipfile.ZipFile(incoming_path, "r") as z:
+                target_member = candidate.get("archive_member")
+                if not target_member:
+                    members = [m for m in z.namelist() if not m.endswith("/")]
+                    target_member = members[0] if members else None
+                if target_member:
+                    with z.open(target_member) as f_in, open(tmp_decomp, "wb") as f_out:
+                        shutil.copyfileobj(f_in, f_out, length=64 * 1024)
+                    os.replace(tmp_decomp, verified_pcap)
+                else:
+                    logger.error(f"[{cid}] ZIP member not found: {target_member}")
+                    return
         else:
             # Atomic promote
             os.replace(incoming_path, verified_pcap)

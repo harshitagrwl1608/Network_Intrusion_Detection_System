@@ -178,6 +178,6 @@ NON_DNS_ON_DNS_PORT_COOLDOWN_S = _detection_float("NON_DNS_ON_DNS_PORT_COOLDOWN_
 
 # --- ICMP Covert Tunnel & Shell Detection (IcmpTunnelRule) ---
 ICMP_TUNNEL_ENTROPY_THRESHOLD  = _detection_float("ICMP_TUNNEL_ENTROPY_THRESHOLD", 4.5)
-ICMP_TUNNEL_MIN_BYTES          = _detection_int("ICMP_TUNNEL_MIN_BYTES", 128)
+ICMP_TUNNEL_MIN_BYTES          = _detection_int("ICMP_TUNNEL_MIN_BYTES", 64)
 ICMP_TUNNEL_COOLDOWN_S         = _detection_float("ICMP_TUNNEL_COOLDOWN_S", 60.0)
 

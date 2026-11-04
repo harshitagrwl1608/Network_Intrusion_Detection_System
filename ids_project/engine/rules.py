@@ -5642,13 +5642,13 @@ class IcmpTunnelRule:
         b"C:\\WINDOWS",
     )
 
-    def __init__(self, entropy_threshold: float = 4.5, min_bytes: int = 128,
+    def __init__(self, entropy_threshold: float = 4.5, min_bytes: int = 64,
                  cooldown: float = 60.0, enabled: bool = True):
         self.entropy_threshold = _nonnegative_float_setting(
             entropy_threshold, 4.5, "ICMP_TUNNEL_ENTROPY_THRESHOLD"
         )
         self.min_bytes = _positive_setting(
-            min_bytes, 128, "ICMP_TUNNEL_MIN_BYTES"
+            min_bytes, 64, "ICMP_TUNNEL_MIN_BYTES"
         )
         self.cooldown = _nonnegative_float_setting(
             cooldown, 60.0, "ICMP_TUNNEL_COOLDOWN_S"
@@ -6088,7 +6088,7 @@ class RuleEngine:
             ),
             IcmpTunnelRule(
                 entropy_threshold=getattr(cfg, "ICMP_TUNNEL_ENTROPY_THRESHOLD", 4.5),
-                min_bytes=getattr(cfg, "ICMP_TUNNEL_MIN_BYTES", 128),
+                min_bytes=getattr(cfg, "ICMP_TUNNEL_MIN_BYTES", 64),
                 cooldown=getattr(cfg, "ICMP_TUNNEL_COOLDOWN_S", 60.0),
             ),
         ]
