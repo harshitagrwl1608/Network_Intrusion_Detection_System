@@ -228,6 +228,36 @@ class TestComparisonMatching(unittest.TestCase):
         self.assertEqual(_semantic_family(ng_dga), "dns_dga")
         self.assertEqual(_semantic_family(sur_dga), "dns_dga")
 
+        # UDP flood corroboration
+        ng_udp = {"rule_name": "UDP_FLOOD"}
+        sur_udp = {"signature": "ET DOS UDP Flood Inbound Possible DDoS"}
+        self.assertEqual(_semantic_family(ng_udp), "udp_flood")
+        self.assertEqual(_semantic_family(sur_udp), "udp_flood")
+
+        # Data exfiltration corroboration
+        ng_exfil = {"rule_name": "DATA_EXFIL"}
+        sur_exfil = {"signature": "ET POLICY Outbound Data Exfiltration Detected"}
+        self.assertEqual(_semantic_family(ng_exfil), "data_exfil")
+        self.assertEqual(_semantic_family(sur_exfil), "data_exfil")
+
+        # Non-DNS on port 53 corroboration
+        ng_nondns = {"rule_name": "NON_DNS_TRAFFIC_ON_DNS_PORT"}
+        sur_nondns = {"signature": "ET INFO Non-DNS traffic on DNS port 53"}
+        self.assertEqual(_semantic_family(ng_nondns), "non_dns_on_dns_port")
+        self.assertEqual(_semantic_family(sur_nondns), "non_dns_on_dns_port")
+
+        # Blocklist / Threat Intel corroboration
+        ng_bl = {"rule_name": "BLOCKLIST"}
+        sur_bl = {"signature": "ET DROP Spamhaus DROP Listed Traffic"}
+        self.assertEqual(_semantic_family(ng_bl), "blocklist_threat_intel")
+        self.assertEqual(_semantic_family(sur_bl), "blocklist_threat_intel")
+
+        # ARP spoofing corroboration
+        ng_arp = {"rule_name": "ARP_SPOOF"}
+        sur_arp = {"signature": "ET SCAN Suspicious ARP Spoofing Probe"}
+        self.assertEqual(_semantic_family(ng_arp), "arp_spoof")
+        self.assertEqual(_semantic_family(sur_arp), "arp_spoof")
+
     def test_icmp_port_none_and_zero_matching(self):
         # ICMP events with port None vs 0 should match because ICMP has no ports
         ng_icmp = {

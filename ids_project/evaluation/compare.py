@@ -274,14 +274,32 @@ def _semantic_family(event: dict) -> str | None:
     # Flood families (network packet rate / count anomalies)
     if rule in ("SYN_FLOOD", "DISTRIBUTED_SYN_FLOOD") or "syn flood" in signature:
         return "syn_flood"
+    if rule == "UDP_FLOOD" or "udp flood" in signature:
+        return "udp_flood"
     if rule == "ICMP_FLOOD" or "icmp flood" in signature or "echo flood" in signature:
         return "icmp_flood"
+    if rule == "ICMP_SWEEP" or "icmp sweep" in signature or "ping sweep" in signature:
+        return "icmp_sweep"
 
-    # ICMP Tunneling / Covert Data Exfiltration
+    # Covert Data Exfiltration & Tunneling
     if rule == "ICMP_TUNNEL" or (rule == "DATA_EXFIL" and (event.get("protocol") or "").strip().upper() == "ICMP"):
         return "icmp_tunnel"
     if "icmp tunnel" in signature or "suspicious icmp" in signature or "icmp payload" in signature:
         return "icmp_tunnel"
+    if rule == "DATA_EXFIL" or "data exfiltration" in signature or "exfiltration" in signature:
+        return "data_exfil"
+    if rule == "NON_DNS_TRAFFIC_ON_DNS_PORT" or ("dns" in signature and any(k in signature for k in ["non-dns", "shell", "not dns", "non dns"])):
+        return "non_dns_on_dns_port"
+
+    # Threat Intelligence & Host Anomalies
+    if rule == "BLOCKLIST" or any(k in signature for k in ["drop listed", "threat intelligence", "compromised host", "reputation"]):
+        return "blocklist_threat_intel"
+    if rule == "ARP_SPOOF" or "arp spoof" in signature or "arp cache poisoning" in signature:
+        return "arp_spoof"
+    if any(k in signature for k in ["irc ", "irc pong", "irc user", "irc nick", "irc c2", "botnet"]):
+        return "botnet_c2"
+    if any(k in signature for k in ["executable", "elf file download", "malware download"]):
+        return "malicious_binary_transfer"
 
     # DNS tunneling / exfiltration / DGA
     if rule == "DNS_ANOMALY":
