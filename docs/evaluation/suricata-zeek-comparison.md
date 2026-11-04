@@ -32,7 +32,7 @@ NetGuard, Suricata, and Zeek exhibit sharply complementary detection profiles:
 | **Volumetric SYN Floods** | **DETECTED** (`SYN_FLOOD` on ports 1, 53, 80) | **MISSED** (0 alerts on SYN flood) | **IDENTIFIED** (`DDoS` label on 14,394 flows) |
 | **Volumetric UDP Floods** | **DETECTED** (`UDP_FLOOD` to victim hosts) | **MISSED** (0 alerts on UDP flood) | **IDENTIFIED** (`DDoS` label) |
 | **High-Rate Data Egress** | **DETECTED** (`DATA_EXFIL` >50KB in 30s) | **MISSED** | **TRACKED** (`orig_ip_bytes` accounting) |
-| **IRC C2 Botnet Commands** | **NOT DETECTED** (Out of DPI scope) | **DETECTED** (2,450 alerts on IRC USER/NICK/PONG) | **IDENTIFIED** (`C&C` label on 6,706 flows) |
+| **IRC C2 Botnet Commands** | **DETECTED** (`IRC_C2_BEACONING` v1.0; protocol verb signatures + SYN beaconing) | **DETECTED** (2,450 alerts on IRC USER/NICK/PONG) | **IDENTIFIED** (`C&C` label on 6,706 flows) |
 | **Inbound Malware Binary** | **NOT DETECTED** (Inbound HTTP download) | **DETECTED** (`ET POLICY ELF download`) | **TRACKED** (HTTP transaction `conn_state: SF`) |
 | **Horizontal Port Scan** | **MISSED** (Probes spread over 8.3 hrs) | **MISSED** (0 alerts) | **IDENTIFIED** (`PartOfAHorizontalPortScan` on 122 flows) |
 | **Benign Traffic Handling**| **Zero False Alarms** on NTP/DHCP | Zero False Alarms on NTP/DHCP | 1,923 Benign flows correctly separated |
@@ -58,7 +58,8 @@ flowchart TD
         NG1["SYN_FLOOD (3 alerts)"]
         NG2["UDP_FLOOD (2 alerts)"]
         NG3["DATA_EXFIL (2 alerts)"]
-        NG_Miss["Missed: F4 (IRC), F5 (Inbound), F6 (Slow Scan)"]
+        NG4["IRC_C2_BEACONING (NICK & PONG C2)"]
+        NG_Miss["Missed: F5 (Inbound), F6 (Slow Scan)"]
         NG_Pass["Zero FP on F7 (Benign)"]
     end
 
@@ -79,7 +80,7 @@ flowchart TD
     F1 --> NG1 & Z1
     F2 --> NG2 & Z1
     F3 --> NG3 & Z1
-    F4 --> Suri1 & Z2
+    F4 --> Suri1 & Z2 & NG4
     F5 --> Suri2 & Z2
     F6 --> Z3
     F7 --> NG_Pass & Suri_Pass & Z4
@@ -90,8 +91,12 @@ Suricata's Emerging Threats Open ruleset focuses primarily on Deep Packet Inspec
 
 NetGuard's behavioral rate detectors (`SynFloodRule`, `UdpFloodRule`, `DataExfiltrationRule`) immediately identified and alerted on these flooding campaigns.
 
-### 3.2 Why NetGuard Missed the IRC Commands
-NetGuard's `PayloadRule` contains 12 high-confidence exploit signatures covering remote code execution (SQL injection, OS command injection, Log4Shell, Java deserialization, XXE, Shellshock, webshells, directory traversal). NetGuard does not include generic IRC chat protocol keyword rules (`USER`, `NICK`, `PING`, `PONG`) to prevent false positives in environments where IRC or multiplayer gaming protocols are legitimate.
+### 3.2 Resolution of IRC C2 Coverage Gap (Rule 23 Admission)
+Historically in Phase 4, NetGuard's `PayloadRule` focused strictly on web exploit signatures (SQL injection, OS command injection, Log4Shell, Java deserialization, XXE, Shellshock, webshells, directory traversal) and omitted IRC chat keywords. Under evidence-driven rule governance, this gap was analyzed and resolved by admitting **Rule 23: `IRC_C2_BEACONING` (v1.0)**:
+- **Dual Detection Paths:**
+  1. `IRC_PROTOCOL_SIGNATURE`: Direct payload inspection identifying IRC command verbs (`PING`, `PONG`, `NICK`, `USER`, `JOIN`, `PRIVMSG`, `MODE`) on well-known IRC ports (194, 6660–6669, 6697).
+  2. `IRC_PORT_BEACONING`: Connection-rate heuristic tracking repeated TCP SYN connection bursts ($\ge 5$ in 300s) to IRC ports, bounding state with an $O(1)$ LRU cache capped at 2,048 source hosts.
+- **Corroborated Verification:** On replaying `CTU-IoT-Malware-Capture-34-1`, Rule 23 successfully detected Mirai botnet registration (`NICK`) and persistent C2 keepalives (`PONG`), achieving complete cross-telemetry corroboration with Suricata's 2,450 `ET CHAT IRC` alerts and Zeek's 6,706 `C&C` flow labels.
 
 ### 3.3 The Horizontal Port Scan Evasion Analysis
 Zeek documented 122 flows labelled `PartOfAHorizontalPortScan` directed at destination port 63798.
