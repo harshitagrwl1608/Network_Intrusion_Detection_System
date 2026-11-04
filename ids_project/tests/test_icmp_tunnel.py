@@ -139,6 +139,37 @@ class TestIcmpTunnelRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["anomaly_type"], "ICMP_SHELL_PAYLOAD")
 
+    def test_detects_ipv6_icmpv6_echo_reply_tunnel(self):
+        """Detects covert tunnel transported over ICMPv6 Echo Reply (type 129)."""
+        payload = b"cmd.exe /c dir\r\n"
+        record = {
+            "type": "IP",
+            "protocol": "ICMPV6",
+            "icmp_type": 129,
+            "icmp_code": 0,
+            "src_ip": "2001:db8::2",
+            "dst_ip": "2001:db8::1",
+            "payload": payload,
+            "timestamp": 4510.0,
+        }
+        alert = self.rule.check(record)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["anomaly_type"], "ICMP_SHELL_PAYLOAD")
+
+    def test_sniffer_extracts_icmpv6_echo_reply(self):
+        """Verifies that sniffer._extract properly parses Scapy ICMPv6EchoReply packets."""
+        from capture.sniffer import _extract
+        from scapy.all import IPv6, ICMPv6EchoReply
+        pkt = IPv6(src="2001:db8::2", dst="2001:db8::1") / ICMPv6EchoReply(data=b"cmd.exe shell reply")
+        rec = _extract(pkt, capture_ts=4520.0)
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["protocol"], "ICMPV6")
+        self.assertEqual(rec["icmp_type"], 129)
+        self.assertEqual(rec["payload"], b"cmd.exe shell reply")
+        alert = self.rule.check(rec)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["anomaly_type"], "ICMP_SHELL_PAYLOAD")
+
     # -------------------------------------------------------------------------
     # Negative Tests (Standard Diagnostic Pings & Benign Controls)
     # -------------------------------------------------------------------------
@@ -298,3 +329,4 @@ class TestIcmpTunnelRule(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

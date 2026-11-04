@@ -46,6 +46,7 @@ HDD_DATASETS_DIR = "/run/media/harshitgarg/Data1/NetGuard-datasets"
 INCOMING_DIR = os.path.join(HDD_DATASETS_DIR, "incoming")
 VERIFIED_DIR = os.path.join(HDD_DATASETS_DIR, "verified")
 EVALUATION_DIR = os.path.join(HDD_DATASETS_DIR, "evaluation")
+EVALUATION_RESULTS_DIR = os.path.join(HDD_DATASETS_DIR, "evaluation-results")
 MANIFESTS_DIR = os.path.join(HDD_DATASETS_DIR, "manifests")
 HASHES_DIR = os.path.join(HDD_DATASETS_DIR, "hashes")
 
@@ -191,14 +192,67 @@ def get_candidate_queue() -> list[dict]:
             "ground_truth": "CTU-IoT-Malware-34-1 with publisher Suricata and Zeek logs",
             "compression": None,
         },
+        {
+            "id": "nozomi_triton_exec",
+            "name": "Nozomi Networks TRITON ICS Malware Execution",
+            "publisher": "Nozomi Networks",
+            "url": "https://raw.githubusercontent.com/NozomiNetworks/tricotools/master/malware_exec.pcap",
+            "type": "pcap",
+            "size_est_bytes": 174052,
+            "category": "Industrial OT / Malware Staging",
+            "attack_type": "TRITON / TRISIS industrial safety system malware execution",
+            "target_rules": ["PAYLOAD_HIT", "TCP_FLAG_ANOMALY"],
+            "ground_truth": "Authentic Nozomi Networks research capture of TRITON payload injection",
+            "compression": None,
+        },
+        {
+            "id": "foxit_quantum_insert",
+            "name": "Fox-IT QuantumInsert Packet Injection",
+            "publisher": "Fox-IT",
+            "url": "https://raw.githubusercontent.com/fox-it/quantuminsert/master/presentations/brocon2015/pcaps/id1.cn-inject.pcap",
+            "type": "pcap",
+            "size_est_bytes": 1842,
+            "category": "Man-on-the-Side Injection",
+            "attack_type": "TCP sequence racing & out-of-order injected HTTP redirection",
+            "target_rules": ["TCP_FLAG_ANOMALY", "CLEAR_HTTP_ON_TLS_PORT"],
+            "ground_truth": "BroCon 2015 QuantumInsert reproducible injection capture",
+            "compression": None,
+        },
+        {
+            "id": "ws_http_browsing",
+            "name": "Wireshark Benign HTTP Web Browsing",
+            "publisher": "Wireshark Foundation",
+            "url": "https://wiki.wireshark.org/uploads/27707187aeb30df68e70c8fb9d614981/http.cap",
+            "type": "pcap",
+            "size_est_bytes": 25803,
+            "category": "Benign Web Browsing Traffic",
+            "attack_type": "Benign HTTP request and response flow",
+            "target_rules": ["CLEAR_HTTP_ON_TLS_PORT", "PAYLOAD_HIT"],
+            "ground_truth": "Standard benign reference HTTP traffic (0 FP verification)",
+            "compression": None,
+        },
+        {
+            "id": "iot23_malware_20_1",
+            "name": "IoT-23 Torii Botnet C2 & Scanning",
+            "publisher": "Stratosphere IPS / CTU University",
+            "url": "https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset/IndividualScenarios/CTU-IoT-Malware-Capture-20-1/2018-10-02-13-12-30-192.168.100.103.pcap",
+            "type": "pcap",
+            "size_est_bytes": 4089446,
+            "category": "Modular Botnet C2 & Scanning",
+            "attack_type": "Torii botnet multi-architecture reconnaissance & C2 beaconing",
+            "target_rules": ["PORT_SCAN", "BRUTE_FORCE", "DATA_EXFIL"],
+            "ground_truth": "CTU-IoT-Malware-Capture-20-1 authentic Torii execution",
+            "compression": None,
+        },
     ]
 
 
 class PipelineCoordinator:
     """Coordinates producer-consumer dataset acquisition and NetGuard evaluation."""
 
-    def __init__(self, candidates: list[dict], max_items: int = None):
+    def __init__(self, candidates: list[dict], max_items: int = None, force_reeval: bool = False):
         self.candidates = candidates[:max_items] if max_items else candidates
+        self.force_reeval = force_reeval
         self.verification_queue = queue.Queue()
         self.evaluation_queue = queue.Queue()
         self.completed_evaluations: list[dict] = []
@@ -363,6 +417,20 @@ class PipelineCoordinator:
             candidate = item["candidate"]
             pcap_path = item["pcap_path"]
             cid = candidate["id"]
+
+            out_eval_file = os.path.join(EVALUATION_DIR, f"{cid}_eval.json")
+            if not self.force_reeval and os.path.isfile(out_eval_file):
+                try:
+                    with open(out_eval_file, "r") as f:
+                        cached_result = json.load(f)
+                    if "rule_breakdown" in cached_result:
+                        logger.info(f"[{cid}] Existing valid evaluation found at {out_eval_file} — skipping redundant replay.")
+                        with self._lock:
+                            self.completed_evaluations.append(cached_result)
+                        continue
+                except Exception as exc:
+                    logger.warning(f"[{cid}] Could not read existing evaluation {out_eval_file}: {exc}")
+
             logger.info(f"[{cid}] === STARTING NETGUARD EVALUATION ===")
 
             # Create isolated temporary SQLite DB and ARP table
@@ -447,8 +515,14 @@ class PipelineCoordinator:
                 }
 
                 out_eval_file = os.path.join(EVALUATION_DIR, f"{cid}_eval.json")
+                out_results_file = os.path.join(EVALUATION_RESULTS_DIR, f"{cid}_eval.json")
                 with open(out_eval_file, "w") as f:
                     json.dump(eval_result, f, indent=2)
+                try:
+                    with open(out_results_file, "w") as f:
+                        json.dump(eval_result, f, indent=2)
+                except OSError:
+                    pass
 
                 with self._lock:
                     self.completed_evaluations.append(eval_result)
@@ -490,8 +564,9 @@ class PipelineCoordinator:
 
 
 if __name__ == "__main__":
+    force = "--force" in sys.argv or "-f" in sys.argv
     candidates = get_candidate_queue()
-    coord = PipelineCoordinator(candidates)
+    coord = PipelineCoordinator(candidates, force_reeval=force)
     results = coord.run()
     print("\n" + "=" * 60)
     print(f"PIPELINE SUMMARY: {len(results)} Captures Evaluated")

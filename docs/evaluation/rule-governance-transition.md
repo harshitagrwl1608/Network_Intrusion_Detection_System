@@ -181,3 +181,4 @@ python3 ids_project/evaluation/run_eval.py
 ## 8. Conclusion
 
 NetGuard IDS has successfully evolved from a rigid numerical rule constraint to an evidence-driven, dynamic governance model. The addition of `NonDnsTrafficOnDnsPortRule` and `IcmpTunnelRule` closes critical network evasion blind spots without introducing false positives, while preserving 100% precision and recall across all regression suites and ground-truth benchmarks.
+

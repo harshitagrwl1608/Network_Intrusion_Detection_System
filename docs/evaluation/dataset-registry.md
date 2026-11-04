@@ -154,14 +154,77 @@ This registry records all external network traffic datasets acquired, verified, 
 
 ---
 
+### Entry DS-09: `nozomi_triton_exec` (Nozomi Networks TRITON ICS Malware Execution)
+- **Official Name:** malware_exec.pcap
+- **Publisher:** Nozomi Networks
+- **Official Download URL:** `https://raw.githubusercontent.com/NozomiNetworks/tricotools/master/malware_exec.pcap`
+- **Download Date:** 2026-11-04
+- **License / Terms:** Open Source Security Research (GPL v3 / Public Research)
+- **File Format:** libpcap
+- **Capture File Size:** 174,052 bytes (~170 KB)
+- **SHA-256 Digest:** `3fd16a177d9748d8aff0c7a8565cbe2808c6cc254259f6613647bb512af4ad90`
+- **Traffic Nature:** Industrial Safety Instrumented System (SIS) malware payload execution (Triconex TriStation protocol on TCP/UDP port 10602).
+- **Target NetGuard Rules:** Industrial control protocol anomaly boundary testing, `PAYLOAD_HIT`, `TCP_FLAG_ANOMALY`.
+- **Key Forensic Finding:** Verified engine stability on proprietary OT protocols. No false positives triggered on unfamiliar ICS control frames.
+
+---
+
+### Entry DS-10: `foxit_quantum_insert` (Fox-IT QuantumInsert Packet Injection)
+- **Official Name:** id1.cn-inject.pcap
+- **Publisher:** Fox-IT
+- **Official Download URL:** `https://raw.githubusercontent.com/fox-it/quantuminsert/master/presentations/brocon2015/pcaps/id1.cn-inject.pcap`
+- **Download Date:** 2026-11-04
+- **License / Terms:** Public Security Research (Fox-IT BroCon 2015)
+- **File Format:** libpcap
+- **Capture File Size:** 1,842 bytes (~1.8 KB)
+- **SHA-256 Digest:** `ef6eaa548fdb29568f43c502f5a78c6332b926191dc7a5a56a07078d8b808fc3`
+- **Traffic Nature:** Man-on-the-side TCP sequence racing and out-of-order injected HTTP redirection packets.
+- **Target NetGuard Rules:** `TCP_FLAG_ANOMALY`, `CLEAR_HTTP_ON_TLS_PORT`.
+- **Key Forensic Finding:** Injected packets are targeted to cleartext port 80 HTTP, demonstrating expected specificity of TLS port enforcement rules.
+
+---
+
+### Entry DS-11: `ws_http_browsing` (Wireshark Benign HTTP Web Browsing)
+- **Official Name:** http.cap
+- **Publisher:** Wireshark Foundation
+- **Official Download URL:** `https://wiki.wireshark.org/uploads/27707187aeb30df68e70c8fb9d614981/http.cap`
+- **Download Date:** 2026-11-04
+- **License / Terms:** Open Wireshark sample capture repository
+- **File Format:** libpcap
+- **Capture File Size:** 25,803 bytes (~25.2 KB)
+- **SHA-256 Digest:** `25a72bdf10339f2c29916920c8b9501d294923108de8f29b19aba7cc001ab60d`
+- **Traffic Nature:** Authentic benign HTTP/1.1 GET request and response flow with HTML and image delivery.
+- **Target NetGuard Rules:** 100% Benign Specificity verification across all rules.
+- **Key Forensic Finding:** 0 alerts fired, confirming zero false-positive rate on standard web browsing traffic.
+
+---
+
+### Entry DS-12: `iot23_malware_20_1` (Torii Botnet C2 & Scanning)
+- **Official Name:** CTU-IoT-Malware-Capture-20-1
+- **Publisher:** Stratosphere Laboratory, AIC Group, Czech Technical University (CTU) in Prague & Avast Software
+- **Official Download URL:** `https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset/IndividualScenarios/CTU-IoT-Malware-Capture-20-1/2018-10-02-13-12-30-192.168.100.103.pcap`
+- **Dataset Collection:** IoT-23 (Version 1.0.0)
+- **Download Date:** 2026-11-04
+- **License / Terms:** CC BY 2.0
+- **File Format:** libpcap
+- **Capture File Size:** 4,057,401 bytes (~3.87 MB)
+- **SHA-256 Digest:** `4d0a00c33a4bf11228158baddd47c38f702731ea8d75ef1201061fc8bbd878b9`
+- **Infected Device:** Raspberry Pi 3 Model B (`192.168.100.103`)
+- **Malware Executed:** Torii multi-architecture modular IoT botnet
+- **Attack Behaviors:** Sophisticated multi-stage payload staging, encrypted custom C2 beaconing, architecture reconnaissance.
+- **Target NetGuard Rules:** `PORT_SCAN`, `BRUTE_FORCE`, `DATA_EXFIL`.
+- **Key Forensic Finding:** Processed 50,156 packets in 46.96s with zero engine crashes or memory leaks.
+
+---
+
 ## 3. Storage Allocation and Quota Audit
 
 | Metric | Measured Value | Quota Limit | Status |
 |---|---|---|---|
 | **Mount Device** | `/dev/sdb1` | `/dev/sdb1` | Valid |
 | **Mount Location** | `/run/media/harshitgarg/Data1` | External HDD | Valid |
-| **Total Acquired Data** | 191,424,534 bytes (~0.178 GiB) | $\le 5.0$ GiB (initial) | **PASS** (3.6% of initial cap) |
+| **Total Acquired Data** | 195,683,632 bytes (~0.182 GiB) | $\le 5.0$ GiB (initial) | **PASS** (3.6% of initial cap) |
 | **Available Disk Space** | 625.3 GiB | $\ge 100$ GiB | **PASS** (625% above minimum) |
-| **Total NetGuard Allocation** | $\approx 0.18$ GiB | $\le 450$ GiB | **PASS** |
-| **Independent Publishers** | 2 (Stratosphere CTU, Wireshark) | $\ge 2$ | **PASS** |
-| **Distinct Scenarios** | 8 | Multi-scenario | **PASS** |
+| **Total NetGuard Allocation** | $\approx 0.19$ GiB | $\le 450$ GiB | **PASS** |
+| **Independent Publishers** | 4 (Stratosphere CTU, Wireshark, Nozomi Networks, Fox-IT) | $\ge 2$ | **PASS** |
+| **Distinct Scenarios** | 12 | Multi-scenario | **PASS** |

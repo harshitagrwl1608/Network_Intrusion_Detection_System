@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 try:
     from scapy.all import (
         sniff, IP, IPv6, IPv6ExtHdrFragment, TCP, UDP, ARP, Ether, ICMP, ICMPv6EchoRequest,
-        DNS, DNSQR, Raw,
+        ICMPv6EchoReply, DNS, DNSQR, Raw,
     )
     SCAPY_AVAILABLE = True
 except ImportError:
@@ -284,6 +284,13 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
             icmp_type = 128
             icmp_code = pkt[ICMPv6EchoRequest].code
             echo_data = bytes(getattr(pkt[ICMPv6EchoRequest], "data", b"") or b"")
+            payload_len = len(echo_data)
+            payload = echo_data[: _PAYLOAD_MAX_BYTES]
+        elif ICMPv6EchoReply in pkt:
+            proto = "ICMPV6"
+            icmp_type = 129
+            icmp_code = pkt[ICMPv6EchoReply].code
+            echo_data = bytes(getattr(pkt[ICMPv6EchoReply], "data", b"") or b"")
             payload_len = len(echo_data)
             payload = echo_data[: _PAYLOAD_MAX_BYTES]
 
