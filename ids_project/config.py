@@ -122,6 +122,10 @@ CLEAR_HTTP_TLS_COOLDOWN_S = _detection_float("CLEAR_HTTP_TLS_COOLDOWN_S", 600.0)
 CLEAR_HTTP_TLS_WINDOW_S = _detection_float("CLEAR_HTTP_TLS_WINDOW_S", 600.0)
 CLEAR_HTTP_TLS_MIN_REQUESTS = _detection_int("CLEAR_HTTP_TLS_MIN_REQUESTS", 2)
 
+# --- IP Fragmentation Anomaly (IpFragmentAnomalyRule) ---
+IP_FRAGMENT_ANOMALY_COOLDOWN_S = _detection_float("IP_FRAGMENT_ANOMALY_COOLDOWN_S", 60.0)
+IP_FRAGMENT_REASSEMBLY_TIMEOUT_S = _detection_float("IP_FRAGMENT_REASSEMBLY_TIMEOUT_S", 30.0)
+
 # --- Analysis ---
 ANALYSIS_INTERVAL = int(os.getenv("ANALYSIS_INTERVAL", 30))       # seconds between runs
 

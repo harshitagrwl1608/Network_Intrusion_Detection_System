@@ -129,6 +129,17 @@ class TestEvaluationPipeline(unittest.TestCase):
         verdict, rationale = classify_ground_truth_verdict(candidate_attack, [], {})
         self.assertEqual(verdict, "FALSE_NEGATIVE_OR_SUBTHRESHOLD")
 
+    def test_classify_ground_truth_verdict_unassessed_reference(self):
+        candidate_unassessed = {
+            "id": "unassessed_test",
+            "category": "Protocol Flood",
+            "attack_type": "ARP Request Broadcast Storm",
+            "target_rules": ["UNASSESSED_PROTOCOL_FLOOD"],
+        }
+        verdict, rationale = classify_ground_truth_verdict(candidate_unassessed, [], {})
+        self.assertEqual(verdict, "UNASSESSED_REFERENCE_CAPTURE")
+        self.assertIn("unassessed", rationale.lower())
+
     def test_cumulative_budget_persistence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             test_budget_file = os.path.join(tmpdir, "test_budget.json")

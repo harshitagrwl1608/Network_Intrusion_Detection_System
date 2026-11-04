@@ -2165,10 +2165,11 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
         re.compile(
             rb"(?i)(\$\{jndi:"
             rb"|\$\{\$\{lower:j\}|\$\{\$\{upper:j\}"
-            rb"|\$\{\$\{::-j\}\$\{::-n\}\$\{::-d\}\$\{::-i\}:"
-            rb"|j\$\{::-n\}di:|j\$\{lower:n\}di:|\$\{j\$\{:\:-n\}di:"
+            rb"|\$\{\$\{:?:-j\}\$\{:?:-n\}\$\{:?:-d\}\$\{:?:-i\}:"
+            rb"|j\$\{:?:-n\}di:|j\$\{lower:n\}di:|\$\{j\$\{:?:-n\}di:"
             rb"|\$\{\$\{env:NaN}:|-j\}ndi:|\$\{jn\$\{\w*:\}di:"
-            rb"|\$\{j\$\{lower:nd\}i:|\$\{::-j\}\$\{::-n\}\$\{::-d\})"
+            rb"|\$\{j\$\{lower:nd\}i:|\$\{:?:-j\}\$\{:?:-n\}\$\{:?:-d\}"
+            rb"|\$\{\$\{:?:-j\}ndi:)"
         ),
         "high",
     ),
@@ -5623,7 +5624,7 @@ class IcmpTunnelRule:
        excluding legitimate diagnostic MTU sweeps (all zeros or sequential bytes).
     """
     name = "ICMP_TUNNEL"
-    rule_version = "1.0"
+    rule_version = "1.1"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
 
@@ -5729,6 +5730,7 @@ class IcmpTunnelRule:
         detail = ""
         matched_ind = None
         entropy = 0.0
+        b64_ratio = None
 
         # Check 1: Ptunnel signature
         if payload.startswith(self.PTUNNEL_MAGIC):
@@ -5771,19 +5773,34 @@ class IcmpTunnelRule:
                     )
                     break
 
-        # Check 4: High-entropy oversized payload (encrypted/compressed tunnel)
+        # Check 4: High-entropy oversized payload (encrypted/compressed tunnel or Base64 exfiltration)
         if not anomaly_type and len(payload) >= self.min_bytes:
             entropy = _shannon_entropy_bytes(payload)
             if entropy >= self.entropy_threshold and not self._is_diagnostic_ping(payload):
-                anomaly_type = "HIGH_ENTROPY_TUNNEL"
-                severity = "medium"
-                confidence = "heuristic"
-                matched_ind = f"len={len(payload)},entropy={entropy:.2f}"
-                detail = (
-                    f"{src_ip} sent oversized high-entropy ICMP Echo payload ({len(payload)} bytes, "
-                    f"entropy {entropy:.2f} >= {self.entropy_threshold}) to {dst_ip} "
-                    "— possible encrypted ICMP data exfiltration or tunnel"
-                )
+                _B64_BYTES = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\r\n")
+                b64_count = sum(1 for b in payload if b in _B64_BYTES)
+                computed_b64_ratio = b64_count / len(payload)
+                if computed_b64_ratio >= 0.95 and len(payload) >= 64:
+                    anomaly_type = "BASE64_EXFILTRATION"
+                    severity = "high"
+                    confidence = "high"
+                    b64_ratio = round(computed_b64_ratio, 3)
+                    matched_ind = f"b64_ratio={computed_b64_ratio:.2f},entropy={entropy:.2f},len={len(payload)}"
+                    detail = (
+                        f"{src_ip} sent Base64-encoded exfiltration payload ({len(payload)} bytes, "
+                        f"entropy {entropy:.2f} >= {self.entropy_threshold}, b64_ratio {computed_b64_ratio:.2f}) to {dst_ip} "
+                        "in ICMP Echo — covert data exfiltration detected"
+                    )
+                else:
+                    anomaly_type = "HIGH_ENTROPY_TUNNEL"
+                    severity = "medium"
+                    confidence = "heuristic"
+                    matched_ind = f"len={len(payload)},entropy={entropy:.2f}"
+                    detail = (
+                        f"{src_ip} sent oversized high-entropy ICMP Echo payload ({len(payload)} bytes, "
+                        f"entropy {entropy:.2f} >= {self.entropy_threshold}) to {dst_ip} "
+                        "— possible encrypted ICMP data exfiltration or tunnel"
+                    )
 
         if not anomaly_type:
             return None
@@ -5820,8 +5837,205 @@ class IcmpTunnelRule:
                 "icmp_code": icmp_code,
                 "payload_bytes": len(payload),
                 "entropy": round(entropy, 3) if entropy else 0.0,
+                "b64_ratio": b64_ratio,
                 "matched_indicator": matched_ind,
                 "payload_preview_hex": payload[:32].hex(),
+            },
+            "window_start": now,
+            "window_end": now,
+        }
+
+
+
+# =============================================================================
+# Rule 22: IP Fragmentation Anomaly & Reassembly Attack Detection
+# =============================================================================
+
+class IpFragmentAnomalyRule:
+    """
+    Detects Layer 3 IPv4/IPv6 fragmentation reassembly anomalies and evasions:
+    1. TEARDROP_OVERLAPPING_FRAGMENT: Overlapping payload byte ranges for the same
+       datagram ID (CVE-1997-0047 Teardrop, Bonk, Boink).
+    2. FRAGMENT_OVERFLOW: Offset + data length exceeds 65,535 bytes (RFC 791 limit, Ping of Death).
+    3. TINY_FRAGMENT_EVASION: Initial fragment (<20 bytes TCP, <8 bytes UDP/ICMP)
+       designed to split transport headers across packets to bypass stateless packet filters (RFC 1858 / RFC 3128).
+    """
+    name = "IP_FRAGMENT_ANOMALY"
+    rule_version = "1.0"
+    ALERT_COOLDOWN_S = 60.0
+    MAX_TRACKED_FLOWS = 4096
+    REASSEMBLY_TIMEOUT_S = 30.0
+
+    def __init__(self, cooldown: float = 60.0, reassembly_timeout: float = 30.0,
+                 enabled: bool = True):
+        self.cooldown = _nonnegative_float_setting(
+            cooldown, 60.0, "IP_FRAGMENT_ANOMALY_COOLDOWN_S"
+        )
+        self.reassembly_timeout = _positive_setting(
+            reassembly_timeout, 30.0, "IP_FRAGMENT_REASSEMBLY_TIMEOUT_S"
+        )
+        self.enabled = bool(enabled)
+        self._lock = threading.Lock()
+        # Key: (src_ip, dst_ip, protocol, fragment_id) -> {"fragments": [(start, end), ...], "last_seen": float}
+        self._flows: OrderedDict[tuple, dict] = OrderedDict()
+        # Key: (pair, anomaly_type) -> float
+        self._seen: OrderedDict[tuple, float] = OrderedDict()
+
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
+        flow_cutoff = now - self.reassembly_timeout
+        seen_cutoff = now - self.cooldown
+        with self._lock:
+            for k in list(self._flows):
+                entry = self._flows[k]
+                if entry["last_seen"] < flow_cutoff or entry["last_seen"] > now or entry["last_seen"] < 0:
+                    del self._flows[k]
+            for k in list(self._seen):
+                if self._seen[k] < seen_cutoff or self._seen[k] > now:
+                    del self._seen[k]
+
+    def check(self, record: dict) -> dict | None:
+        if not self.enabled:
+            return None
+        if record.get("type") != "IP":
+            return None
+
+        offset = record.get("ip_fragment_offset", 0) or 0
+        mf = bool(record.get("ip_more_fragments"))
+        is_fragmented = bool(record.get("ip_fragmented") or offset or mf)
+        if not is_fragmented:
+            return None
+
+        src_ip = record.get("src_ip", "")
+        dst_ip = record.get("dst_ip", "")
+        if not src_ip or not dst_ip or _is_trusted(src_ip):
+            return None
+
+        frag_id = record.get("ip_fragment_id")
+        if frag_id is None:
+            return None
+
+        try:
+            frag_id = int(frag_id)
+            offset = int(offset)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
+
+        proto = record.get("protocol", "IP")
+        data_len = int(record.get("ip_fragment_data_len") or record.get("payload_len") or 0)
+        src_port = _normalize_port(record.get("src_port"))
+        dst_port = _normalize_port(record.get("dst_port"))
+
+        anomaly_type = None
+        severity = "high"
+        confidence = "high"
+        detail = ""
+        overlap_bytes = None
+        overlapping_range = None
+
+        # Check 1: Fragment overflow (Ping of Death, RFC 791 limit)
+        if offset + data_len > 65535:
+            anomaly_type = "FRAGMENT_OVERFLOW"
+            severity = "critical"
+            detail = (
+                f"{src_ip} sent oversized IP fragment to {dst_ip} "
+                f"(offset {offset} + len {data_len} = {offset + data_len} > 65535) "
+                "— Ping of Death buffer overflow attempt"
+            )
+
+        # Check 2: Tiny initial fragment evasion (RFC 1858 / RFC 3128)
+        elif offset == 0 and mf and data_len > 0:
+            min_header = 20 if proto == "TCP" else (8 if proto in ("UDP", "ICMP", "ICMPV6") else 8)
+            if data_len < min_header:
+                anomaly_type = "TINY_FRAGMENT_EVASION"
+                severity = "high"
+                detail = (
+                    f"{src_ip} sent tiny initial IP fragment ({data_len} bytes < minimum {min_header} bytes) "
+                    f"for {proto} to {dst_ip} — possible stateless packet filter evasion (RFC 1858)"
+                )
+
+        # Check 3: Overlapping fragment reassembly attack (Teardrop / Bonk)
+        flow_key = (str(src_ip), str(dst_ip), str(proto), frag_id)
+        cur_end = offset + data_len
+
+        with self._lock:
+            flow_entry = self._flows.get(flow_key)
+            if flow_entry is not None:
+                if now < flow_entry["last_seen"]:
+                    pass
+                elif now - flow_entry["last_seen"] > self.reassembly_timeout:
+                    flow_entry = None
+                    self._flows.pop(flow_key, None)
+
+            if not anomaly_type and data_len > 0 and flow_entry is not None:
+                for prev_start, prev_end in flow_entry["fragments"]:
+                    if offset == prev_start and cur_end == prev_end:
+                        continue
+                    ov_start = max(offset, prev_start)
+                    ov_end = min(cur_end, prev_end)
+                    if ov_start < ov_end:
+                        overlap_bytes = ov_end - ov_start
+                        overlapping_range = [ov_start, ov_end]
+                        anomaly_type = "TEARDROP_OVERLAPPING_FRAGMENT"
+                        severity = "critical"
+                        detail = (
+                            f"{src_ip} sent overlapping IP fragment (ID {frag_id}, offset {offset}-{cur_end}) "
+                            f"overlapping existing [{prev_start}-{prev_end}] by {overlap_bytes} bytes to {dst_ip} "
+                            "— possible Teardrop/Bonk TCP/IP reassembly crash attack"
+                        )
+                        break
+
+            if data_len > 0:
+                if flow_entry is None:
+                    if len(self._flows) >= self.MAX_TRACKED_FLOWS:
+                        self._flows.popitem(last=False)
+                    self._flows[flow_key] = {"fragments": [(offset, cur_end)], "last_seen": now}
+                else:
+                    flow_entry["fragments"].append((offset, cur_end))
+                    flow_entry["last_seen"] = now
+                    self._flows.move_to_end(flow_key)
+
+            if not anomaly_type:
+                return None
+
+            pair = tuple(sorted((str(src_ip), str(dst_ip))))
+            seen_key = (pair, anomaly_type)
+            last_alert = self._seen.get(seen_key)
+            if last_alert is not None and now - last_alert < self.cooldown:
+                self._seen.move_to_end(seen_key)
+                return None
+
+            if seen_key not in self._seen and len(self._seen) >= self.MAX_TRACKED_FLOWS:
+                self._seen.popitem(last=False)
+            self._seen[seen_key] = now
+            self._seen.move_to_end(seen_key)
+
+        logger.debug(f"{self.name} [{anomaly_type}] fired: {detail}")
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "src_port": src_port,
+            "dst_port": dst_port,
+            "protocol": proto,
+            "severity": severity,
+            "confidence": confidence,
+            "detail": detail,
+            "evidence": {
+                "anomaly_type": anomaly_type,
+                "ip_fragment_id": frag_id,
+                "ip_fragment_offset": offset,
+                "ip_fragment_data_len": data_len,
+                "ip_more_fragments": mf,
+                "protocol": proto,
+                "overlap_bytes": overlap_bytes,
+                "overlapping_range": overlapping_range,
             },
             "window_start": now,
             "window_end": now,
@@ -6090,6 +6304,10 @@ class RuleEngine:
                 entropy_threshold=getattr(cfg, "ICMP_TUNNEL_ENTROPY_THRESHOLD", 4.5),
                 min_bytes=getattr(cfg, "ICMP_TUNNEL_MIN_BYTES", 64),
                 cooldown=getattr(cfg, "ICMP_TUNNEL_COOLDOWN_S", 60.0),
+            ),
+            IpFragmentAnomalyRule(
+                cooldown=getattr(cfg, "IP_FRAGMENT_ANOMALY_COOLDOWN_S", 60.0),
+                reassembly_timeout=getattr(cfg, "IP_FRAGMENT_REASSEMBLY_TIMEOUT_S", 30.0),
             ),
         ]
 

@@ -13,7 +13,7 @@
 > [!NOTE]
 > ### 🚧 Ongoing Project Notice
 > **NetGuard IDS is currently under active development.**  
-> The core packet-sniffing engine, 21-rule evidence-driven detection suite, 18-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization (including Triconex TriStation 1131 ICS signatures), Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed **560 tests** (and 210 subtests). The synthetic evaluation detected 38/38 labelled scenarios across all registered rules with 100.0% precision, 100.0% recall, zero unmatched attack alerts, and zero alerts on the benign fixture. Real-world validation spans 16 PCAP captures across 6 independent publishers with cross-engine corroboration against Suricata and Zeek. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
+> The core packet-sniffing engine, 22-rule evidence-driven detection suite, 18-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization (including Triconex TriStation 1131 ICS signatures), Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, IP fragmentation reassembly attack detection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed **587 tests** (and 210 subtests). The synthetic evaluation detected 38/38 labelled scenarios across all registered rules with 100.0% precision, 100.0% recall, zero unmatched attack alerts, and zero alerts on the benign fixture. Real-world validation spans 16 PCAP captures across 6 independent publishers with cross-engine corroboration against Suricata and Zeek. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
 
 ---
 
@@ -102,7 +102,7 @@ Home and small-office networks generate continuous connection traffic, yet small
 
 ## 🔍 Core Detection Rules
 
-NetGuard implements **21 evidence-driven detection rules** spanning stateless lookups, stateful sliding windows, deep packet inspection, TLS inspection, and algorithmic information theory under strict distinct value governance:
+NetGuard implements **22 evidence-driven detection rules** spanning stateless lookups, stateful sliding windows, deep packet inspection, TLS inspection, and algorithmic information theory under strict distinct value governance:
 
 | Rule ID | Detection Mechanism | Methodology | Tunable Defaults |
 |---|---|---|---|
@@ -127,6 +127,7 @@ NetGuard implements **21 evidence-driven detection rules** spanning stateless lo
 | **`TCP_ZERO_WINDOW`** | Sockstress / Zero-Window DoS | Tracks repeated TCP Zero-Window (`win=0`) advertisements per endpoint pair, detecting persist-timer thread exhaustion and socket buffer starvation. | $\ge 20$ packets in $10\text{s}$; 60s cooldown |
 | **`NON_DNS_TRAFFIC_ON_DNS_PORT`** | Non-DNS Protocol or Shell on Port 53 | Detects non-DNS protocols, interactive command shells (`cmd.exe`, `/bin/sh`), and unauthorized bidirectional communications operating on UDP/TCP port 53; RFC 1035 QNAME validation prevents header evasion. | Instant trigger; 60s cooldown |
 | **`ICMP_TUNNEL`** | Covert ICMP Tunneling & Exfiltration | Detects covert tunneling channels, reverse shells (`icmpsh`), Base64 exfiltration chunks, and embedded PE/ELF executables within oversized high-entropy ICMP Echo requests/replies. | Length $\ge 64$B, entropy $\ge 4.5$; 60s cooldown |
+| **`IP_FRAGMENT_ANOMALY`** | Overlapping Fragments & Ping of Death | Detects Layer 3 IPv4/IPv6 fragmentation reassembly anomalies: overlapping fragment byte ranges (CVE-1997-0047 Teardrop, Bonk, Boink), fragment buffer overflow exceeding 65,535 bytes (Ping of Death), and tiny initial fragments splitting transport headers (RFC 1858 / RFC 3128). | 30s reassembly timeout; 60s cooldown |
 
 ### 🔬 Deep Packet Inspection (DPI) Signatures
 `PayloadRule` evaluates raw packet payloads and ordered, bounded TCP streams against 18 categorized threat signatures with automatic multi-pass URL decoding (up to 3 passes), form decoding (`+` to space), null-byte stripping (`%00` and `\x00`), and inline SQL comment collapsing (`/*...*/`):
@@ -162,16 +163,16 @@ NetGuard implements **21 evidence-driven detection rules** spanning stateless lo
 The web dashboard is designed for both security analysts and non-technical stakeholders:
 
 * **Live Threat Streaming:** Uses **Server-Sent Events (SSE)** at `/api/stream` to push alerts to the browser instantly with sub-second latency and zero polling lag.
-* **Plain-English Narratives:** The analytics aggregator parses low-level network records and outputs clear, actionable sentences covering all 19 detection rules:
+* **Plain-English Narratives:** The analytics aggregator parses low-level network records and outputs clear, actionable sentences covering all 22 detection rules:
   > *"⚠️ A device at 192.168.1.105 probed 30 network services in a rapid burst — this pattern typically indicates network reconnaissance or port scanning."*
-* **Interactive Table Filtering & Instant Search:** Filter alerts in real-time by search query (source IP, destination IP, port, or payload text), detection rule (all 19 rules), or severity level (High, Medium, Low) across both live and historical logs.
-* **19 Detection Rules Indicator:** Header status badge visually confirms the 19 active detection heuristics running in the engine.
+* **Interactive Table Filtering & Instant Search:** Filter alerts in real-time by search query (source IP, destination IP, port, or payload text), detection rule (all 22 rules), or severity level (High, Medium, Low) across both live and historical logs.
+* **22 Detection Rules Indicator:** Header status badge visually confirms the 22 active detection heuristics running in the engine.
 * **Dynamic Threat Gauge:** Automatically evaluates whether the overall network status is `CLEAR`, `LOW`, or `HIGH` based on incident velocity and severity.
 * **GeoIP Intelligence:** Resolves external threat destinations to their host country with interactive flags (cached locally, RFC-1918 private network classification, rate-limit protected).
 * **Network Device Inventory:** Inspects all communicating hardware on the segment and resolves MAC prefixes via IEEE OUI to identify manufacturers (e.g., *Apple*, *Intel*, *Raspberry Pi Foundation*, *Cisco*).
 * **Investigation Modal & Evidence Viewer:** Full forensic modal displaying structured JSON evidence, plain-language trigger explanation, and analyst True Positive (TP) / False Positive (FP) feedback loop.
 * **Interactive Calendar Log Viewer:** Heatmap calendar of daily incident volumes with one-click drilldown into complete logs for any past date.
-* **Historical Trends:** Visualizes 24-hour alert distribution using interactive Chart.js graphs color-coded across all 19 detection rules.
+* **Historical Trends:** Visualizes 24-hour alert distribution using interactive Chart.js graphs color-coded across all 22 detection rules.
 
 ---
 

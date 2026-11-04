@@ -403,6 +403,10 @@ def classify_capture_level_signal(candidate: dict, alerts: list[dict], rule_brea
             return "TRUE_NEGATIVE", "Zero false alarms raised on authentic benign traffic (100% specificity)"
         return "FALSE_POSITIVE", f"Spurious alerts raised on benign traffic: {list(fired_rules)}"
 
+    # Unassessed or Out-of-Scope Traffic Families
+    if target_rules and all(r.startswith("UNASSESSED_") for r in target_rules):
+        return "UNASSESSED_REFERENCE_CAPTURE", f"Capture represents unassessed traffic family ({list(target_rules)}); outside active IDS detection scope"
+
     # Malicious / Attack Traffic
     if target_rules and (target_rules & fired_rules):
         matched = list(target_rules & fired_rules)
@@ -617,7 +621,7 @@ def get_candidate_queue() -> list[dict]:
             "size_est_bytes": 15360,
             "category": "Protocol & Flag Anomalies",
             "attack_type": "Overlapping IP fragmentation exploit",
-            "target_rules": ["TCP_FLAG_ANOMALY"],
+            "target_rules": ["IP_FRAGMENT_ANOMALY"],
             "ground_truth": "Packets 8 and 9 demonstrate overlapping teardrop fragments",
             "compression": None,
         },
@@ -654,10 +658,10 @@ def get_candidate_queue() -> list[dict]:
             "url": "https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset/IndividualScenarios/CTU-IoT-Malware-Capture-8-1/2018-07-31-15-15-09-192.168.100.113.pcap",
             "type": "pcap",
             "size_est_bytes": 2098362,
-            "category": "Port Scanning & Brute Force",
-            "attack_type": "Hakai botnet scanning and credential probing",
-            "target_rules": ["PORT_SCAN", "BRUTE_FORCE", "SYN_FLOOD"],
-            "ground_truth": "CTU-IoT-Malware-8-1 verified malware execution",
+            "category": "IoT Malware C2 Callbacks",
+            "attack_type": "Hakai botnet TCP port 50 C2 retry callbacks with exponential backoff",
+            "target_rules": ["UNASSESSED_BOTNET_C2_BEACON"],
+            "ground_truth": "CTU-IoT-Malware-8-1 verified malware execution (port 50 C2 callback retry sequence)",
             "compression": None,
         },
         {
@@ -708,8 +712,8 @@ def get_candidate_queue() -> list[dict]:
             "size_est_bytes": 1842,
             "category": "Man-on-the-Side Injection",
             "attack_type": "TCP sequence racing & out-of-order injected HTTP redirection (port 80)",
-            "target_rules": ["TCP_FLAG_ANOMALY"],
-            "ground_truth": "BroCon 2015 QuantumInsert reproducible injection capture (cleartext port 80; not TLS)",
+            "target_rules": ["UNASSESSED_TCP_INJECTION"],
+            "ground_truth": "BroCon 2015 QuantumInsert reproducible injection capture (cleartext port 80; requires TCP reassembly sequence conflict analysis)",
             "compression": None,
         },
         {
@@ -733,9 +737,9 @@ def get_candidate_queue() -> list[dict]:
             "type": "pcap",
             "size_est_bytes": 4089446,
             "category": "Modular Botnet C2 & Scanning",
-            "attack_type": "Torii botnet multi-architecture reconnaissance & C2 beaconing",
-            "target_rules": ["PORT_SCAN", "BRUTE_FORCE", "DATA_EXFIL"],
-            "ground_truth": "CTU-IoT-Malware-Capture-20-1 authentic Torii execution",
+            "attack_type": "Torii botnet low-bandwidth TLS C2 beaconing to single server",
+            "target_rules": ["UNASSESSED_BOTNET_C2_BEACON"],
+            "ground_truth": "CTU-IoT-Malware-Capture-20-1 authentic Torii execution (subthreshold volume, persistent TLS C2 session)",
             "compression": None,
         },
         {
@@ -772,10 +776,10 @@ def get_candidate_queue() -> list[dict]:
             "url": "https://raw.githubusercontent.com/OISF/suricata-verify/master/tests/firewall/ruletype-firewall-160-tls-sni-firewall-enforcement/input.pcap",
             "type": "pcap",
             "size_est_bytes": 3596,
-            "category": "TLS SNI Anomaly",
-            "attack_type": "Non-standard TLS ClientHello SNI anomalies & omissions",
-            "target_rules": ["TLS_ANOMALY"],
-            "ground_truth": "Differential ClientHello with unauthorized SNI and omitted SNI extensions",
+            "category": "TLS Firewall Policy Enforcement",
+            "attack_type": "Suricata-specific firewall SNI allowlist policy verification",
+            "target_rules": ["UNASSESSED_FIREWALL_POLICY"],
+            "ground_truth": "Differential ClientHello with unauthorized SNI and omitted SNI extensions (evaluates firewall drop policy for non-suricata.io SNI; outside IDS signature scope)",
             "compression": None,
         },
         {

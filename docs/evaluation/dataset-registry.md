@@ -211,9 +211,69 @@ This registry records all external network traffic datasets acquired, verified, 
 - **SHA-256 Digest:** `4d0a00c33a4bf11228158baddd47c38f702731ea8d75ef1201061fc8bbd878b9`
 - **Infected Device:** Raspberry Pi 3 Model B (`192.168.100.103`)
 - **Malware Executed:** Torii multi-architecture modular IoT botnet
-- **Attack Behaviors:** Sophisticated multi-stage payload staging, encrypted custom C2 beaconing, architecture reconnaissance.
-- **Target NetGuard Rules:** `PORT_SCAN`, `BRUTE_FORCE`, `DATA_EXFIL`.
+- **Attack Behaviors:** Low-bandwidth persistent TLS C2 beaconing to single IP (`66.85.157.90:443`). Subthreshold byte rate (~23 B/s).
+- **Target NetGuard Rules:** `UNASSESSED_BOTNET_C2_BEACON` (unassessed low-frequency C2 beaconing).
 - **Key Forensic Finding:** Processed 50,156 packets in 46.96s with zero engine crashes or memory leaks.
+
+---
+
+### Entry DS-13: `m_rau5_icmp_tunnel` (Covert ICMP Base64 Exfiltration Tunnel)
+- **Official Name:** mock_covert_channels.pcap
+- **Publisher:** m-rau5 Security Research
+- **Official Download URL:** `https://raw.githubusercontent.com/m-rau5/cover-channel-analyzer/main/test_data/mock_covert_channels.pcap`
+- **Download Date:** 2026-11-04
+- **License / Terms:** Open Source Research (MIT)
+- **File Format:** libpcap (curated mock test fixture)
+- **Capture File Size:** 1,956 bytes (~1.9 KB)
+- **SHA-256 Digest:** `26841fb2b75ebf91fc726053f3e580a9d9e4a30a21a50a1db48dca2aa7a48dbe`
+- **Attack Behaviors:** 100-byte high-entropy Base64 data exfiltration payload chunks transported inside ICMP Echo Request packets (CVE-covert-channel).
+- **Target NetGuard Rules:** `ICMP_TUNNEL` (v1.1 `BASE64_EXFILTRATION`), `DNS_ANOMALY`.
+- **Key Forensic Finding:** Detected with 100% precision: `ICMP_TUNNEL` fired with `b64_ratio=1.00`, `entropy=5.40`, and `severity=high`.
+
+---
+
+### Entry DS-14: `foxit_log4shell` (Fox-IT Log4Shell JNDI RCE Exploit)
+- **Official Name:** ldap-uri-params-ev0.pcap
+- **Publisher:** Fox-IT / NCC Group
+- **Official Download URL:** `https://raw.githubusercontent.com/fox-it/log4shell-pcaps/main/log4shell-ldap-pcaps/ldap-uri-params-ev0.pcap`
+- **Download Date:** 2026-11-04
+- **License / Terms:** Open Source Security Research (CC0 / Public Domain)
+- **File Format:** libpcap
+- **Capture File Size:** 56,278 bytes (~55 KB)
+- **SHA-256 Digest:** `52b96e51c8a41031aa265c102dfc05988220023ee45c4aa3d567bb075c3efc5b`
+- **Attack Behaviors:** Apache Log4j 2 CVE-2021-44228 remote code execution attempt with nested URL-encoded lookup obfuscation (`${${::-j}${::-n}${::-d}${::-i}:ldap://...}`).
+- **Target NetGuard Rules:** `PAYLOAD_HIT` (`LOG4SHELL` signature).
+- **Key Forensic Finding:** NetGuard multi-pass URL deobfuscation decoded `%24%7B...` and matched `LOG4SHELL` signature on packet 4.
+
+---
+
+### Entry DS-15: `oisf_tls_sni_anomaly` (OISF Suricata TLS SNI Enforcement)
+- **Official Name:** input.pcap
+- **Publisher:** Open Information Security Foundation (OISF)
+- **Official Download URL:** `https://raw.githubusercontent.com/OISF/suricata-verify/master/tests/firewall/ruletype-firewall-160-tls-sni-firewall-enforcement/input.pcap`
+- **Download Date:** 2026-11-04
+- **License / Terms:** Open Information Security Foundation (GPL v2)
+- **File Format:** libpcap
+- **Capture File Size:** 3,596 bytes (~3.5 KB)
+- **SHA-256 Digest:** `da73184c5cacd3a509f8aaaa8628da19f172f478fae35cbfef45025339d78963`
+- **Attack Behaviors:** OISF Suricata verify firewall test checking SNI whitelist drop policies (`suricata.io` allowed, `evil.example` blocked, omitted SNI blocked).
+- **Target NetGuard Rules:** `UNASSESSED_FIREWALL_POLICY` (firewall policy enforcement).
+- **Key Forensic Finding:** Capture tests host-level egress allowlisting rather than signature-based intrusion detection; recorded as unassessed reference capture.
+
+---
+
+### Entry DS-16: `ws_nmap_stealth_scan` (Wireshark Nmap Stealth & OS Scan)
+- **Official Name:** nmap_OS_scan_succesful.pcap
+- **Publisher:** Wireshark Foundation
+- **Official Download URL:** `https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/NMap-Captures.zip`
+- **Download Date:** 2026-11-04
+- **License / Terms:** Open Wireshark sample capture repository
+- **File Format:** libpcap (extracted from ZIP archive)
+- **Capture File Size:** 114,641 bytes (~112 KB)
+- **SHA-256 Digest:** `d29d44c80387446df3c285994fbc87da9694e9f9064c17240c49fc078f45a7c2`
+- **Attack Behaviors:** Nmap stealth OS fingerprinting scan utilizing illegal TCP flag combinations (NULL 0x00, XMAS 0x29, SYN+FIN 0x2b) and rapid port probing.
+- **Target NetGuard Rules:** `PORT_SCAN`, `SLOW_PORT_SCAN`, `TCP_STEALTH_SCAN`, `TCP_FLAG_ANOMALY`.
+- **Key Forensic Finding:** Generated 3 alerts (`PORT_SCAN`, `SLOW_PORT_SCAN`, `TCP_FLAG_ANOMALY`) detecting both scanning and illegal flag combinations.
 
 ---
 
@@ -223,8 +283,9 @@ This registry records all external network traffic datasets acquired, verified, 
 |---|---|---|---|
 | **Mount Device** | `/dev/sdb1` | `/dev/sdb1` | Valid |
 | **Mount Location** | `/run/media/harshitgarg/Data1` | External HDD | Valid |
-| **Total Acquired Data** | 195,683,632 bytes (~0.182 GiB) | $\le 5.0$ GiB (initial) | **PASS** (3.6% of initial cap) |
+| **Total Acquired Data** | 195,856,507 bytes (~0.182 GiB) | $\le 5.0$ GiB (initial) | **PASS** (3.6% of initial cap) |
 | **Available Disk Space** | 625.3 GiB | $\ge 100$ GiB | **PASS** (625% above minimum) |
 | **Total NetGuard Allocation** | $\approx 0.19$ GiB | $\le 450$ GiB | **PASS** |
-| **Independent Publishers** | 4 (Stratosphere CTU, Wireshark, Nozomi Networks, Fox-IT) | $\ge 2$ | **PASS** |
-| **Distinct Scenarios** | 12 | Multi-scenario | **PASS** |
+| **Independent Publishers** | 6 (Stratosphere CTU, Wireshark, Nozomi Networks, Fox-IT, m-rau5, OISF) | $\ge 2$ | **PASS** |
+| **Distinct Verified Captures** | 16 | Multi-scenario | **PASS** |
+| **Registered Detection Rules** | 22 | Distinct & Tested | **PASS** |

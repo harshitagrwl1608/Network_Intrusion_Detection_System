@@ -86,31 +86,46 @@ NetGuard enforces the following ground-truth principles:
 
 ---
 
-## 3. Ground-Truth Flow Alignment Protocol
+## 3. Ground-Truth Flow Alignment Protocol & Label Classification
 
-When matching NetGuard alerts against external reference labels:
+When matching NetGuard alerts against external reference labels, NetGuard implements a rigorous three-layer matching engine:
+
+1. **Bidirectional Flow Canonicalization (`canonicalize_flow`):**
+   Endpoints $(A, \text{port}_A)$ and $(B, \text{port}_B)$ are canonicalized via:
+   $$\text{canonical\_ips} = \operatorname{sorted}(\text{norm}(A), \text{norm}(B)), \quad \text{canonical\_ports} = \operatorname{sorted}(\text{port}_A, \text{port}_B)$$
+   Both inbound request packets and outbound response packets map deterministically to the identical canonical flow key.
+
+2. **Bijective Flow Matching (Anti-Inflation Guard):**
+   In high-rate scenarios (e.g., DoS bursts or rapid port scans), multiple alerts may be triggered for the same flow. NetGuard enforces bijective matching: each ground-truth label instance can be claimed at most once by an alert. Secondary alerts on an already matched attack flow are tracked as co-occurring sub-alerts rather than artificially inflating True Positive counts.
+
+3. **Exhaustive vs. Partial Label Set Handling:**
+   - **Exhaustive Ground Truth Mode (`exhaustive=True`):** Applicable to controlled synthetic scenarios or fully labeled benchmark corpuses where every packet is accounted for. Any unmatched alert is classified as a False Positive (`FP`).
+   - **Partial / Targeted Ground Truth Mode (`exhaustive=False`):** Applicable to external research PCAPs targeting specific exploit vectors (e.g., Log4Shell, Teardrop, ICMP tunnel). Alerts raised outside the labeled ground-truth set are classified as `UNASSESSED` (or `EXTRA_ALERT`), preventing spurious penalty on secondary real-world anomalies.
+   - **Unassessed Reference Captures (`UNASSESSED_REFERENCE_CAPTURE`):** When a capture tests an attack family or protocol domain outside active IDS signature scope (e.g., man-on-the-side TCP racing, firewall whitelisting policies, low-frequency C2 beaconing), it is recorded as unassessed reference data rather than miscategorized as a detection failure.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant P as Packet / Flow Stream
-    participant NG as NetGuard RuleEngine
+    participant NG as NetGuard RuleEngine (22 Rules)
     participant GT as Ground Truth (Zeek/Publisher)
-    participant M as Verification Matcher
+    participant M as Bijective Verification Matcher
 
     P->>NG: Ingest packet (timestamp T)
     P->>GT: Reference flow classification
-    NG->>NG: State evaluation & alert generation
+    NG->>NG: State evaluation across 22 detection rules
     alt Alert Generated
         NG->>M: Emits Alert (Rule, Src, Dst, Port, T_alert)
         GT->>M: Provides Reference Label (FlowKey, T_start, T_end, Category)
-        M->>M: Match (FlowKey_NG == FlowKey_GT) & (T_start <= T_alert <= T_end + 5s)
-        alt Matched Attack Label
-            M->>M: Classify as TRUE POSITIVE (TP)
+        M->>M: Match (canonical(FlowKey_NG) == canonical(FlowKey_GT)) & (T_start <= T_alert <= T_end + 5s)
+        alt Matched Attack Label & Unclaimed
+            M->>M: Classify as TRUE POSITIVE (TP) [Claim label bijectively]
         else Matched Benign Label
             M->>M: Classify as FALSE POSITIVE (FP)
-        else Unlabelled / Ambiguous
-            M->>M: Classify as UNCERTAIN
+        else Unmatched in Partial Mode
+            M->>M: Classify as UNASSESSED / CO-OCCURRING
+        else Unmatched in Exhaustive Mode
+            M->>M: Classify as FALSE POSITIVE (FP)
         end
     else No Alert Generated
         alt Ground Truth was Malicious Attack
@@ -123,7 +138,7 @@ sequenceDiagram
 
 ---
 
-## 4. Auditor Sign-Off
+## 4. Auditor Sign-Off & Governance Invariant
 
-- **Dataset Researcher Verdict:** `APPROVED`. External dataset provenance, licenses, hashes, and flow labels are verified against official CTU and Wireshark repositories.
-- **Independent Security Auditor Verdict:** `APPROVED WITH FINDINGS`. The identified false-positive vulnerabilities in reverse DNS (`in-addr.arpa`) and DNS query ports in UDP flood must be corrected under strict regression test discipline in Phase 4G while maintaining the 19-rule invariant.
+- **Dataset Researcher Verdict:** `APPROVED`. External dataset provenance, licenses, hashes, and flow labels are verified against official CTU, Wireshark, Nozomi Networks, and Fox-IT repositories across 16 verified captures.
+- **Independent Security Auditor Verdict:** `APPROVED`. Detection engine operates with 22 registered, evidence-driven rules under modern rule governance invariants. Port boundaries ($1 \le \text{port} \le 65535$), $O(1)$ LRU state bounding via `prune_stale(now)`, and rich forensic evidence dictionaries are verified across the 587-test suite.

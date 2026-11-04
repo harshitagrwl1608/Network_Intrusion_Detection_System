@@ -139,8 +139,11 @@ class TestIcmpTunnelRule(unittest.TestCase):
         alert = rule.check(record)
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "ICMP_TUNNEL")
-        self.assertEqual(alert["evidence"]["anomaly_type"], "HIGH_ENTROPY_TUNNEL")
+        self.assertEqual(alert["evidence"]["anomaly_type"], "BASE64_EXFILTRATION")
+        self.assertEqual(alert["severity"], "high")
+        self.assertEqual(alert["confidence"], "high")
         self.assertGreaterEqual(alert["evidence"]["entropy"], 4.5)
+        self.assertGreaterEqual(alert["evidence"]["b64_ratio"], 0.95)
 
     def test_detects_ipv6_icmpv6_tunnel(self):
         """Detects covert tunnel transported over ICMPv6 Echo Request (type 128)."""
