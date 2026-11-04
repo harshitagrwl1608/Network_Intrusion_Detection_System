@@ -796,6 +796,20 @@ def get_candidate_queue() -> list[dict]:
             "compression": "zip",
             "archive_member": "nmap_OS_scan_succesful",
         },
+        {
+            "id": "oisf_modbus",
+            "name": "OISF Modbus/TCP Industrial Control Baseline",
+            "publisher": "OISF / ITI ICS Tools",
+            "url": "https://raw.githubusercontent.com/OISF/suricata-verify/master/tests/modbus/modbus-raw/modbus-test.pcap",
+            "type": "pcap",
+            "size_est_bytes": 8701,
+            "category": "ICS / SCADA Protocol Verification",
+            "attack_type": "Industrial Modbus/TCP operational traffic baseline (benign / zero false positive)",
+            "target_rules": ["FP_BENIGN_VERIFICATION"],
+            "ground_truth": "Authentic Modbus/TCP query/response frames on port 502 (verifies zero false positives and parser stability on industrial automation traffic)",
+            "provenance_type": "curated_research_capture",
+            "compression": None,
+        },
     ]
 
 
@@ -1082,7 +1096,7 @@ class PipelineCoordinator:
                     tracking_engine = create_replay_engine(conn, blocklist, config)
 
                     t0 = time.perf_counter()
-                    replay_pcap(pcap_path, tracking_engine)
+                    replay_stats = replay_pcap(pcap_path, tracking_engine)
                     tracking_engine.flush()
                     eval_time = max(0.001, time.perf_counter() - t0)
 
@@ -1134,7 +1148,8 @@ class PipelineCoordinator:
                     logger.info(f"[{cid}] Rule breakdown: {rule_breakdown}")
 
                     git_rev = get_git_revision()
-                    packet_cnt = tool_stats.get("packet_count") or stats.get("packets_total", 0)
+                    p_total = replay_stats.get("total", 0) if isinstance(replay_stats, dict) else 0
+                    packet_cnt = p_total or tool_stats.get("packet_count") or stats.get("packets_total", 0)
 
                     eval_result = {
                         "id": cid,

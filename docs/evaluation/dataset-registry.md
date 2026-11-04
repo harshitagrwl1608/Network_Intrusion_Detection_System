@@ -277,15 +277,32 @@ This registry records all external network traffic datasets acquired, verified, 
 
 ---
 
+### Entry DS-17: `oisf_modbus` (OISF Modbus/TCP Industrial Control Baseline)
+- **Official Name:** modbus-test.pcap
+- **Publisher:** Open Information Security Foundation (OISF) / ITI ICS Tools
+- **Official Download URL:** `https://raw.githubusercontent.com/OISF/suricata-verify/master/tests/modbus/modbus-raw/modbus-test.pcap`
+- **Download Date:** 2026-11-04
+- **License / Terms:** Open Information Security Foundation (GPL v2)
+- **File Format:** libpcap (binary capture)
+- **Capture File Size:** 8,701 bytes (~8.5 KB)
+- **SHA-256 Digest:** `809e2bbded145ccf3491bbb7a1f7b04b3b296bcc6e98e0fbc08f20dfa85e0a7f`
+- **Packet Count:** 99 packets
+- **Traffic Nature:** Authentic Modbus/TCP query and response frames on standard industrial port 502.
+- **Target NetGuard Rules:** `FP_BENIGN_VERIFICATION` (zero false alarm baseline).
+- **Evaluation Verdict:** `TRUE_NEGATIVE` (99/99 packets processed, 0 alerts raised, 100% specificity).
+- **Key Forensic Finding:** Confirms engine parser resilience and absence of false positive alerts on industrial control automation (SCADA/ICS) protocol traffic.
+
+---
+
 ## 3. Storage Allocation and Quota Audit
 
 | Metric | Measured Value | Quota Limit | Status |
 |---|---|---|---|
 | **Mount Device** | `/dev/sdb1` | `/dev/sdb1` | Valid |
 | **Mount Location** | `/run/media/harshitgarg/Data1` | External HDD | Valid |
-| **Total Acquired Data** | 195,856,507 bytes (~0.182 GiB) | $\le 5.0$ GiB (initial) | **PASS** (3.6% of initial cap) |
+| **Total Acquired Data** | 195,865,208 bytes (~0.182 GiB) | $\le 5.0$ GiB (initial) | **PASS** (3.6% of initial cap) |
 | **Available Disk Space** | 625.3 GiB | $\ge 100$ GiB | **PASS** (625% above minimum) |
 | **Total NetGuard Allocation** | $\approx 0.19$ GiB | $\le 450$ GiB | **PASS** |
 | **Independent Publishers** | 6 (Stratosphere CTU, Wireshark, Nozomi Networks, Fox-IT, m-rau5, OISF) | $\ge 2$ | **PASS** |
-| **Distinct Verified Captures** | 16 | Multi-scenario | **PASS** |
+| **Distinct Verified Captures** | 17 | Multi-scenario | **PASS** |
 | **Registered Detection Rules** | 23 | Distinct & Tested | **PASS** |

@@ -608,12 +608,14 @@ def _replay_text_log(log_path: str, rule_engine):
     if processed == 0:
         logger.error("Text log replay: zero records were successfully parsed.")
     logger.info(f"Replay complete: {processed} text log entries processed ({skipped} skipped)")
+    return {"processed": processed, "total": processed + skipped}
 
 
 def replay_pcap(pcap_path: str, rule_engine):
     """
     Replay a saved .pcap or tcpdump text file through the rule engine.
     Automatically detects whether file is binary PCAP or ASCII tcpdump log.
+    Returns dict with 'processed' and 'total' packet counts.
     """
     # Check if the file is an ASCII text log or binary PCAP
     try:
@@ -625,12 +627,11 @@ def replay_pcap(pcap_path: str, rule_engine):
                                    b"\x0a\x0d\x0d\x0a")
     except Exception as e:
         logger.error(f"Cannot read file {pcap_path}: {e}")
-        return
+        return {"processed": 0, "total": 0}
 
     if not is_binary_pcap:
         # File is ASCII text (e.g. created with `tcpdump > file.pcap` or `tcpdump > file.log`)
-        _replay_text_log(pcap_path, rule_engine)
-        return
+        return _replay_text_log(pcap_path, rule_engine)
 
     if not SCAPY_AVAILABLE:
         raise RuntimeError("Scapy is not installed")
@@ -659,4 +660,5 @@ def replay_pcap(pcap_path: str, rule_engine):
     finally:
         reader.close()
     logger.info(f"Replay complete: {processed}/{total} packets processed")
+    return {"processed": processed, "total": total}
 
