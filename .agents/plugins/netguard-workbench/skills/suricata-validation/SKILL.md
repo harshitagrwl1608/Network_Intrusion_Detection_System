@@ -50,3 +50,4 @@ print(f"Concordance: {metrics['agreement_rate']:.2%}")
 ## Guardrails
 - Suricata is a comparison baseline, not ground truth. Detections by NetGuard without a Suricata match are not automatically false positives.
 - Network telemetry corroboration is limited to observable network-layer and transport-layer phenomena; it cannot independently prove or disprove endpoint-internal state.
+

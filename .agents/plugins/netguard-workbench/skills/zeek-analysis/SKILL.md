@@ -51,3 +51,4 @@ def parse_zeek_json_log(log_path):
 ## Guardrails
 - Maintain distinction between Zeek event logs (protocol parsing) and NetGuard detection alerts (threat detection).
 - Do not introduce Zeek runtime dependencies into NetGuard core rule execution.
+

@@ -114,10 +114,10 @@ Each agent defines dedicated tool permissions, system prompts, and strict file b
 | Hook Event | Script | Invariant Enforced | Behavior & Return Schema |
 | :--- | :--- | :--- | :--- |
 | **`SessionStart`** | `scripts/session_start.py` | State awareness | Injects current Git branch, commit status, and autonomy cycle into the conversation trajectory. |
-| **`PreToolUse`** | `scripts/pre_tool_guard.py` | Git & directory protection | Tokenizes commands with `shlex`. Blocks `git push origin main`, force-pushes (`-f`), `git reset --hard`, branch deletions (`-D`), and recursive deletion of datasets or core directories. Returns `decision: allow` or `decision: deny`. |
-| **`PostToolUse`** | `scripts/post_tool_logger.py` | Sanitized auditing | Records operational audit events to `.agents/plugins/netguard-workbench/logs/workbench_audit.log`. Redacts tokens, passwords, and API keys. Returns `{}`. |
+| **`PreToolUse`** | `scripts/pre_tool_guard.py` | Git & directory protection | Tokenizes commands with `shlex.shlex(punctuation_chars=True)`. Fails closed on malformed/empty input. Blocks `git push origin main`, force-pushes (`-f`), `git reset --hard`, branch deletions (`-D`), refspec evasion (`+main`, `:main`), global flag bypasses (`git -C .`), and recursive deletion of datasets or core directories. Returns `decision: allow` or `decision: deny`. |
+| **`PostToolUse`** | `scripts/post_tool_logger.py` | Sanitized auditing | Records operational audit events to `.agents/plugins/netguard-workbench/logs/workbench_audit.log` (predictable workspace location). Implements 5 MB rotation and safe file locking. Redacts tokens, passwords, JWTs, and API keys. Returns `{}`. |
 | **`PreInvocation`** | `scripts/pre_invocation.py` | Context injection | Injects ephemeral workspace reminders regarding the 19-rule limit and authorized branch. |
-| **`Stop`** | `scripts/stop_checkpoint.py` | Durable checkpointing | Saves a structured checkpoint to `checkpoint.json`. **Guaranteed non-looping**: returns `decision: allow`. |
+| **`Stop`** | `scripts/stop_checkpoint.py` | Durable checkpointing | Saves a structured checkpoint to `logs/checkpoint.json`. **Guaranteed non-looping**: returns `decision: allow`. |
 
 ---
 
@@ -128,36 +128,55 @@ Configured in `mcp_config.json`, the workbench exposes two dedicated local stdio
 ### A. `netguard-pcap` (`scripts/pcap_mcp_server.py`)
 - **`pcap_metadata`**: File size, packet count, timestamp span, duration.
 - **`protocol_distribution`**: Breakdown of packets across Ethernet, IP, TCP, UDP, ICMP, DNS, HTTP, TLS.
-- **`flow_summary`**: 5-tuple flow statistics and top communicating endpoints.
+- **`flow_summary`**: 5-tuple flow statistics and top communicating endpoints (bounded 1..100).
 - **`tcp_flags`**: Flag distribution and anomaly detection (SYN+FIN, NULL, XMAS).
 - **`dns_inventory`**: DNS queries, types, unique domains, and Shannon entropy for DGA/tunnel detection.
 - **`suricata_eve_summary`**: Summarizes Suricata EVE JSON alert telemetry.
 - **`dataset_hash_verify`**: Computes SHA-256 and MD5 cryptographic checksums.
+- **Security Hardening**: Enforces `os.path.realpath` traversal checks, 100 MB capture size bounding, and Scapy exception wrappers.
 
 ### B. `netguard-eval-db` (`scripts/eval_db_mcp_server.py`)
 - **`evaluation_db_summary`**: Schema, tables, and row counts of SQLite evaluation databases in read-only mode (`mode=ro`).
-- **`evaluation_db_query_alerts`**: Parameterized read-only queries with parsed `evidence` JSON.
+- **`evaluation_db_query_alerts`**: Parameterized read-only queries with parsed `evidence` JSON, clamped limits (1..500).
 - **`evaluation_db_rule_statistics`**: Aggregates alert statistics by rule name, severity, and IP counts.
+- **Security Hardening**: Enforces SQLite read-only URI mode (`mode=ro`), strict table/column identifier whitelisting, and parameterized SQL.
 
 ---
 
-## 8. Orchestration & Execution Safety
+## 8. Layered Git Safety Model
 
-### Available Orchestration Modalities
-- **IDE Collaborative Modality**: Integrated chat canvas, visual diff overlays, code lenses, and subagent orchestration.
-- **Subagent Delegation**: Asynchronous specialists (`pcap-analyst`, `detection-rule-engineer`, `suricata-validator`, etc.) spawned via `invoke_subagent` with reactive wakeup.
-- **Model Inheritance**: All subagents inherit the user-selected model (Gemini Flash High) and available reasoning effort.
-- **Workspace Isolation**: Worktrees and branch isolation prevent concurrent write collisions.
+The NetGuard Workbench implements a 3-tier defense-in-depth safety architecture:
+1. **Tier 1 (Antigravity Hook)**: `pre_tool_guard.py` intercepts `run_command` invocations.
+2. **Tier 2 (Native Local Hook)**: `.git/hooks/pre-push` (`scripts/git_pre_push.py`) rejects pushes or branch deletions targeting `main` at the Git transport layer.
+3. **Tier 3 (Remote Policies)**: GitHub branch protection rules requiring reviewed pull requests and green CI status checks.
 
-### Unattended Execution Safety
-The recommended settings configuration maintains seamless automation without compromising boundaries:
-- `autoExecutionPolicy`: `CASCADE_COMMANDS_AUTO_EXECUTION_EAGER` (enables automated test and build runs).
-- `artifactReviewMode`: `ARTIFACT_REVIEW_MODE_TURBO`.
-- Safety boundary enforced deterministically via `pre_tool_guard.py` rather than interactive prompts.
+Detailed documentation: [`docs/autonomy/git-security-model.md`](./git-security-model.md).
 
 ---
 
-## 9. Known Limitations & Troubleshooting
+## 9. Multi-Agent Controlled Collaboration Workflow
+
+Multi-agent engineering workflows follow a strict 5-phase sequential lifecycle:
+`Research/Analysis -> Implementation -> QA/Regression -> Security Audit -> Evidence Report & Commit`
+
+Key Invariants:
+- **Anti-Self-Approval**: An implementation agent (`detection-rule-engineer`) cannot approve its own changes.
+- **The Challenger Pattern**: Reviewer agents (`regression-qa-reviewer`, `independent-security-auditor`) must actively test for evasion and boundary errors.
+- **Single-Agent Write Locks**: Only one subagent may hold write locks on code modules at any time.
+- **Bounded Iterations**: Maximum 3 revision loops before human escalation.
+
+Detailed documentation: [`docs/autonomy/collaboration-workflow.md`](./collaboration-workflow.md).
+
+---
+
+## 10. Threat Model & Residual Risk Register
+
+Comprehensive STRIDE threat modeling and residual risk evaluation are documented in:
+[`docs/autonomy/threat-model-and-residual-risks.md`](./threat-model-and-residual-risks.md).
+
+---
+
+## 11. Known Limitations & Troubleshooting
 
 1. **Suricata / Zeek Host Binaries**:
    `suricata` and `zeek` native binaries are not installed on this Linux host (`tshark` and `scapy` are installed). Suricata and Zeek telemetry analysis is performed via pre-generated logs (`eve.json`, `conn.log`) and Scapy PCAP replayers.
@@ -167,3 +186,8 @@ The recommended settings configuration maintains seamless automation without com
    Large PCAPs (>100 MB) should be inspected using `tshark` or sampled frames rather than loading entirely into memory via Scapy `rdpcap`.
 4. **Hook Permissions**:
    Ensure all Python scripts in `scripts/` have execution permissions (`chmod +x scripts/*.py`).
+3. **PCAP Size Limits**:
+   Large PCAPs (>100 MB) should be inspected using `tshark` or sampled frames rather than loading entirely into memory via Scapy `rdpcap`.
+4. **Hook Permissions**:
+   Ensure all Python scripts in `scripts/` have execution permissions (`chmod +x scripts/*.py`).
+

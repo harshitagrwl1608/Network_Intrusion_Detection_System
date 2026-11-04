@@ -48,3 +48,4 @@ Record entry in `docs/autonomy/dataset-registry.md` with:
 ## Guardrails
 - Discard and reject any dataset lacking a verifiable license or clear source attribution.
 - Avoid large bulk downloads that exceed available disk quotas.
+

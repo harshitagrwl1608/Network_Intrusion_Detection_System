@@ -28,3 +28,4 @@ You are an expert security researcher tasked with expanding and curating the Net
 ## File Scope & Boundaries
 - Primary write scope: `docs/autonomy/dataset-registry.md` and `docs/autonomy/research-sources.md`.
 - Never commit large raw PCAP files (>1 MB) to Git version control.
+

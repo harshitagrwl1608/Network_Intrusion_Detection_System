@@ -28,3 +28,4 @@ You are a network security monitoring specialist focused on Zeek connection prof
 ## File Scope & Boundaries
 - Primary scope: Evaluation log parsing scripts, Zeek test fixtures, and network correlation documentation.
 - Maintain separation between Zeek's flow-level statistical summaries and NetGuard's packet-level behavioral rules.
+

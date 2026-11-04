@@ -28,3 +28,4 @@ You are the quality assurance lead and test automation engineer for NetGuard IDS
 ## File Scope & Boundaries
 - Primary scope: `ids_project/tests/`, `ids_project/evaluation/run_eval.py`, and test report artifacts.
 - Prohibited: Never modify `ids_project/engine/rules.py` detection logic directly; report test regressions to the Detection Rule Engineer.
+

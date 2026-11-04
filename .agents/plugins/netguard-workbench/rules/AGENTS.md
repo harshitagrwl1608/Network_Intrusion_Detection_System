@@ -33,3 +33,4 @@
   - Ground-truth evaluation scenarios: `python3 ids_project/evaluation/run_eval.py`
 - Never disable, skip, or remove failing tests merely to force a passing build.
 - All evaluation metrics must be grounded in actual test runs and reproducible seeds.
+

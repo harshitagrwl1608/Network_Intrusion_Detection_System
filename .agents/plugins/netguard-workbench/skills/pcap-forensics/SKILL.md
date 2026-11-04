@@ -68,3 +68,4 @@ print(f"Unique TCP flows: {len(tcp_flows)}")
 ## Guardrails
 - Never commit PCAP files larger than 1 MB to git repository tracking.
 - Sanitize payload strings when logging to prevent terminal injection or control character escape.
+

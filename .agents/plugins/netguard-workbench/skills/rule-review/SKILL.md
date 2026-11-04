@@ -51,3 +51,4 @@ Run unit tests across all rules:
 pytest ids_project/tests/test_finite_rule_timestamps.py
 pytest ids_project/tests
 ```
+

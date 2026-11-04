@@ -58,3 +58,4 @@ python3 -m pytest ids_project/tests/test_pcap_replay_and_parsing.py -k "memory o
 ## Guardrails
 - LRU bounding must preserve recent active attackers; never evict active malicious hosts in favor of inactive benign IPs.
 - Never use direct `del self._dict[k]` during iterations without snapshotting keys or using `.pop(k, None)` to prevent `KeyError` concurrency issues.
+

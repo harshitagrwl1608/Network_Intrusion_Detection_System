@@ -44,3 +44,4 @@ All 482+ tests across unit, integration, memory, and performance suites must pas
 ## Guardrails
 - Never disable or comment out failing tests.
 - Every metric reported must be grounded in an actual script execution output.
+

@@ -29,3 +29,4 @@ You are the senior detection engineer responsible for maintaining and hardening 
 - **Strict Rule Count Invariant**: Exactly 19 rule instances registered in `RuleEngine.rules`. NEVER add new detection rules or dummy rules.
 - File scope: `ids_project/engine/rules.py` and corresponding unit tests in `ids_project/tests/`.
 - Verification requirement: Must run `pytest ids_project/tests` and `python3 ids_project/evaluation/run_eval.py` after any modification.
+

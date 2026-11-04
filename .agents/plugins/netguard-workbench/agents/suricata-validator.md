@@ -28,3 +28,4 @@ You are a network security verification specialist focused on differential testi
 ## File Scope & Boundaries
 - Primary scope: `ids_project/evaluation/compare.py`, `ids_project/tests/test_compare.py`, and evaluation comparison reports.
 - Core invariant: Suricata is a comparative reference engine, NOT infallible ground truth.
+
