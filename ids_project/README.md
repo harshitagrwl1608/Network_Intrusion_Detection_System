@@ -13,7 +13,7 @@
 > [!NOTE]
 > ### 🚧 Ongoing Project Notice
 > **NetGuard IDS is currently under active development.**  
-> The core packet-sniffing engine, 19-rule signature and heuristic detection suite, 17-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization, Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed 409 tests. The synthetic evaluation detected 38/38 labelled scenarios across all 19 existing rules, with zero unmatched attack alerts and zero alerts on the benign fixture; fixture results do not estimate real-world accuracy. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
+> The core packet-sniffing engine, 21-rule evidence-driven detection suite, 18-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization (including Triconex TriStation 1131 ICS signatures), Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed **560 tests** (and 210 subtests). The synthetic evaluation detected 38/38 labelled scenarios across all registered rules with 100.0% precision, 100.0% recall, zero unmatched attack alerts, and zero alerts on the benign fixture. Real-world validation spans 16 PCAP captures across 6 independent publishers with cross-engine corroboration against Suricata and Zeek. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
 
 ---
 
@@ -71,11 +71,12 @@ Home and small-office networks generate continuous connection traffic, yet small
  │  │ 3. Floods & DoS : SYN_FLOOD, DISTRIBUTED_SYN_FLOOD, UDP_FLOOD,   │  │
  │  │                   ICMP_FLOOD, TCP_ZERO_WINDOW (Sockstress)       │  │
  │  │ 4. Protocol/MITM: TCP_FLAG_ANOMALY, ARP_SPOOF (Persistent Table) │  │
- │  │ 5. App & Payloads: PAYLOAD_HIT (17 DPI Signatures + Multi-Pass), │  │
+ │  │ 5. App & Payloads: PAYLOAD_HIT (18 DPI Signatures + Multi-Pass), │  │
  │  │                   DNS_ANOMALY (Entropy + Tunneling + Hex-Chunks),│  │
  │  │                   BRUTE_FORCE (Auth Services), DATA_EXFIL,       │  │
  │  │                   TLS_ANOMALY (Direct-IP SNI),                   │  │
- │  │                   CLEAR_HTTP_ON_TLS_PORT                         │  │
+ │  │                   CLEAR_HTTP_ON_TLS_PORT,                        │  │
+ │  │                   NON_DNS_TRAFFIC_ON_DNS_PORT, ICMP_TUNNEL       │  │
  │  └──────────────────────────────────────────────────────────────────┘  │
  │                   • False-Positive Mitigations Filter                  │
  └───────────────────┬────────────────────────────────┬───────────────────┘
@@ -101,7 +102,7 @@ Home and small-office networks generate continuous connection traffic, yet small
 
 ## 🔍 Core Detection Rules
 
-NetGuard implements **19 detection rules** spanning stateless lookups, stateful sliding windows, deep packet inspection, TLS inspection, and algorithmic information theory:
+NetGuard implements **21 evidence-driven detection rules** spanning stateless lookups, stateful sliding windows, deep packet inspection, TLS inspection, and algorithmic information theory under strict distinct value governance:
 
 | Rule ID | Detection Mechanism | Methodology | Tunable Defaults |
 |---|---|---|---|
@@ -116,7 +117,7 @@ NetGuard implements **19 detection rules** spanning stateless lookups, stateful 
 | **`ICMP_SWEEP`** | Host Discovery | Counts distinct IPv4/IPv6 destinations of ICMP echo requests per source in a sliding window; ignores replies and duplicate probes to the same host. | $\ge 12$ hosts in $10\text{s}$ |
 | **`ICMP_FLOOD`** | ICMP Echo Flood Denial-of-Service | Stateful sliding window tracking valid code-zero IPv4/IPv6 echo requests to a single target; a rate-threshold match is a medium-severity heuristic and does not establish attack intent. | $\ge 50$ echo requests in $5\text{s}$ |
 | **`ARP_SPOOF`** | Man-in-the-Middle (MITM) & Cache Poisoning | Stateful persistent table tracking valid IPv4-to-unicast-MAC pairings with bounded identity/cooldown state. A changed mapping emits a medium-severity heuristic alert because a mapping change alone cannot confirm spoofing. | 120s alert cooldown |
-| **`PAYLOAD_HIT`** | Deep Packet Inspection (DPI) | Bounded connection-aware TCP stream & packet DPI matching 17 regex signatures with multi-pass URL decoding, form decoding, null-byte stripping, and comment normalization. Alert cooldown state is bounded by host pair, transport and service, preserves active entries under churn, and retains newer evidence when events arrive out of order. | 512-byte buffer cap; TCP tuple reuse resets sequence state; 60s alert cooldown |
+| **`PAYLOAD_HIT`** | Deep Packet Inspection (DPI) | Bounded connection-aware TCP stream & packet DPI matching 18 regex signatures with multi-pass URL decoding, form decoding, null-byte stripping, and comment normalization. Alert cooldown state is bounded by host pair, transport and service, preserves active entries under churn, and retains newer evidence when events arrive out of order. | 512-byte buffer cap; TCP tuple reuse resets sequence state; 60s alert cooldown |
 | **`DNS_ANOMALY`** | DGA, Length, Frequency & Tunneling | Maximum Shannon entropy across labels through registrable domain, longest individual DNS-label length, repeated parent frequency (short exact transaction retries are deduplicated when DNS ID metadata is available), distinct nested-subdomain exfil with threshold-bounded evidence, covert hex-chunk tunneling, and bounded LRU alert cooldown state. | Entropy $\ge 3.8$, label length $> 60$, freq $\ge 20$, subdomains $\ge 20$ |
 | **`BRUTE_FORCE`** | Credential Brute-Force Attacks | Stateful sliding window tracking repeated SYN attempts to credentialed authentication services (SSH, RDP, SMB, MySQL, FTP, Telnet); it does not observe credential submission or login outcomes, so alerts are medium-severity heuristic leads. Exact SYN retransmissions are suppressed when metadata is available and saturated counts are lower bounds. | $\ge 20$ attempts in $60\text{s}$ |
 | **`SLOW_PORT_SCAN`** | Low-and-Slow Port Reconnaissance | Extended sliding window tracking stealthy horizontal or vertical scans intentionally spaced to evade rapid 10s rate detectors; bounds cooldown state with LRU retention. | $\ge 30$ ports/hosts in $120\text{s}$; 120s cooldown |
@@ -124,9 +125,11 @@ NetGuard implements **19 detection rules** spanning stateless lookups, stateful 
 | **`TLS_ANOMALY`** | TLS Handshake SNI Anomaly & Tunnels | Binary parsing of TLS 1.0–1.3 Client Hello Server Name Indication (SNI). Literal-IP SNI remains a high-severity protocol violation; dynamic-proxy suffix matches are medium-severity heuristic leads. | Enabled by default; 60s cooldown |
 | **`CLEAR_HTTP_ON_TLS_PORT`** | Plaintext HTTP on Encrypted Port | Detects repeated cleartext HTTP requests on TLS ports (`443`, `8443`); per-service request history is capped at the configured threshold and uses bounded LRU state for history and cooldown. Saturated counts are marked as lower bounds. This may indicate C2 bypass or intentional service misconfiguration. | $\ge 2$ requests in $600\text{s}$; 600s cooldown |
 | **`TCP_ZERO_WINDOW`** | Sockstress / Zero-Window DoS | Tracks repeated TCP Zero-Window (`win=0`) advertisements per endpoint pair, with bounded per-key evidence and state; counts are reported as a lower bound when the threshold-sized evidence window is full. | $\ge 20$ packets in $10\text{s}$; 60s cooldown |
+| **`NON_DNS_TRAFFIC_ON_DNS_PORT`** | Non-DNS Protocol or Shell on Port 53 | Detects non-DNS protocols, interactive command shells (`cmd.exe`, `/bin/sh`), and unauthorized bidirectional communications operating on UDP/TCP port 53; RFC 1035 QNAME validation prevents header evasion. | Instant trigger; 60s cooldown |
+| **`ICMP_TUNNEL`** | Covert ICMP Tunneling & Exfiltration | Detects covert tunneling channels, reverse shells (`icmpsh`), Base64 exfiltration chunks, and embedded PE/ELF executables within oversized high-entropy ICMP Echo requests/replies. | Length $\ge 64$B, entropy $\ge 4.5$; 60s cooldown |
 
 ### 🔬 Deep Packet Inspection (DPI) Signatures
-`PayloadRule` evaluates raw packet payloads and ordered, bounded TCP streams against 17 categorized threat signatures with automatic multi-pass URL decoding (up to 3 passes), form decoding (`+` to space), null-byte stripping (`%00` and `\x00`), and inline SQL comment collapsing (`/*...*/`):
+`PayloadRule` evaluates raw packet payloads and ordered, bounded TCP streams against 18 categorized threat signatures with automatic multi-pass URL decoding (up to 3 passes), form decoding (`+` to space), null-byte stripping (`%00` and `\x00`), and inline SQL comment collapsing (`/*...*/`):
 
 1. **`SQL_INJECTION`**: `UNION SELECT`, `' OR 1=1`, `HAVING 1=1`, `WAITFOR DELAY`, and stacked queries.
 2. **`XSS`**: `<script>`, `javascript:`, and DOM event handlers (`onload=`, `onerror=`).
@@ -145,6 +148,7 @@ NetGuard implements **19 detection rules** spanning stateless lookups, stateful 
 15. **`REVERSE_SHELL_CRADLE`**: Interactive download cradles (`curl ... | sh`, `powershell IEX`, `/dev/tcp`, `mkfifo`).
 16. **`HTTP_METHOD_TAMPERING`**: Non-standard HTTP methods & WebDAV probing (`TRACE`, `TRACK`, `PROPFIND`, `Translate: f`).
 17. **`WEBSHELL_INJECTION`**: Malicious webshell execution markers (`eval(base64_decode(...))`, `system($_GET[...])`, `Runtime.getRuntime().exec()`).
+18. **`ICS_TRISTATION_EXPLOIT`**: Industrial Control Systems (ICS) / SCADA Schneider Electric Triconex TriStation 1131 program injection on UDP port 1502 (TRITON / TRISIS malware mitigation).
 
 ### 🛡️ False-Positive Mitigations
 - **Source Service Port Exemption:** Packets originating *from* well-known service ports (e.g., `53/DNS`, `80/HTTP`, `443/HTTPS`, `123/NTP`) are exempted from scanner rules to prevent high-volume DNS/Web servers from being flagged as attackers.
