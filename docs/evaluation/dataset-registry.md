@@ -32,7 +32,7 @@ This registry records all external network traffic datasets acquired, verified, 
   - Suricata EVE JSON (`eve.json`, 5,000,194 bytes, 8,950 events)
   - Zeek Connection Log (`conn.log.labeled`, 2,926,718 bytes, 23,145 flows)
 - **Label Granularity:** Bidirectional flow-level labels (Zeek: 21,222 Malicious, 1,923 Benign).
-- **Target NetGuard Rules:** `SYN_FLOOD`, `DISTRIBUTED_SYN_FLOOD`, `UDP_FLOOD`, `PORT_SCAN`, `BRUTE_FORCE`, `DATA_EXFIL`, `DNS_ANOMALY`.
+- **Target NetGuard Rules:** `SYN_FLOOD`, `DISTRIBUTED_SYN_FLOOD`, `UDP_FLOOD`, `PORT_SCAN`, `BRUTE_FORCE`, `DATA_EXFIL`, `DNS_ANOMALY`, `IRC_C2_BEACONING`.
 - **Known Limitations:** Incomplete TCP handshakes on scanning targets (expected for SYN scanning).
 - **Citation:** Sebastian Garcia, Agustin Parmisano, & Maria Jose Erquiaga. (2020). *IoT-23: A labeled dataset with malicious and benign IoT network traffic*. Zenodo. DOI: 10.5281/zenodo.4743746.
 
@@ -91,7 +91,7 @@ This registry records all external network traffic datasets acquired, verified, 
 - **Monitored Hardware:** Somfy connected doorlock (physical hardware device, `192.168.1.132`)
 - **Traffic Nature:** 100% Genuine Benign IoT Operational Traffic (mDNS, TLS, HTTP, NTP, SSDP).
 - **Label Granularity:** Fully benign ground truth.
-- **Target NetGuard Rules:** Zero false-positive verification across all 19 rules.
+- **Target NetGuard Rules:** Zero false-positive verification across all 23 rules.
 - **Citation:** Sebastian Garcia et al. (2020). *IoT-23 Dataset*.
 
 ---
