@@ -187,7 +187,7 @@ def update_cumulative_budget(newly_downloaded_bytes: int, elapsed_time_s: float)
 
 
 # Evaluator version — bump when evaluation logic changes to invalidate cached results.
-_EVALUATOR_VERSION = "1.2.0"
+_EVALUATOR_VERSION = "1.3.0"
 
 
 def compute_eval_cache_key(pcap_path: str, candidate: dict) -> str:
@@ -685,8 +685,8 @@ def get_candidate_queue() -> list[dict]:
             "type": "pcap",
             "size_est_bytes": 126317980,
             "category": "DoS, Scans, Brute Force & C2",
-            "attack_type": "Mirai botnet: SYN flood, Telnet brute force, DNS C2",
-            "target_rules": ["SYN_FLOOD", "PORT_SCAN", "BRUTE_FORCE", "DNS_ANOMALY"],
+            "attack_type": "Mirai botnet: SYN flood, Telnet brute force, DNS C2, IRC C2",
+            "target_rules": ["SYN_FLOOD", "PORT_SCAN", "BRUTE_FORCE", "DNS_ANOMALY", "IRC_C2_BEACONING", "DATA_EXFIL", "UDP_FLOOD"],
             "ground_truth": "CTU-IoT-Malware-34-1 with publisher Suricata and Zeek logs",
             "compression": None,
         },
@@ -1053,7 +1053,7 @@ class PipelineCoordinator:
                 try:
                     with open(out_eval_file, "r") as f:
                         data = json.load(f)
-                    if "rule_breakdown" in data and (data.get("cache_key") == cache_key or "cache_key" not in data):
+                    if "rule_breakdown" in data and data.get("cache_key") == cache_key:
                         cached_result = data
                 except Exception as exc:
                     logger.warning(f"[{cid}] Could not read existing evaluation {out_eval_file}: {exc}")
@@ -1207,6 +1207,11 @@ class PipelineCoordinator:
 if __name__ == "__main__":
     force = "--force" in sys.argv or "-f" in sys.argv
     candidates = get_candidate_queue()
+    if "--id" in sys.argv:
+        idx = sys.argv.index("--id")
+        if idx + 1 < len(sys.argv):
+            target_id = sys.argv[idx + 1]
+            candidates = [c for c in candidates if c["id"] == target_id]
     coord = PipelineCoordinator(candidates, force_reeval=force)
     results = coord.run()
     print("\n" + "=" * 70)
