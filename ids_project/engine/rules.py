@@ -5868,6 +5868,10 @@ class IpFragmentAnomalyRule:
 
     def __init__(self, cooldown: float = 60.0, reassembly_timeout: float = 30.0,
                  enabled: bool = True):
+        if hasattr(cooldown, "IP_FRAGMENT_ANOMALY_COOLDOWN_S"):
+            cfg = cooldown
+            cooldown = getattr(cfg, "IP_FRAGMENT_ANOMALY_COOLDOWN_S", 60.0)
+            reassembly_timeout = getattr(cfg, "IP_FRAGMENT_REASSEMBLY_TIMEOUT_S", 30.0)
         self.cooldown = _nonnegative_float_setting(
             cooldown, 60.0, "IP_FRAGMENT_ANOMALY_COOLDOWN_S"
         )
@@ -6273,6 +6277,12 @@ class IrcC2BeaconingRule:
         cooldown: float = None,
         max_sources: int = None,
     ):
+        if hasattr(threshold, "IRC_BEACONING_THRESHOLD"):
+            cfg = threshold
+            threshold = getattr(cfg, "IRC_BEACONING_THRESHOLD", 5)
+            window = getattr(cfg, "IRC_BEACONING_WINDOW", 300)
+            cooldown = getattr(cfg, "IRC_BEACONING_COOLDOWN_S", 300.0)
+            max_sources = getattr(cfg, "IRC_BEACONING_MAX_SOURCES", 2048)
         self.threshold = int(threshold) if threshold is not None else self.IRC_BEACONING_THRESHOLD
         self.window = int(window) if window is not None else self.IRC_BEACONING_WINDOW
         self.cooldown = float(cooldown) if cooldown is not None else self.IRC_ALERT_COOLDOWN_S
