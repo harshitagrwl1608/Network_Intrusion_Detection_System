@@ -319,6 +319,70 @@ class TestComparisonMatching(unittest.TestCase):
             if os.path.exists(tf_path):
                 os.remove(tf_path)
 
+    def test_get_conn_does_not_mutate_global_config(self):
+        import config
+        from evaluation.compare import _get_conn
+        orig_sqlite = config.SQLITE_PATH
+        with tempfile.NamedTemporaryFile(suffix=".db") as tf:
+            conn = _get_conn(tf.name)
+            try:
+                self.assertIsNotNone(conn)
+                self.assertEqual(config.SQLITE_PATH, orig_sqlite, "_get_conn must not mutate global config.SQLITE_PATH")
+            finally:
+                conn.close()
+
+    def test_compare_labels_bidirectional_and_partial(self):
+        import io
+        import sqlite3
+        from evaluation.compare import run_ground_truth
+        from storage.db import init_db
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as db_f, \
+             tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as lbl_f:
+            db_path = db_f.name
+            lbl_path = lbl_f.name
+
+            # Write scenario with reverse endpoints to test bidirectional matching
+            lbl_f.write(
+                "scenario_id,expected_rule,src_ip,dst_ip,dst_port,protocol,coverage,description\n"
+                "sc-1,SYN_FLOOD,10.0.0.1,10.0.0.2,80,TCP,partial,Test reverse matching\n"
+            )
+
+        try:
+            conn = sqlite3.connect(db_path)
+            init_db(conn)
+            cur = conn.cursor()
+            # Insert alert where src/dst are reversed relative to label
+            cur.execute(
+                "INSERT INTO alerts (rule_name, rule_version, src_ip, dst_ip, src_port, dst_port, protocol, detail, severity, confidence, timestamp) "
+                "VALUES ('SYN_FLOOD', '1.0', '10.0.0.2', '10.0.0.1', 80, 54321, 'TCP', 'Test detail', 'HIGH', 1.0, 100.0)"
+            )
+            # Insert an extra alert that was not in labels
+            cur.execute(
+                "INSERT INTO alerts (rule_name, rule_version, src_ip, dst_ip, src_port, dst_port, protocol, detail, severity, confidence, timestamp) "
+                "VALUES ('PORT_SCAN', '1.0', '192.168.1.1', '192.168.1.2', 22, 54322, 'TCP', 'Scan detail', 'MEDIUM', 0.8, 105.0)"
+            )
+            conn.commit()
+            conn.close()
+
+            # Capture stdout from run_ground_truth
+            old_stdout = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                run_ground_truth(lbl_path, db_path)
+                out = sys.stdout.getvalue()
+            finally:
+                sys.stdout = old_stdout
+
+            self.assertIn("Detected  (TP — scenario matched):       1", out)
+            self.assertIn("Unassessed (partial label coverage):     1", out)
+            self.assertIn("Precision:   N/A", out)
+        finally:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+            if os.path.exists(lbl_path):
+                os.remove(lbl_path)
+
 
 if __name__ == "__main__":
     unittest.main()

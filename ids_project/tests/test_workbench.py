@@ -245,24 +245,38 @@ def preserve_active_run():
 
 
 def test_stop_hook_safe_termination_non_looping():
+    logs_dir = os.path.join(WORKBENCH_DIR, "logs")
+    backup_file = os.path.join(logs_dir, "active_run.backup.json")
     with preserve_active_run() as active_run_file:
         if os.path.exists(active_run_file):
             os.remove(active_run_file)
-        payload = {
-            "terminationReason": "NO_TOOL_CALL",
-            "fullyIdle": True,
-            "executionNum": 1
-        }
-        res = run_script("stop_checkpoint.py", payload)
-        # When no active run exists, must return allow
-        assert res.get("decision") == "allow"
-        assert "checkpoint saved" in res.get("reason", "").lower()
+        # Also remove the backup so there is truly no active run to recover
+        backup_existed = os.path.exists(backup_file)
+        backup_content = None
+        if backup_existed:
+            with open(backup_file, "r", encoding="utf-8") as f:
+                backup_content = f.read()
+            os.remove(backup_file)
+        try:
+            payload = {
+                "terminationReason": "NO_TOOL_CALL",
+                "fullyIdle": True,
+                "executionNum": 1
+            }
+            res = run_script("stop_checkpoint.py", payload)
+            # When no active run exists, must return allow
+            assert res.get("decision") == "allow"
+            assert "checkpoint saved" in res.get("reason", "").lower()
 
-        checkpoint_file = os.path.join(WORKBENCH_DIR, "logs", "checkpoint.json")
-        assert os.path.exists(checkpoint_file)
-        with open(checkpoint_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            assert data.get("termination_reason") == "NO_TOOL_CALL"
+            checkpoint_file = os.path.join(WORKBENCH_DIR, "logs", "checkpoint.json")
+            assert os.path.exists(checkpoint_file)
+            with open(checkpoint_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                assert data.get("termination_reason") == "NO_TOOL_CALL"
+        finally:
+            if backup_existed and backup_content is not None:
+                with open(backup_file, "w", encoding="utf-8") as f:
+                    f.write(backup_content)
 
 
 def test_stop_hook_active_before_deadline_continues():
@@ -344,13 +358,188 @@ def test_stop_hook_explicit_cancellation_honored():
 
 
 def test_stop_hook_error_handling_graceful():
-    """Corrupted manifest or invalid input must gracefully allow termination without crash."""
+    """Corrupted primary AND no valid backup must gracefully allow termination without crash."""
+    logs_dir = os.path.join(WORKBENCH_DIR, "logs")
+    backup_file = os.path.join(logs_dir, "active_run.backup.json")
     with preserve_active_run() as active_run_file:
+        # Write corrupt primary
         with open(active_run_file, "w", encoding="utf-8") as f:
             f.write("{invalid-corrupt-json")
-        payload = {"terminationReason": "ERROR", "error": "corrupt test", "fullyIdle": True, "executionNum": 4}
+        # Ensure no valid backup exists so the hook truly has no recoverable state
+        backup_existed = os.path.exists(backup_file)
+        backup_content = None
+        if backup_existed:
+            with open(backup_file, "r", encoding="utf-8") as f:
+                backup_content = f.read()
+            os.remove(backup_file)
+        try:
+            payload = {"terminationReason": "ERROR", "error": "corrupt test", "fullyIdle": True, "executionNum": 4}
+            res = run_script("stop_checkpoint.py", payload)
+            assert res.get("decision") == "allow"
+        finally:
+            if backup_existed and backup_content is not None:
+                with open(backup_file, "w", encoding="utf-8") as f:
+                    f.write(backup_content)
+
+
+def test_stop_hook_corrupt_manifest_with_valid_backup_continues():
+    """Corrupted primary manifest with a recoverable backup must continue if deadline not reached."""
+    import time
+    logs_dir = os.path.join(WORKBENCH_DIR, "logs")
+    backup_file = os.path.join(logs_dir, "active_run.backup.json")
+    with preserve_active_run() as active_run_file:
+        future_deadline = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 7200))
+        valid_backup = {
+            "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "deadline_utc": future_deadline,
+            "duration_seconds": 21600,
+            "status": "running",
+            "cancel_requested": False,
+            "current_workstream": "Recovered Workstream",
+            "next_work_item": "Resume pipeline audit",
+        }
+        # Write corrupt primary
+        with open(active_run_file, "w", encoding="utf-8") as f:
+            f.write("{corrupt!!}")
+        # Write valid backup
+        with open(backup_file, "w", encoding="utf-8") as f:
+            json.dump(valid_backup, f, indent=2)
+        try:
+            payload = {"terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 10}
+            res = run_script("stop_checkpoint.py", payload)
+            assert res.get("decision") == "continue", f"Expected continue with backup, got: {res}"
+            assert "DO NOT STOP EARLY" in res.get("reason", "")
+        finally:
+            if os.path.exists(backup_file):
+                os.remove(backup_file)
+
+
+def test_stop_hook_missing_deadline_field_allows_termination():
+    """An active run manifest with a missing deadline_utc must allow termination."""
+    import time
+    with preserve_active_run() as active_run_file:
+        manifest = {
+            "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            # deadline_utc intentionally omitted
+            "duration_seconds": 21600,
+            "status": "running",
+            "cancel_requested": False,
+            "current_workstream": "Some Workstream",
+        }
+        with open(active_run_file, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        payload = {"terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 11}
         res = run_script("stop_checkpoint.py", payload)
         assert res.get("decision") == "allow"
+        assert "deadline" in res.get("reason", "").lower()
+
+
+def test_stop_hook_invalid_deadline_string_allows_termination():
+    """An active run manifest with an unparseable deadline_utc must allow termination."""
+    import time
+    with preserve_active_run() as active_run_file:
+        manifest = {
+            "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "deadline_utc": "not-a-valid-timestamp",
+            "duration_seconds": 21600,
+            "status": "running",
+            "cancel_requested": False,
+            "current_workstream": "Some Workstream",
+        }
+        with open(active_run_file, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        payload = {"terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 12}
+        res = run_script("stop_checkpoint.py", payload)
+        assert res.get("decision") == "allow"
+        assert "deadline" in res.get("reason", "").lower()
+
+
+def test_stop_hook_manifest_path_uses_progress_ledger_field():
+    """Manifest with progress_ledger_path must use that path for next-work-item lookup."""
+    import time
+    import tempfile
+    logs_dir = os.path.join(WORKBENCH_DIR, "logs")
+    with preserve_active_run() as active_run_file:
+        future_deadline = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 7200))
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as ledger_f:
+            ledger_path = ledger_f.name
+            json.dump({"exact_next_action": "run-ledger-next-item"}, ledger_f)
+        try:
+            manifest = {
+                "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "deadline_utc": future_deadline,
+                "duration_seconds": 21600,
+                "status": "running",
+                "cancel_requested": False,
+                "current_workstream": "Ledger Test Workstream",
+                "progress_ledger_path": ledger_path,
+            }
+            with open(active_run_file, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+            payload = {"terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 13}
+            res = run_script("stop_checkpoint.py", payload)
+            assert res.get("decision") == "continue"
+            assert "run-ledger-next-item" in res.get("reason", "")
+        finally:
+            os.unlink(ledger_path)
+
+
+def test_stop_hook_atomic_write_creates_backup():
+    """Stop hook continuation must leave behind a recoverable backup of the previous manifest."""
+    import time
+    logs_dir = os.path.join(WORKBENCH_DIR, "logs")
+    backup_file = os.path.join(logs_dir, "active_run.backup.json")
+    with preserve_active_run() as active_run_file:
+        future_deadline = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 7200))
+        manifest = {
+            "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "deadline_utc": future_deadline,
+            "duration_seconds": 21600,
+            "status": "running",
+            "cancel_requested": False,
+            "current_workstream": "Atomic Write Workstream",
+            "next_work_item": "verify backup creation",
+        }
+        with open(active_run_file, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        # Remove any previous backup
+        if os.path.exists(backup_file):
+            os.remove(backup_file)
+        payload = {"terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 14}
+        res = run_script("stop_checkpoint.py", payload)
+        assert res.get("decision") == "continue"
+        # Backup must have been created
+        assert os.path.exists(backup_file), "Backup file not created after continuation"
+        with open(backup_file, "r", encoding="utf-8") as f:
+            backup_data = json.load(f)
+        assert backup_data.get("status") == "running"
+        # Cleanup
+        if os.path.exists(backup_file):
+            os.remove(backup_file)
+
+
+def test_stop_hook_missing_ledger_does_not_crash():
+    """Missing progress_ledger_path file must not crash the hook; fallback message used."""
+    import time
+    with preserve_active_run() as active_run_file:
+        future_deadline = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 7200))
+        manifest = {
+            "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "deadline_utc": future_deadline,
+            "duration_seconds": 21600,
+            "status": "running",
+            "cancel_requested": False,
+            "current_workstream": "Missing Ledger Workstream",
+            "progress_ledger_path": "/nonexistent/path/to/ledger.json",
+        }
+        with open(active_run_file, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        payload = {"terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 15}
+        res = run_script("stop_checkpoint.py", payload)
+        assert res.get("decision") == "continue"
+        assert "DO NOT STOP EARLY" in res.get("reason", "")
 
 
 # --- 2. MCP Server Tests ---

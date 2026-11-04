@@ -23,6 +23,7 @@ import os
 import queue
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -71,29 +72,69 @@ PCAPNG_MAGIC = b"\x0a\x0d\x0d\x0a"
 VALID_MAGICS = (PCAP_MAGIC_LE, PCAP_MAGIC_BE, PCAP_MAGIC_NS_LE, PCAP_MAGIC_NS_BE, PCAPNG_MAGIC)
 
 
-def check_disk_safety() -> bool:
-    """Verify that the external HDD is mounted, has >= 100 GiB free space, and <= 450 GiB allocated."""
+def check_disk_safety(require_mount: bool = True) -> bool:
+    """Verify that the external HDD is mounted at the expected device path,
+    has >= 100 GiB free space, and total allocation is <= 450 GiB.
+
+    Args:
+        require_mount: If True (default), return False when the mount point is
+            absent from /proc/mounts or the backing device is not /dev/sdb1.
+            Set False only in unit tests running on a tmpfs without a real HDD.
+
+    Returns:
+        True iff all safety invariants are satisfied.
+    """
     if not os.path.isdir(HDD_DATASETS_DIR):
         logger.error(f"HDD dataset directory does not exist: {HDD_DATASETS_DIR}")
         return False
 
-    # Mount verification check
-    try:
-        with open("/proc/mounts", "r") as f:
-            mounts = [line.strip().split() for line in f if len(line.strip().split()) >= 2]
-        is_mounted = any(m[1] == EXPECTED_MOUNT_POINT for m in mounts)
-        if not is_mounted:
-            logger.warning(f"Mount point {EXPECTED_MOUNT_POINT} not found in /proc/mounts")
-    except Exception as exc:
-        logger.debug(f"Could not read /proc/mounts: {exc}")
+    # --- Mount verification: /dev/sdb1 must be mounted at EXPECTED_MOUNT_POINT ---
+    if require_mount:
+        try:
+            mount_ok = False
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[1] == EXPECTED_MOUNT_POINT:
+                        mount_ok = True
+                        break
+            if not mount_ok:
+                logger.error(
+                    f"Mount check FAILED: {EXPECTED_MOUNT_POINT} not found in /proc/mounts. "
+                    f"All dataset writes are blocked until the drive is mounted."
+                )
+                return False
+        except Exception as exc:
+            logger.error(f"Could not read /proc/mounts to verify mount: {exc}")
+            return False
 
+    # --- Free space: >= MIN_FREE_DISK_GIB ---
     try:
         stat = os.statvfs(HDD_DATASETS_DIR)
         free_bytes = stat.f_bavail * stat.f_frsize
         free_gib = free_bytes / (1024 ** 3)
         if free_gib < MIN_FREE_DISK_GIB:
-            logger.error(f"Low disk space on external HDD: {free_gib:.2f} GiB available (< {MIN_FREE_DISK_GIB} GiB required)")
+            logger.error(
+                f"Insufficient free space on HDD: {free_gib:.2f} GiB available "
+                f"(minimum {MIN_FREE_DISK_GIB} GiB required). Writes blocked."
+            )
             return False
+
+        # --- Total allocation cap: <= MAX_ALLOCATION_GIB ---
+        total_bytes = stat.f_blocks * stat.f_frsize
+        used_bytes = (stat.f_blocks - stat.f_bavail) * stat.f_frsize
+        allocated_gib = used_bytes / (1024 ** 3)
+        if allocated_gib > MAX_ALLOCATION_GIB:
+            logger.error(
+                f"Total allocation cap exceeded: {allocated_gib:.2f} GiB used "
+                f"(maximum {MAX_ALLOCATION_GIB} GiB). Writes blocked."
+            )
+            return False
+
+        logger.debug(
+            f"Disk safety OK: {free_gib:.1f} GiB free, {allocated_gib:.1f} GiB allocated "
+            f"on {EXPECTED_MOUNT_POINT}"
+        )
         return True
     except Exception as exc:
         logger.error(f"Failed to check disk safety: {exc}")
@@ -143,6 +184,36 @@ def update_cumulative_budget(newly_downloaded_bytes: int, elapsed_time_s: float)
     except Exception as exc:
         logger.error(f"Failed to update cumulative budget: {exc}")
     return budget
+
+
+# Evaluator version — bump when evaluation logic changes to invalidate cached results.
+_EVALUATOR_VERSION = "1.2.0"
+
+
+def compute_eval_cache_key(pcap_path: str, candidate: dict) -> str:
+    """
+    Compute a stable cache fingerprint for an evaluation result.
+
+    Incorporates:
+    - SHA-256 of the PCAP file bytes (content identity)
+    - Evaluator version string (invalidates on logic changes)
+    - Sorted target_rules list (invalidates when target_rules change)
+
+    Returns a 16-character hex prefix — compact and collision-resistant enough for
+    file-system caching (2^64 space; SHA-256 truncation, not a security primitive).
+    """
+    h = hashlib.sha256()
+    try:
+        with open(pcap_path, "rb") as f:
+            while chunk := f.read(128 * 1024):
+                h.update(chunk)
+    except OSError as exc:
+        logger.warning(f"compute_eval_cache_key: could not hash {pcap_path}: {exc}")
+        h.update(pcap_path.encode())
+    h.update(_EVALUATOR_VERSION.encode())
+    rules_str = json.dumps(sorted(candidate.get("target_rules", [])), separators=(",", ":"))
+    h.update(rules_str.encode())
+    return h.hexdigest()[:16]
 
 
 def validate_pcap_deep(pcap_path: str) -> tuple[bool, str]:
@@ -200,10 +271,124 @@ def validate_pcap_deep(pcap_path: str) -> tuple[bool, str]:
     return True, "Valid classic libpcap format"
 
 
-def classify_ground_truth_verdict(candidate: dict, alerts: list[dict], rule_breakdown: dict) -> tuple[str, str]:
+MAX_DECOMPRESSED_SIZE_BYTES = 1024 * 1024 * 1024  # 1 GiB safety limit per archive extraction
+
+
+def get_git_revision() -> str:
+    """Return HEAD commit SHA if inside git repository, else 'unknown'."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_IDS_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()[:10]
+    except Exception:
+        pass
+    return "unknown"
+
+
+def hash_file_sha256(path: str) -> str:
+    """Compute standard SHA-256 digest of a file in 128 KiB chunks."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(128 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def safe_decompress_stream(reader, writer, max_bytes: int = MAX_DECOMPRESSED_SIZE_BYTES, chunk_size: int = 64 * 1024) -> int:
+    """Safely stream decompressed content with a strict output size bound to prevent decompression bombs.
+
+    Returns total bytes written or raises RuntimeError if limit is exceeded.
     """
-    Automated Ground-Truth Verdict Classification.
-    Determines whether the evaluation outcome is a True Positive, True Negative, False Positive, or Below-Threshold.
+    total_written = 0
+    while True:
+        chunk = reader.read(chunk_size)
+        if not chunk:
+            break
+        total_written += len(chunk)
+        if total_written > max_bytes:
+            raise RuntimeError(
+                f"Decompressed output exceeded safety limit ({total_written} > {max_bytes} bytes). Aborting to prevent disk exhaustion."
+            )
+        writer.write(chunk)
+    return total_written
+
+
+def validate_pcap_with_tools(pcap_path: str, timeout_s: float = 15.0) -> tuple[bool, str, dict]:
+    """Validate PCAP using internal deep header checks, plus external capinfos / tshark if available.
+
+    Returns (is_valid, message, tool_metadata).
+    """
+    # 1. Structural deep check
+    is_valid, msg = validate_pcap_deep(pcap_path)
+    if not is_valid:
+        return False, msg, {}
+
+    stats: dict = {"packet_count": 0, "duration_seconds": 0.0}
+    capinfos_bin = shutil.which("capinfos")
+    if capinfos_bin:
+        try:
+            proc = subprocess.run(
+                [capinfos_bin, "-c", "-d", "-u", "-s", "-y", pcap_path],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+            if proc.returncode != 0:
+                err = proc.stderr.strip() or f"capinfos error (code {proc.returncode})"
+                return False, f"capinfos validation failed: {err}", {}
+            for line in proc.stdout.splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    k = k.strip().lower().replace(" ", "_")
+                    v = v.strip()
+                    if "number_of_packets" in k:
+                        try:
+                            stats["packet_count"] = int(v.replace(",", ""))
+                        except ValueError:
+                            pass
+                    elif "capture_duration" in k:
+                        try:
+                            stats["duration_seconds"] = float(v.split()[0].replace(",", ""))
+                        except (ValueError, IndexError):
+                            pass
+        except subprocess.TimeoutExpired:
+            return False, f"capinfos validation timed out after {timeout_s}s", {}
+        except Exception as exc:
+            logger.warning(f"capinfos execution warning: {exc}")
+
+    # 2. tshark smoke test
+    tshark_bin = shutil.which("tshark")
+    if tshark_bin and stats.get("packet_count", 1) > 0:
+        try:
+            proc = subprocess.run(
+                [tshark_bin, "-r", pcap_path, "-c", "1", "-q"],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+            if proc.returncode != 0:
+                err = proc.stderr.strip() or f"tshark error (code {proc.returncode})"
+                return False, f"tshark packet dissection failed: {err}", {}
+        except subprocess.TimeoutExpired:
+            return False, f"tshark validation timed out after {timeout_s}s", {}
+        except Exception as exc:
+            logger.warning(f"tshark execution warning: {exc}")
+
+    return True, msg, stats
+
+
+def classify_capture_level_signal(candidate: dict, alerts: list[dict], rule_breakdown: dict) -> tuple[str, str]:
+    """Capture-level preliminary signal heuristic.
+
+    WARNING: This is a coarse capture-level check based on expected rule names and
+    candidate attack category. It does NOT constitute rigorous flow-level ground truth.
+    For rigorous evaluation, use evaluate_ground_truth_labels().
     """
     cat = candidate.get("category", "").lower()
     attack_type = candidate.get("attack_type", "").lower()
@@ -227,6 +412,170 @@ def classify_ground_truth_verdict(candidate: dict, alerts: list[dict], rule_brea
     return "FALSE_NEGATIVE_OR_SUBTHRESHOLD", "Zero alerts raised on attack capture (investigate threshold calibration or evasion)"
 
 
+# Backward compatibility alias
+classify_ground_truth_verdict = classify_capture_level_signal
+
+
+def canonicalize_flow(src_ip: str, dst_ip: str, src_port: int | None, dst_port: int | None, proto: str) -> tuple:
+    """Canonicalize bidirectional 5-tuple so both directions map to the same flow key."""
+    import ipaddress
+    s_ip = ""
+    d_ip = ""
+    if src_ip:
+        try:
+            s_ip = str(ipaddress.ip_address(str(src_ip).strip()))
+        except ValueError:
+            s_ip = str(src_ip).strip()
+    if dst_ip:
+        try:
+            d_ip = str(ipaddress.ip_address(str(dst_ip).strip()))
+        except ValueError:
+            d_ip = str(dst_ip).strip()
+
+    sp = 0
+    dp = 0
+    if src_port is not None:
+        try:
+            val = int(src_port)
+            if 0 <= val <= 65535:
+                sp = val
+        except (ValueError, TypeError):
+            pass
+    if dst_port is not None:
+        try:
+            val = int(dst_port)
+            if 0 <= val <= 65535:
+                dp = val
+        except (ValueError, TypeError):
+            pass
+
+    p = (proto or "").strip().upper()
+    if (s_ip, sp) <= (d_ip, dp):
+        return (s_ip, d_ip, sp, dp, p)
+    return (d_ip, s_ip, dp, sp, p)
+
+
+def evaluate_ground_truth_labels(
+    labels: list[dict],
+    alerts: list[dict],
+    label_coverage: str = "complete",
+    timestamp_tolerance_s: float = 5.0
+) -> dict:
+    """Rigorous flow- and window-level ground-truth matching.
+
+    Requirements satisfied:
+    - Structured dataset label metadata with provenance and granularity.
+    - Bidirectional flow canonicalization.
+    - Event timestamps matched to valid label windows.
+    - Bijective matching: prevents one event from inflating TP counts.
+    - Unmatched alerts counted as FP ONLY when label_coverage == 'complete'.
+      Otherwise classified as UNASSESSED / UNKNOWN alerts.
+    - Returns structured metrics dictionary.
+    """
+    from evaluation.compare import _semantic_family
+
+    matched_alert_indices: set[int] = set()
+    matched_labels: list[dict] = []
+    unmatched_labels: list[dict] = []
+
+    for lbl in labels:
+        expected_family = lbl.get("expected_family", "").strip().lower()
+        expected_rule = lbl.get("expected_rule", "").strip()
+        flow = lbl.get("flow", {})
+        lbl_flow_key = None
+        if flow.get("src_ip") and flow.get("dst_ip"):
+            lbl_flow_key = canonicalize_flow(
+                flow.get("src_ip"), flow.get("dst_ip"),
+                flow.get("src_port"), flow.get("dst_port"),
+                flow.get("protocol", "")
+            )
+
+        window = lbl.get("time_window", {})
+        win_start = window.get("start")
+        win_end = window.get("end")
+
+        found = False
+        for idx, alert in enumerate(alerts):
+            if idx in matched_alert_indices:
+                continue
+
+            # 1. Family / Rule matching
+            alert_family = _semantic_family(alert)
+            rule_ok = False
+            if expected_family and alert_family == expected_family:
+                rule_ok = True
+            elif expected_rule and alert.get("rule_name") == expected_rule:
+                rule_ok = True
+            elif not expected_family and not expected_rule:
+                rule_ok = True
+
+            if not rule_ok:
+                continue
+
+            # 2. Flow matching (bidirectional)
+            if lbl_flow_key:
+                alert_flow_key = canonicalize_flow(
+                    alert.get("src_ip", ""), alert.get("dst_ip", ""),
+                    alert.get("src_port"), alert.get("dst_port"),
+                    alert.get("protocol", "")
+                )
+                if alert_flow_key != lbl_flow_key:
+                    continue
+
+            # 3. Timestamp window matching
+            alert_ts = alert.get("timestamp")
+            if alert_ts is not None and (win_start is not None or win_end is not None):
+                try:
+                    ts_val = float(alert_ts)
+                    if win_start is not None and ts_val < (float(win_start) - timestamp_tolerance_s):
+                        continue
+                    if win_end is not None and ts_val > (float(win_end) + timestamp_tolerance_s):
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            # Match established!
+            matched_alert_indices.add(idx)
+            matched_labels.append({"label": lbl, "alert": alert})
+            found = True
+            break
+
+        if not found:
+            unmatched_labels.append(lbl)
+
+    extra_alerts = [alert for idx, alert in enumerate(alerts) if idx not in matched_alert_indices]
+    tp = len(matched_labels)
+    fn = len(unmatched_labels)
+
+    is_exhaustive = (label_coverage.lower() in ("complete", "exhaustive"))
+    if is_exhaustive:
+        fp = len(extra_alerts)
+        unassessed = 0
+    else:
+        fp = 0
+        unassessed = len(extra_alerts)
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else (1.0 if tp > 0 else 0.0)
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+    return {
+        "label_coverage": label_coverage,
+        "total_labels": len(labels),
+        "total_alerts": len(alerts),
+        "true_positives": tp,
+        "false_negatives": fn,
+        "false_positives": fp,
+        "unassessed_alerts": unassessed,
+        "precision": precision if is_exhaustive else None,
+        "recall": recall,
+        "f1": f1 if is_exhaustive else None,
+        "matched_details": matched_labels,
+        "missed_labels": unmatched_labels,
+        "extra_alerts": extra_alerts,
+    }
+
+
 def get_candidate_queue() -> list[dict]:
     """
     Ranked acquisition candidates prioritizing coverage per downloaded GiB
@@ -241,9 +590,9 @@ def get_candidate_queue() -> list[dict]:
             "type": "pcap",
             "size_est_bytes": 47296,
             "category": "Protocol & Flag Anomalies",
-            "attack_type": "ARP storm / flooding",
-            "target_rules": ["ARP_SPOOF"],
-            "ground_truth": "Synthetic flood of ARP requests on cable modem",
+            "attack_type": "ARP request storm / broadcast flood (non-spoofing)",
+            "target_rules": ["UNASSESSED_PROTOCOL_FLOOD"],
+            "ground_truth": "Synthetic flood of ARP requests on cable modem (not ARP spoofing)",
             "compression": None,
         },
         {
@@ -358,9 +707,9 @@ def get_candidate_queue() -> list[dict]:
             "type": "pcap",
             "size_est_bytes": 1842,
             "category": "Man-on-the-Side Injection",
-            "attack_type": "TCP sequence racing & out-of-order injected HTTP redirection",
-            "target_rules": ["TCP_FLAG_ANOMALY", "CLEAR_HTTP_ON_TLS_PORT"],
-            "ground_truth": "BroCon 2015 QuantumInsert reproducible injection capture",
+            "attack_type": "TCP sequence racing & out-of-order injected HTTP redirection (port 80)",
+            "target_rules": ["TCP_FLAG_ANOMALY"],
+            "ground_truth": "BroCon 2015 QuantumInsert reproducible injection capture (cleartext port 80; not TLS)",
             "compression": None,
         },
         {
@@ -372,7 +721,7 @@ def get_candidate_queue() -> list[dict]:
             "size_est_bytes": 25803,
             "category": "Benign Web Browsing Traffic",
             "attack_type": "Benign HTTP request and response flow",
-            "target_rules": ["CLEAR_HTTP_ON_TLS_PORT", "PAYLOAD_HIT"],
+            "target_rules": ["FP_BENIGN_VERIFICATION"],
             "ground_truth": "Standard benign reference HTTP traffic (0 FP verification)",
             "compression": None,
         },
@@ -399,7 +748,8 @@ def get_candidate_queue() -> list[dict]:
             "category": "Covert ICMP Tunneling",
             "attack_type": "Base64 exfiltration payload chunks in ICMP Echo requests",
             "target_rules": ["ICMP_TUNNEL", "DATA_EXFIL"],
-            "ground_truth": "128-byte base64 chunks carried in ICMP Echo requests (Type 8 Code 0)",
+            "ground_truth": "Curated mock test fixture: 128-byte base64 chunks carried in ICMP Echo requests (not independent real-world field telemetry)",
+            "provenance_type": "synthetic_mock_fixture",
             "compression": None,
         },
         {
@@ -465,7 +815,7 @@ class PipelineCoordinator:
         self._lock = threading.Lock()
 
     def download_worker(self):
-        """Worker B: Downloads files sequentially with resume and persistent budget bounds checks."""
+        """Worker B: Downloads files sequentially with resume, 206 validation, and persistent budget bounds checks."""
         for candidate in self.candidates:
             if self.stop_requested:
                 break
@@ -496,7 +846,7 @@ class PipelineCoordinator:
             t0 = time.perf_counter()
             req = urllib.request.Request(url, headers={"User-Agent": "NetGuard-IDS-Evaluation/1.0"})
 
-            # Resume support
+            # Resume support with 206 Partial Content validation
             downloaded = 0
             if os.path.isfile(incoming_part):
                 downloaded = os.path.getsize(incoming_part)
@@ -505,14 +855,42 @@ class PipelineCoordinator:
                     logger.info(f"[{cid}] Resuming from byte offset {downloaded:,}")
 
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp, open(incoming_part, "ab" if downloaded else "wb") as f_out:
-                    shutil.copyfileobj(resp, f_out, length=64 * 1024)
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    status_code = getattr(resp, "status", getattr(resp, "code", 200))
+                    write_mode = "wb"
+                    if downloaded > 0:
+                        if status_code == 206:
+                            content_range = resp.headers.get("Content-Range", "")
+                            if content_range and f"bytes {downloaded}-" not in content_range:
+                                logger.warning(f"[{cid}] Content-Range mismatch ({content_range}); restarting download from byte 0.")
+                                downloaded = 0
+                                write_mode = "wb"
+                            else:
+                                write_mode = "ab"
+                        else:
+                            logger.info(f"[{cid}] Server returned HTTP {status_code} (not 206 Partial Content); restarting from byte 0.")
+                            downloaded = 0
+                            write_mode = "wb"
+
+                    with open(incoming_part, write_mode) as f_out:
+                        while True:
+                            chunk = resp.read(64 * 1024)
+                            if not chunk:
+                                break
+                            # Incremental acquisition budget enforcement during streaming
+                            with self._lock:
+                                if self.cumulative_bytes + len(chunk) > MAX_INITIAL_ACQUISITION_GIB * (1024 ** 3):
+                                    raise RuntimeError(
+                                        f"Cumulative download budget ({MAX_INITIAL_ACQUISITION_GIB} GiB) exceeded during streaming."
+                                    )
+                                self.cumulative_bytes += len(chunk)
+                            f_out.write(chunk)
+
                 elapsed = max(0.001, time.perf_counter() - t0)
                 file_size = os.path.getsize(incoming_part)
                 newly_downloaded = file_size - downloaded
 
                 with self._lock:
-                    self.cumulative_bytes += newly_downloaded
                     self.cumulative_time_s += elapsed
                     self.budget_state = update_cumulative_budget(newly_downloaded, elapsed)
 
@@ -536,57 +914,77 @@ class PipelineCoordinator:
         cid = candidate["id"]
         logger.info(f"[{cid}] Verifying integrity of: {incoming_path}")
 
-        # Compute SHA-256
-        sha256 = hashlib.sha256()
-        with open(incoming_path, "rb") as f:
-            while chunk := f.read(128 * 1024):
-                sha256.update(chunk)
-        digest = sha256.hexdigest()
-        logger.info(f"[{cid}] SHA-256: {digest}")
-
-        # Save hash
-        hash_file = os.path.join(HASHES_DIR, f"{cid}.sha256")
-        with open(hash_file, "w") as f:
-            f.write(f"{digest}  {os.path.basename(incoming_path)}\n")
+        # Compute SHA-256 of incoming archive/file
+        archive_sha256 = hash_file_sha256(incoming_path)
+        logger.info(f"[{cid}] Incoming SHA-256: {archive_sha256}")
 
         # Handle decompression if needed
         verified_pcap = os.path.join(VERIFIED_DIR, f"{cid}.pcap")
-        if candidate.get("compression") == "xz":
-            logger.info(f"[{cid}] Decompressing XZ archive safely...")
-            tmp_decomp = incoming_path + ".decomp"
-            with lzma.open(incoming_path, "rb") as f_in, open(tmp_decomp, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out, length=64 * 1024)
-            os.replace(tmp_decomp, verified_pcap)
-        elif candidate.get("compression") == "gz":
-            logger.info(f"[{cid}] Decompressing GZ archive safely...")
-            tmp_decomp = incoming_path + ".decomp"
-            with gzip.open(incoming_path, "rb") as f_in, open(tmp_decomp, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out, length=64 * 1024)
-            os.replace(tmp_decomp, verified_pcap)
-        elif candidate.get("compression") == "zip":
-            logger.info(f"[{cid}] Extracting ZIP archive safely...")
-            import zipfile
-            tmp_decomp = incoming_path + ".decomp"
-            with zipfile.ZipFile(incoming_path, "r") as z:
-                target_member = candidate.get("archive_member")
-                if not target_member:
-                    members = [m for m in z.namelist() if not m.endswith("/")]
-                    target_member = members[0] if members else None
-                if target_member:
-                    with z.open(target_member) as f_in, open(tmp_decomp, "wb") as f_out:
-                        shutil.copyfileobj(f_in, f_out, length=64 * 1024)
-                    os.replace(tmp_decomp, verified_pcap)
-                else:
-                    logger.error(f"[{cid}] ZIP member not found: {target_member}")
-                    return
-        else:
-            # Atomic promote
-            os.replace(incoming_path, verified_pcap)
+        tmp_decomp = incoming_path + ".decomp"
+        is_compressed = bool(candidate.get("compression"))
 
-        # Deep PCAP header and record validation
-        is_valid, validation_msg = validate_pcap_deep(verified_pcap)
+        try:
+            if candidate.get("compression") == "xz":
+                logger.info(f"[{cid}] Decompressing XZ archive safely with bounds check...")
+                with lzma.open(incoming_path, "rb") as f_in, open(tmp_decomp, "wb") as f_out:
+                    safe_decompress_stream(f_in, f_out)
+                os.replace(tmp_decomp, verified_pcap)
+            elif candidate.get("compression") == "gz":
+                logger.info(f"[{cid}] Decompressing GZ archive safely with bounds check...")
+                with gzip.open(incoming_path, "rb") as f_in, open(tmp_decomp, "wb") as f_out:
+                    safe_decompress_stream(f_in, f_out)
+                os.replace(tmp_decomp, verified_pcap)
+            elif candidate.get("compression") == "zip":
+                logger.info(f"[{cid}] Extracting ZIP archive safely with bounds check...")
+                import zipfile
+                with zipfile.ZipFile(incoming_path, "r") as z:
+                    target_member = candidate.get("archive_member")
+                    if not target_member:
+                        members = [m for m in z.namelist() if not m.endswith("/")]
+                        target_member = members[0] if members else None
+                    if target_member:
+                        with z.open(target_member) as f_in, open(tmp_decomp, "wb") as f_out:
+                            safe_decompress_stream(f_in, f_out)
+                        os.replace(tmp_decomp, verified_pcap)
+                    else:
+                        logger.error(f"[{cid}] ZIP member not found: {target_member}")
+                        return
+            else:
+                # Atomic promote
+                os.replace(incoming_path, verified_pcap)
+        except Exception as exc:
+            logger.error(f"[{cid}] Decompression failed or exceeded safety limits: {exc}")
+            if os.path.exists(tmp_decomp):
+                try:
+                    os.remove(tmp_decomp)
+                except OSError:
+                    pass
+            os.makedirs(QUARANTINE_DIR, exist_ok=True)
+            quarantine_path = os.path.join(QUARANTINE_DIR, f"{cid}.corrupt.archive")
+            try:
+                os.replace(incoming_path, quarantine_path)
+            except OSError:
+                pass
+            return
+
+        # Compute SHA-256 of verified PCAP
+        pcap_sha256 = hash_file_sha256(verified_pcap)
+
+        # Save PCAP hash file
+        hash_file = os.path.join(HASHES_DIR, f"{cid}.sha256")
+        with open(hash_file, "w") as f:
+            f.write(f"{pcap_sha256}  {os.path.basename(verified_pcap)}\n")
+
+        # If compressed, save archive hash separately
+        if is_compressed:
+            archive_hash_file = os.path.join(HASHES_DIR, f"{cid}.archive.sha256")
+            with open(archive_hash_file, "w") as f:
+                f.write(f"{archive_sha256}  {os.path.basename(incoming_path)}\n")
+
+        # Deep PCAP header and tool-based validation (capinfos / tshark)
+        is_valid, validation_msg, tool_stats = validate_pcap_with_tools(verified_pcap)
         if not is_valid:
-            logger.error(f"[{cid}] PCAP deep validation failed: {validation_msg} — moving to quarantine.")
+            logger.error(f"[{cid}] PCAP validation failed: {validation_msg} — moving to quarantine.")
             os.makedirs(QUARANTINE_DIR, exist_ok=True)
             quarantine_path = os.path.join(QUARANTINE_DIR, f"{cid}.corrupt.pcap")
             os.replace(verified_pcap, quarantine_path)
@@ -600,21 +998,24 @@ class PipelineCoordinator:
             "url": candidate["url"],
             "verified_pcap": verified_pcap,
             "size_bytes": os.path.getsize(verified_pcap),
-            "sha256": digest,
+            "sha256": pcap_sha256,
+            "archive_sha256": archive_sha256 if is_compressed else None,
             "category": candidate["category"],
             "attack_type": candidate["attack_type"],
             "target_rules": candidate["target_rules"],
             "ground_truth": candidate["ground_truth"],
             "validation": validation_msg,
+            "packet_count": tool_stats.get("packet_count", 0),
+            "capture_duration_s": tool_stats.get("duration_seconds", 0.0),
             "verified_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         meta_file = os.path.join(VERIFIED_DIR, f"{cid}.meta.json")
         with open(meta_file, "w") as f:
             json.dump(meta, f, indent=2)
 
-        logger.info(f"[{cid}] Successfully verified and promoted to {verified_pcap} ({validation_msg})")
+        logger.info(f"[{cid}] Successfully verified and promoted to {verified_pcap} ({validation_msg}, packets: {tool_stats.get('packet_count', 'unknown')})")
         # Enqueue for real-time evaluation
-        self.evaluation_queue.put({"candidate": candidate, "pcap_path": verified_pcap, "meta": meta})
+        self.evaluation_queue.put({"candidate": candidate, "pcap_path": verified_pcap, "meta": meta, "tool_stats": tool_stats})
 
     def evaluation_worker(self):
         """Worker D: Processes verified PCAPs against NetGuard with bulletproof TemporaryDirectory isolation."""
@@ -639,19 +1040,25 @@ class PipelineCoordinator:
             candidate = item["candidate"]
             pcap_path = item["pcap_path"]
             cid = candidate["id"]
+            tool_stats = item.get("tool_stats", {})
 
+            cache_key = compute_eval_cache_key(pcap_path, candidate)
             out_eval_file = os.path.join(EVALUATION_DIR, f"{cid}_eval.json")
+            cached_result = None
             if not self.force_reeval and os.path.isfile(out_eval_file):
                 try:
                     with open(out_eval_file, "r") as f:
-                        cached_result = json.load(f)
-                    if "rule_breakdown" in cached_result:
-                        logger.info(f"[{cid}] Existing valid evaluation found at {out_eval_file} — skipping redundant replay.")
-                        with self._lock:
-                            self.completed_evaluations.append(cached_result)
-                        continue
+                        data = json.load(f)
+                    if "rule_breakdown" in data and (data.get("cache_key") == cache_key or "cache_key" not in data):
+                        cached_result = data
                 except Exception as exc:
                     logger.warning(f"[{cid}] Could not read existing evaluation {out_eval_file}: {exc}")
+
+            if cached_result is not None:
+                logger.info(f"[{cid}] Valid evaluation cache hit (cache key: {cache_key}) — skipping replay.")
+                with self._lock:
+                    self.completed_evaluations.append(cached_result)
+                continue
 
             logger.info(f"[{cid}] === STARTING NETGUARD EVALUATION ===")
 
@@ -716,11 +1123,14 @@ class PipelineCoordinator:
                         rn = a["rule_name"]
                         rule_breakdown[rn] = rule_breakdown.get(rn, 0) + 1
 
-                    # Automated Ground-Truth Verdict Classification
-                    verdict, verdict_rationale = classify_ground_truth_verdict(candidate, alerts, rule_breakdown)
+                    # Automated Ground-Truth Verdict Classification (capture-level heuristic)
+                    verdict, verdict_rationale = classify_capture_level_signal(candidate, alerts, rule_breakdown)
 
                     logger.info(f"[{cid}] Replay finished in {eval_time:.2f}s ({mbs:.2f} MB/s). Alerts fired: {len(alerts)} | Verdict: {verdict}")
                     logger.info(f"[{cid}] Rule breakdown: {rule_breakdown}")
+
+                    git_rev = get_git_revision()
+                    packet_cnt = tool_stats.get("packet_count") or stats.get("packets_total", 0)
 
                     eval_result = {
                         "id": cid,
@@ -738,6 +1148,10 @@ class PipelineCoordinator:
                         "verdict_rationale": verdict_rationale,
                         "alerts_sample": alerts[:50],  # first 50 alerts
                         "stats": stats,
+                        "packet_count": packet_cnt,
+                        "cache_key": cache_key,
+                        "evaluator_version": _EVALUATOR_VERSION,
+                        "code_revision": git_rev,
                         "evaluated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     }
 

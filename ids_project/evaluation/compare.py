@@ -84,10 +84,8 @@ def _norm_port(port) -> int | None:
 
 
 def _get_conn(db_path: str | None = None):
-    """Return a DB connection, optionally overriding the configured path."""
-    if db_path:
-        config.SQLITE_PATH = db_path
-    return get_connection()
+    """Return a DB connection without modifying global config.SQLITE_PATH."""
+    return get_connection(db_path=db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -506,40 +504,102 @@ def run_ground_truth(labels_path: str, db_path: str | None = None):
     tp_scenarios: list = []
     fn_scenarios: list = []
 
+    # Check if scenario labels have exhaustive or partial coverage
+    is_exhaustive = True
+    for sc in scenarios:
+        cov = sc.get("coverage", "").strip().lower()
+        if cov in ("partial", "sample", "incomplete"):
+            is_exhaustive = False
+            break
+
     for sc in scenarios:
         expected_rule = sc.get("expected_rule", "").strip()
+        expected_fam  = sc.get("expected_family", "").strip().lower()
         exp_src   = _norm_ip(sc.get("src_ip", "").strip())
         exp_dst   = _norm_ip(sc.get("dst_ip", "").strip())
         exp_port  = _norm_port(sc.get("dst_port", "").strip())
         exp_proto = sc.get("protocol", "").strip().upper()
 
+        win_start = sc.get("start_time") or sc.get("timestamp")
+        win_end   = sc.get("end_time")
+        win_tolerance = float(sc.get("window", TIMESTAMP_TOLERANCE))
+
         found = False
         for i, alert in enumerate(alerts):
             if i in matched_alerts:
                 continue
-            # Match on all non-empty label fields (not rule name alone)
-            rule_match  = (not expected_rule or
-                           alert.get("rule_name") == expected_rule)
-            src_match   = (not exp_src   or _norm_ip(alert.get("src_ip"))   == exp_src)
-            dst_match   = (not exp_dst   or _norm_ip(alert.get("dst_ip"))   == exp_dst)
-            port_match  = (exp_port is None or
-                           _norm_port(alert.get("dst_port")) == exp_port)
-            proto_match = (not exp_proto or
-                           (alert.get("protocol") or "").strip().upper() == exp_proto)
-            if rule_match and src_match and dst_match and port_match and proto_match:
-                matched_alerts.add(i)
-                tp_scenarios.append((sc, alert))
-                found = True
-                break
+
+            # 1. Rule / Family matching
+            rule_match = True
+            if expected_rule and alert.get("rule_name") != expected_rule:
+                if expected_fam and _semantic_family(alert) == expected_fam:
+                    rule_match = True
+                else:
+                    rule_match = False
+            elif expected_fam and _semantic_family(alert) != expected_fam:
+                rule_match = False
+
+            if not rule_match:
+                continue
+
+            # 2. Protocol matching
+            if exp_proto and (alert.get("protocol") or "").strip().upper() != exp_proto:
+                continue
+
+            # 3. Bidirectional endpoint matching
+            a_src   = _norm_ip(alert.get("src_ip"))
+            a_dst   = _norm_ip(alert.get("dst_ip"))
+            a_dport = _norm_port(alert.get("dst_port"))
+            a_sport = _norm_port(alert.get("src_port"))
+
+            forward_match = (
+                (not exp_src or a_src == exp_src) and
+                (not exp_dst or a_dst == exp_dst) and
+                (exp_port is None or a_dport == exp_port)
+            )
+            reverse_match = (
+                bool(exp_src and exp_dst) and
+                (a_src == exp_dst) and
+                (a_dst == exp_src) and
+                (exp_port is None or a_sport == exp_port)
+            )
+
+            if not (forward_match or reverse_match):
+                continue
+
+            # 4. Timestamp window matching
+            alert_ts = alert.get("timestamp")
+            if alert_ts is not None and win_start:
+                try:
+                    ts_val = float(alert_ts)
+                    t_start = float(win_start) - win_tolerance
+                    t_end   = (float(win_end) + win_tolerance) if win_end else (float(win_start) + win_tolerance)
+                    if ts_val < t_start or ts_val > t_end:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            matched_alerts.add(i)
+            tp_scenarios.append((sc, alert))
+            found = True
+            break
+
         if not found:
             fn_scenarios.append(sc)
 
-    fp_alerts = [a for i, a in enumerate(alerts) if i not in matched_alerts]
+    extra_alerts = [a for i, a in enumerate(alerts) if i not in matched_alerts]
 
     tp = len(tp_scenarios)
-    fp = len(fp_alerts)
     fn = len(fn_scenarios)
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+
+    if is_exhaustive:
+        fp = len(extra_alerts)
+        unassessed = 0
+    else:
+        fp = 0
+        unassessed = len(extra_alerts)
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else (1.0 if tp > 0 else 0.0)
     recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1        = (2 * precision * recall / (precision + recall)) \
                 if (precision + recall) > 0 else 0.0
@@ -547,11 +607,20 @@ def run_ground_truth(labels_path: str, db_path: str | None = None):
     print(f"  Scenarios (labelled expected):        {len(scenarios):4d}")
     print(f"  Detected  (TP — scenario matched):    {tp:4d}")
     print(f"  Missed    (FN — no matching alert):   {fn:4d}")
-    print(f"  Extra     (FP — no matching scenario):{fp:4d}")
+    if is_exhaustive:
+        print(f"  Extra     (FP — no matching scenario):{fp:4d}")
+    else:
+        print(f"  Unassessed (partial label coverage):  {unassessed:4d}")
     print("-" * 65)
-    print(f"  Precision:   {precision * 100:.1f}%")
+    if is_exhaustive:
+        print(f"  Precision:   {precision * 100:.1f}%")
+    else:
+        print(f"  Precision:   N/A (partial label coverage — extra alerts unassessed)")
     print(f"  Recall:      {recall    * 100:.1f}%")
-    print(f"  F1 Score:    {f1        * 100:.1f}%")
+    if is_exhaustive:
+        print(f"  F1 Score:    {f1        * 100:.1f}%")
+    else:
+        print(f"  F1 Score:    N/A")
     print("  NOTE: metrics are ground-truth only when scenario labels")
     print("        match concrete event attributes (src/dst/port/protocol).")
     print("=" * 65)
@@ -563,9 +632,10 @@ def run_ground_truth(labels_path: str, db_path: str | None = None):
                   f"{sc.get('src_ip')} → {sc.get('dst_ip')}:{sc.get('dst_port')} "
                   f"  {sc.get('description','')[:40]}")
 
-    if fp_alerts:
-        print("\n  Unmatched NetGuard alerts (potential FP — investigate):")
-        for a in fp_alerts[:5]:
+    if extra_alerts:
+        label_type = "potential FP — investigate" if is_exhaustive else "unassessed in partial label set"
+        print(f"\n  Unmatched NetGuard alerts ({label_type}):")
+        for a in extra_alerts[:5]:
             print(f"    [{a.get('rule_name')}] "
                   f"{a.get('src_ip')} → {a.get('dst_ip')}:{a.get('dst_port','?')} "
                   f"  {str(a.get('detail',''))[:40]}")

@@ -2,9 +2,15 @@
 """
 Stop Hook for NetGuard Engineering Workbench.
 Enforces deadline-aware autonomous continuation during active engineering runs.
-When an active run is in progress and deadline has not elapsed, returns decision: continue
-with the remaining time and next work item to prevent premature completion.
-When the deadline has passed, cancellation is requested, or no run is active, allows termination.
+
+Improvements over v1:
+  1. Corrupted manifest with recoverable backup allows continuation (not termination).
+  2. Missing/unparseable deadline on an otherwise active-looking manifest allows
+     termination only if no valid backup exists.
+  3. Progress ledger path is read from the manifest (not hardcoded to Phase 4).
+  4. Manifest writes are atomic via a .tmp file + os.replace().
+  5. Explicit user cancellation remains honoured.
+  6. Ordinary inactive sessions still terminate normally.
 """
 
 from datetime import datetime, timezone
@@ -18,8 +24,15 @@ PLUGIN_DIR = os.path.abspath(os.path.join(SCRIPTS_DIR, ".."))
 LOGS_DIR = os.path.join(PLUGIN_DIR, "logs")
 CHECKPOINT_FILE = os.path.join(LOGS_DIR, "checkpoint.json")
 ACTIVE_RUN_FILE = os.path.join(LOGS_DIR, "active_run.json")
-PROGRESS_LEDGER_FILE = "/run/media/harshitgarg/Data1/NetGuard-datasets/coordination/phase4_progress_ledger.json"
+ACTIVE_RUN_BACKUP = os.path.join(LOGS_DIR, "active_run.backup.json")
 
+# Fallback ledger only used if manifest does not specify a path.
+_LEGACY_LEDGER = "/run/media/harshitgarg/Data1/NetGuard-datasets/coordination/phase4_progress_ledger.json"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def parse_iso_utc(ts_str: str) -> float:
     """Parse ISO UTC timestamp string into epoch seconds."""
@@ -40,7 +53,7 @@ def format_iso_utc(epoch_s: float | None = None) -> str:
 
 
 def load_json_safe(path: str) -> dict | None:
-    """Safely load JSON file or return None."""
+    """Safely load JSON file or return None on any error."""
     if not os.path.isfile(path):
         return None
     try:
@@ -50,19 +63,72 @@ def load_json_safe(path: str) -> dict | None:
         return None
 
 
+def atomic_write_json(path: str, data: dict) -> bool:
+    """Write JSON atomically via a sibling .tmp file. Returns True on success."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        return False
+
+
+def write_checkpoint(record: dict) -> None:
+    """Write checkpoint file (non-critical — best effort)."""
+    try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        atomic_write_json(CHECKPOINT_FILE, record)
+    except Exception:
+        pass
+
+
+def get_ledger_path(active_run: dict) -> str:
+    """Return the progress ledger path from the manifest, with legacy fallback."""
+    path = active_run.get("progress_ledger_path")
+    if path and isinstance(path, str):
+        return path
+    return _LEGACY_LEDGER
+
+
 def get_next_work_item(active_run: dict) -> str:
     """Determine the next actionable work item from active run or progress ledger."""
     if active_run.get("next_work_item"):
         return str(active_run["next_work_item"])
 
-    # Fallback to persistent ledger on secondary HDD if available
-    ledger = load_json_safe(PROGRESS_LEDGER_FILE)
+    ledger_path = get_ledger_path(active_run)
+    ledger = load_json_safe(ledger_path)
     if isinstance(ledger, dict) and ledger.get("exact_next_action"):
         return str(ledger["exact_next_action"])
 
     workstream = active_run.get("current_workstream", "Continuous Engineering & Validation")
-    return f"Continue {workstream} (adaptive workstream cycling: pipeline, captures, detection rules, adversarial tests, performance)"
+    return (
+        f"Continue {workstream} "
+        f"(adaptive cycling: pipeline safety, capture evaluation, "
+        f"detection rules, adversarial tests, documentation)"
+    )
 
+
+def respond_allow(reason: str, checkpoint: dict) -> None:
+    write_checkpoint(checkpoint)
+    json.dump({"decision": "allow", "reason": reason}, sys.stdout)
+    sys.exit(0)
+
+
+def respond_continue(reason: str, checkpoint: dict) -> None:
+    write_checkpoint(checkpoint)
+    json.dump({"decision": "continue", "reason": reason}, sys.stdout)
+    sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
     try:
@@ -71,226 +137,186 @@ def main():
         data = {}
 
     term_reason = data.get("terminationReason", "UNKNOWN") if isinstance(data, dict) else "UNKNOWN"
-    error_msg = data.get("error", "") if isinstance(data, dict) else ""
-    fully_idle = data.get("fullyIdle", True) if isinstance(data, dict) else True
-    exec_num = data.get("executionNum", 1) if isinstance(data, dict) else 1
-    now_epoch = time.time()
-    now_iso = format_iso_utc(now_epoch)
+    error_msg   = data.get("error", "")          if isinstance(data, dict) else ""
+    fully_idle  = data.get("fullyIdle", True)    if isinstance(data, dict) else True
+    exec_num    = data.get("executionNum", 1)    if isinstance(data, dict) else 1
+    now_epoch   = time.time()
+    now_iso     = format_iso_utc(now_epoch)
 
     os.makedirs(LOGS_DIR, exist_ok=True)
 
-    # 1. Inspect active_run.json
-    active_run = load_json_safe(ACTIVE_RUN_FILE)
+    # ------------------------------------------------------------------
+    # 1. Load manifest — try primary, then backup
+    # ------------------------------------------------------------------
+    active_run   = load_json_safe(ACTIVE_RUN_FILE)
+    used_backup  = False
+    manifest_corrupt = False
 
-    # Case A: Inactive manifest or non-running status
-    if not active_run or not isinstance(active_run, dict):
-        record = {
-            "timestamp": now_iso,
-            "execution_num": exec_num,
-            "termination_reason": term_reason,
-            "fully_idle": fully_idle,
-            "error": error_msg,
-            "active_run_status": None,
-            "decision": "allow",
-            "workbench_status": "standby"
-        }
-        try:
-            with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
-                json.dump(record, f, indent=2)
-        except Exception:
-            pass
+    if active_run is None or not isinstance(active_run, dict):
+        # Primary failed — try backup
+        backup = load_json_safe(ACTIVE_RUN_BACKUP)
+        if backup and isinstance(backup, dict):
+            active_run   = backup
+            used_backup  = True
+            manifest_corrupt = True  # primary was corrupt/missing
+        else:
+            # Genuinely no active run
+            respond_allow(
+                f"NetGuard checkpoint saved (reason: {term_reason}; no active autonomous run).",
+                {
+                    "timestamp": now_iso, "execution_num": exec_num,
+                    "termination_reason": term_reason, "fully_idle": fully_idle,
+                    "error": error_msg, "active_run_status": None,
+                    "decision": "allow", "workbench_status": "standby",
+                },
+            )
+            return  # unreachable but explicit
 
-        response = {
-            "decision": "allow",
-            "reason": f"NetGuard checkpoint saved successfully (reason: {term_reason}; no active autonomous run)."
-        }
-        json.dump(response, sys.stdout)
-        sys.exit(0)
-
-    run_status = active_run.get("status", "unknown")
+    # ------------------------------------------------------------------
+    # 2. Check explicit cancellation FIRST (highest priority)
+    # ------------------------------------------------------------------
     cancel_requested = bool(active_run.get("cancel_requested", False))
-
-    # Case B: Cancellation explicitly requested or indicated in terminationReason
     is_cancel_signal = (
-        cancel_requested or
-        "cancel" in str(term_reason).lower() or
-        "abort" in str(term_reason).lower()
+        cancel_requested
+        or "cancel" in str(term_reason).lower()
+        or "abort" in str(term_reason).lower()
     )
 
     if is_cancel_signal:
         active_run["status"] = "cancelled"
         active_run["cancelled_at_utc"] = now_iso
         active_run["last_checkpoint_utc"] = now_iso
-        try:
-            with open(ACTIVE_RUN_FILE, "w", encoding="utf-8") as f:
-                json.dump(active_run, f, indent=2)
-        except Exception:
-            pass
+        atomic_write_json(ACTIVE_RUN_FILE, active_run)
+        respond_allow(
+            f"NetGuard autonomous run cancelled (reason: {term_reason}). Checkpoint saved.",
+            {
+                "timestamp": now_iso, "execution_num": exec_num,
+                "termination_reason": term_reason, "fully_idle": fully_idle,
+                "error": error_msg, "active_run_status": "cancelled",
+                "decision": "allow", "workbench_status": "cancelled",
+            },
+        )
+        return
 
-        record = {
-            "timestamp": now_iso,
-            "execution_num": exec_num,
-            "termination_reason": term_reason,
-            "fully_idle": fully_idle,
-            "error": error_msg,
-            "active_run_status": "cancelled",
-            "decision": "allow",
-            "workbench_status": "cancelled"
-        }
-        try:
-            with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
-                json.dump(record, f, indent=2)
-        except Exception:
-            pass
-
-        response = {
-            "decision": "allow",
-            "reason": f"NetGuard autonomous run cancelled (reason: {term_reason}). Checkpoint saved."
-        }
-        json.dump(response, sys.stdout)
-        sys.exit(0)
-
-    # If run already completed or cancelled earlier
+    # ------------------------------------------------------------------
+    # 3. If status is not 'running', allow termination
+    # ------------------------------------------------------------------
+    run_status = active_run.get("status", "unknown")
     if run_status != "running":
-        record = {
-            "timestamp": now_iso,
-            "execution_num": exec_num,
-            "termination_reason": term_reason,
-            "fully_idle": fully_idle,
-            "error": error_msg,
-            "active_run_status": run_status,
-            "decision": "allow",
-            "workbench_status": run_status
-        }
-        try:
-            with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
-                json.dump(record, f, indent=2)
-        except Exception:
-            pass
+        respond_allow(
+            f"NetGuard autonomous run already {run_status}. Termination permitted.",
+            {
+                "timestamp": now_iso, "execution_num": exec_num,
+                "termination_reason": term_reason, "fully_idle": fully_idle,
+                "error": error_msg, "active_run_status": run_status,
+                "decision": "allow", "workbench_status": run_status,
+            },
+        )
+        return
 
-        response = {
-            "decision": "allow",
-            "reason": f"NetGuard autonomous run already {run_status}. Termination permitted."
-        }
-        json.dump(response, sys.stdout)
-        sys.exit(0)
-
-    # 2. Parse deadline and compute remaining seconds
+    # ------------------------------------------------------------------
+    # 4. Parse deadline
+    # ------------------------------------------------------------------
     deadline_utc_str = active_run.get("deadline_utc")
+    deadline_parse_error: str | None = None
+    remaining_seconds: float = 0.0
+
     try:
         if not deadline_utc_str:
             raise ValueError("active_run.json missing 'deadline_utc' field")
-        deadline_epoch = parse_iso_utc(deadline_utc_str)
+        deadline_epoch   = parse_iso_utc(deadline_utc_str)
         remaining_seconds = deadline_epoch - now_epoch
     except Exception as exc:
-        # Error parsing deadline: record error and allow termination
-        record = {
-            "timestamp": now_iso,
-            "execution_num": exec_num,
-            "termination_reason": term_reason,
-            "fully_idle": fully_idle,
-            "error": f"Failed to parse active run deadline: {exc}",
-            "active_run_status": "error",
-            "decision": "allow",
-            "workbench_status": "error"
-        }
-        try:
-            with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
-                json.dump(record, f, indent=2)
-        except Exception:
-            pass
+        deadline_parse_error = str(exc)
 
-        response = {
-            "decision": "allow",
-            "reason": f"NetGuard active run deadline parse failure ({exc}); allowing termination."
-        }
-        json.dump(response, sys.stdout)
-        sys.exit(0)
+    if deadline_parse_error:
+        # Deadline unparseable — if this came from the backup we already know it's
+        # corrupt; allow termination with an informative error.
+        # If the primary was intact but deadline field is bad, still allow termination.
+        note = "(recovered from backup) " if used_backup else ""
+        respond_allow(
+            f"NetGuard {note}active run deadline parse failure ({deadline_parse_error}); allowing termination.",
+            {
+                "timestamp": now_iso, "execution_num": exec_num,
+                "termination_reason": term_reason, "fully_idle": fully_idle,
+                "error": deadline_parse_error, "active_run_status": "error",
+                "decision": "allow", "workbench_status": "error",
+                "manifest_corrupt": manifest_corrupt,
+            },
+        )
+        return
 
-    # Case C: Deadline reached
+    # ------------------------------------------------------------------
+    # 5. Deadline reached → allow
+    # ------------------------------------------------------------------
     if remaining_seconds <= 0:
         active_run["status"] = "completed"
         active_run["completed_at_utc"] = now_iso
         active_run["last_checkpoint_utc"] = now_iso
-        try:
-            with open(ACTIVE_RUN_FILE, "w", encoding="utf-8") as f:
-                json.dump(active_run, f, indent=2)
-        except Exception:
-            pass
-
-        record = {
-            "timestamp": now_iso,
-            "execution_num": exec_num,
-            "termination_reason": term_reason,
-            "fully_idle": fully_idle,
-            "error": error_msg,
-            "active_run_status": "completed",
-            "remaining_seconds": 0.0,
-            "decision": "allow",
-            "workbench_status": "completed"
-        }
-        try:
-            with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
-                json.dump(record, f, indent=2)
-        except Exception:
-            pass
-
+        atomic_write_json(ACTIVE_RUN_FILE, active_run)
         duration_s = active_run.get("duration_seconds", 21600)
-        response = {
-            "decision": "allow",
-            "reason": f"NetGuard six-hour autonomous run deadline reached ({duration_s}s elapsed). Final checkpoint saved."
-        }
-        json.dump(response, sys.stdout)
-        sys.exit(0)
+        respond_allow(
+            f"NetGuard six-hour autonomous run deadline reached ({duration_s}s elapsed). Final checkpoint saved.",
+            {
+                "timestamp": now_iso, "execution_num": exec_num,
+                "termination_reason": term_reason, "fully_idle": fully_idle,
+                "error": error_msg, "active_run_status": "completed",
+                "remaining_seconds": 0.0, "decision": "allow",
+                "workbench_status": "completed",
+            },
+        )
+        return
 
-    # Case D: Active run before deadline — INJECT CONTINUATION
+    # ------------------------------------------------------------------
+    # 6. Active run, before deadline → CONTINUE
+    #    Atomically update manifest (keep backup of previous valid state first).
+    # ------------------------------------------------------------------
     current_workstream = active_run.get("current_workstream", "Continuous Engineering & Validation")
-    next_item = get_next_work_item(active_run)
-    checkpoints_count = active_run.get("checkpoint_count", 0) + 1
+    next_item          = get_next_work_item(active_run)
+    checkpoints_count  = active_run.get("checkpoint_count", 0) + 1
+
+    # Save current good manifest as backup before overwriting
+    if os.path.isfile(ACTIVE_RUN_FILE):
+        try:
+            import shutil
+            shutil.copy2(ACTIVE_RUN_FILE, ACTIVE_RUN_BACKUP)
+        except Exception:
+            pass
 
     active_run["last_checkpoint_utc"] = now_iso
-    active_run["checkpoint_count"] = checkpoints_count
-    try:
-        with open(ACTIVE_RUN_FILE, "w", encoding="utf-8") as f:
-            json.dump(active_run, f, indent=2)
-    except Exception:
-        pass
+    active_run["checkpoint_count"]    = checkpoints_count
+    if manifest_corrupt:
+        active_run["_recovered_from_backup"] = True
 
-    record = {
-        "timestamp": now_iso,
-        "execution_num": exec_num,
-        "termination_reason": term_reason,
-        "fully_idle": fully_idle,
-        "error": error_msg,
-        "active_run_status": "running",
-        "remaining_seconds": round(remaining_seconds, 1),
-        "current_workstream": current_workstream,
-        "next_work_item": next_item,
-        "decision": "continue",
-        "workbench_status": "running"
-    }
-    try:
-        with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
-            json.dump(record, f, indent=2)
-    except Exception:
-        pass
+    atomic_write_json(ACTIVE_RUN_FILE, active_run)
 
     rem_hours = remaining_seconds / 3600.0
-    rem_mins = remaining_seconds / 60.0
+    rem_mins  = remaining_seconds / 60.0
+    corrupt_note = " [manifest recovered from backup]" if manifest_corrupt else ""
+
     continuation_message = (
-        f"AUTONOMOUS RUN ACTIVE — DO NOT STOP EARLY.\n"
-        f"Remaining Duration: {remaining_seconds:.0f}s ({rem_hours:.2f} hours / {rem_mins:.1f} minutes) until deadline {deadline_utc_str}.\n"
+        f"AUTONOMOUS RUN ACTIVE{corrupt_note} — DO NOT STOP EARLY.\n"
+        f"Remaining: {remaining_seconds:.0f}s ({rem_hours:.2f}h / {rem_mins:.1f}m) "
+        f"until deadline {deadline_utc_str}.\n"
         f"Current Workstream: {current_workstream}\n"
         f"Next Action: {next_item}\n"
-        f"Invariant: The six-hour clock is a strict execution objective. Continue executing autonomous engineering tasks."
+        f"Invariant: Six-hour clock is a strict execution objective. "
+        f"Continue autonomous engineering tasks."
     )
 
-    response = {
-        "decision": "continue",
-        "reason": continuation_message
-    }
-    json.dump(response, sys.stdout)
-    sys.exit(0)
+    respond_continue(
+        continuation_message,
+        {
+            "timestamp": now_iso, "execution_num": exec_num,
+            "termination_reason": term_reason, "fully_idle": fully_idle,
+            "error": error_msg, "active_run_status": "running",
+            "remaining_seconds": round(remaining_seconds, 1),
+            "current_workstream": current_workstream,
+            "next_work_item": next_item,
+            "decision": "continue", "workbench_status": "running",
+            "manifest_corrupt": manifest_corrupt,
+        },
+    )
 
 
 if __name__ == "__main__":

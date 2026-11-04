@@ -11,10 +11,17 @@ if PROJECT_DIR not in sys.path:
 
 from evaluation.pipeline import (
     validate_pcap_deep,
+    validate_pcap_with_tools,
     check_disk_safety,
     load_cumulative_budget,
     update_cumulative_budget,
     classify_ground_truth_verdict,
+    classify_capture_level_signal,
+    canonicalize_flow,
+    evaluate_ground_truth_labels,
+    safe_decompress_stream,
+    compute_eval_cache_key,
+    hash_file_sha256,
     PCAP_MAGIC_LE,
     PCAPNG_MAGIC,
 )
@@ -146,6 +153,116 @@ class TestEvaluationPipeline(unittest.TestCase):
                 self.assertEqual(b4["cumulative_downloaded_bytes"], 3072)
             finally:
                 p_module.CUMULATIVE_BUDGET_FILE = orig_file
+
+    def test_safe_decompress_stream_bounds_check(self):
+        import io
+        # 1. Normal safe stream
+        data = b"A" * 1024
+        reader = io.BytesIO(data)
+        writer = io.BytesIO()
+        written = safe_decompress_stream(reader, writer, max_bytes=2048)
+        self.assertEqual(written, 1024)
+        self.assertEqual(writer.getvalue(), data)
+
+        # 2. Decompression bomb rejected
+        reader_bomb = io.BytesIO(b"B" * 5000)
+        writer_bomb = io.BytesIO()
+        with self.assertRaises(RuntimeError) as ctx:
+            safe_decompress_stream(reader_bomb, writer_bomb, max_bytes=1000, chunk_size=256)
+        self.assertIn("exceeded safety limit", str(ctx.exception))
+
+    def test_canonicalize_flow_bidirectional_equality(self):
+        f1 = canonicalize_flow("192.168.1.10", "198.51.100.5", 54321, 80, "TCP")
+        f2 = canonicalize_flow("198.51.100.5", "192.168.1.10", 80, 54321, "TCP")
+        self.assertEqual(f1, f2, "Bidirectional flows must map to identical canonical key")
+
+        # IPv6 canonicalization
+        f_v6_a = canonicalize_flow("2001:db8::1", "2001:0db8:0000:0000:0000:0000:0000:0002", 443, 60000, "TCP")
+        f_v6_b = canonicalize_flow("2001:db8::2", "2001:db8::1", 60000, 443, "TCP")
+        self.assertEqual(f_v6_a, f_v6_b, "IPv6 bidirectional flows must map to identical canonical key")
+
+    def test_evaluate_ground_truth_labels_exhaustive_mode(self):
+        labels = [
+            {
+                "label_id": "lbl-1",
+                "expected_rule": "SYN_FLOOD",
+                "expected_family": "syn_flood",
+                "flow": {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"},
+                "time_window": {"start": 100.0, "end": 110.0},
+            }
+        ]
+        # Matching alert + 1 extra alert
+        alerts = [
+            {"rule_name": "SYN_FLOOD", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP", "timestamp": 105.0},
+            {"rule_name": "PORT_SCAN", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50001, "dst_port": 81, "protocol": "TCP", "timestamp": 106.0},
+        ]
+        # In exhaustive mode, unmatched alert is counted as FP
+        res = evaluate_ground_truth_labels(labels, alerts, label_coverage="exhaustive")
+        self.assertEqual(res["true_positives"], 1)
+        self.assertEqual(res["false_negatives"], 0)
+        self.assertEqual(res["false_positives"], 1)
+        self.assertEqual(res["unassessed_alerts"], 0)
+        self.assertAlmostEqual(res["precision"], 0.5)
+        self.assertAlmostEqual(res["recall"], 1.0)
+
+    def test_evaluate_ground_truth_labels_partial_coverage(self):
+        labels = [
+            {
+                "label_id": "lbl-1",
+                "expected_rule": "DATA_EXFIL",
+                "flow": {"src_ip": "192.168.1.5", "dst_ip": "203.0.113.1", "src_port": 45000, "dst_port": 443, "protocol": "TCP"},
+            }
+        ]
+        alerts = [
+            {"rule_name": "DATA_EXFIL", "src_ip": "192.168.1.5", "dst_ip": "203.0.113.1", "src_port": 45000, "dst_port": 443, "protocol": "TCP"},
+            {"rule_name": "ICMP_FLOOD", "src_ip": "192.168.1.5", "dst_ip": "203.0.113.1", "src_port": 0, "dst_port": 0, "protocol": "ICMP"},
+        ]
+        # In partial mode, extra alerts are UNASSESSED, not false positives
+        res = evaluate_ground_truth_labels(labels, alerts, label_coverage="partial")
+        self.assertEqual(res["true_positives"], 1)
+        self.assertEqual(res["false_negatives"], 0)
+        self.assertEqual(res["false_positives"], 0)
+        self.assertEqual(res["unassessed_alerts"], 1)
+        self.assertIsNone(res["precision"], "Precision should be None when label coverage is not exhaustive")
+
+    def test_evaluate_ground_truth_labels_bijective_prevents_inflation(self):
+        labels = [
+            {
+                "label_id": "lbl-1",
+                "expected_rule": "SYN_FLOOD",
+                "flow": {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"},
+            }
+        ]
+        # 3 alerts fired on the same event/flow
+        alerts = [
+            {"rule_name": "SYN_FLOOD", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"},
+            {"rule_name": "SYN_FLOOD", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"},
+            {"rule_name": "SYN_FLOOD", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"},
+        ]
+        res = evaluate_ground_truth_labels(labels, alerts, label_coverage="complete")
+        # Only 1 label matched -> TP must be 1, NOT 3
+        self.assertEqual(res["true_positives"], 1)
+        self.assertEqual(res["false_positives"], 2)
+
+    def test_compute_eval_cache_key_deterministic_and_sensitive(self):
+        with tempfile.NamedTemporaryFile(suffix=".pcap", delete=False) as f:
+            f.write(PCAP_MAGIC_LE + struct.pack("<HHIIII", 2, 4, 0, 0, 65535, 1) + b"\x00" * 30)
+            tmp_pcap = f.name
+        try:
+            cand_a = {"id": "test", "target_rules": ["SYN_FLOOD", "UDP_FLOOD"]}
+            cand_b = {"id": "test", "target_rules": ["UDP_FLOOD", "SYN_FLOOD"]}  # Order invariant
+            cand_c = {"id": "test", "target_rules": ["ICMP_TUNNEL"]}  # Different rules
+
+            k_a = compute_eval_cache_key(tmp_pcap, cand_a)
+            k_b = compute_eval_cache_key(tmp_pcap, cand_b)
+            k_c = compute_eval_cache_key(tmp_pcap, cand_c)
+
+            self.assertEqual(k_a, k_b, "Cache key must be invariant to target_rules list ordering")
+            self.assertNotEqual(k_a, k_c, "Cache key must differ when target_rules change")
+            self.assertEqual(len(k_a), 16)
+        finally:
+            if os.path.exists(tmp_pcap):
+                os.remove(tmp_pcap)
 
 
 if __name__ == "__main__":
