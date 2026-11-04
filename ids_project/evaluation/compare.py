@@ -184,12 +184,18 @@ def _events_match(a: dict, b: dict, tolerance: float = TIMESTAMP_TOLERANCE) -> b
     semantic_scan_match = family_a is not None and family_a == family_b
     port_a = _norm_port(a.get("dst_port"))
     port_b = _norm_port(b.get("dst_port"))
-    if not semantic_scan_match and port_a != port_b:
-        return False
-    # Protocol check only when both sides have a non-empty value
+    # Protocol check only when both sides provide a non-empty value
     proto_a = (a.get("protocol") or "").strip().upper()
     proto_b = (b.get("protocol") or "").strip().upper()
     if proto_a and proto_b and proto_a != proto_b:
+        return False
+    if proto_a == "ICMP" or proto_b == "ICMP":
+        # ICMP does not have transport layer ports; treat None and 0 as equivalent
+        if port_a in (None, 0) and port_b in (None, 0):
+            pass
+        elif port_a != port_b:
+            return False
+    elif not semantic_scan_match and port_a != port_b:
         return False
     time_diff = abs((a.get("timestamp") or 0) - (b.get("timestamp") or 0))
     allowed_time = max(tolerance, 120.0 if family_a == "slow_tcp_scan" else 10.0) if semantic_scan_match else tolerance
@@ -202,8 +208,10 @@ def _scan_family(event: dict) -> str | None:
     signature = str(event.get("signature") or "").lower()
     if rule == "SLOW_PORT_SCAN" or "local slow tcp syn burst" in signature:
         return "slow_tcp_scan"
-    if rule == "PORT_SCAN" or "local tcp syn scan-like burst" in signature:
+    if rule == "PORT_SCAN" or "local tcp syn scan-like burst" in signature or "potential port scan" in signature:
         return "tcp_scan"
+    if rule in ("TCP_FLAG_ANOMALY", "TCP_STEALTH_SCAN") or "nmap" in signature or "tcp flag combination" in signature:
+        return "tcp_stealth_scan"
     return None
 
 
@@ -215,7 +223,8 @@ def _semantic_family(event: dict) -> str | None:
     rule = str(event.get("rule_name") or "").upper()
     signature = str(event.get("signature") or "").lower()
     detail = str(event.get("detail") or "").lower()
-    evidence_str = str(event.get("evidence_json") or "").lower()
+    evidence_obj = event.get("evidence")
+    evidence_str = (str(event.get("evidence_json") or "") + " " + str(evidence_obj or "")).lower()
     port = _norm_port(event.get("dst_port"))
 
     if rule == "CLEAR_HTTP_ON_TLS_PORT":
@@ -237,6 +246,8 @@ def _semantic_family(event: dict) -> str | None:
             return "xss"
         if "ssrf" in detail or "ssrf" in evidence_str:
             return "ssrf"
+        if "ics_tristation_exploit" in detail or "ics_tristation_exploit" in evidence_str or "tristation" in detail:
+            return "ics_scada_exploit"
     if "sql injection" in signature or "sqli" in signature:
         return "sql_injection"
     if "command injection" in signature or "cmd injection" in signature or "shellshock" in signature:
@@ -249,6 +260,8 @@ def _semantic_family(event: dict) -> str | None:
         return "xss"
     if "ssrf" in signature or "cloud metadata" in signature:
         return "ssrf"
+    if any(k in signature for k in ["tristation", "triconex", "triton", "trisis", "modbus", "dnp3", "cip"]):
+        return "ics_scada_exploit"
 
     # Authentication brute-force
     if rule == "BRUTE_FORCE" or "brute force" in signature or "bruteforce" in signature or "login attempt" in signature:
@@ -264,11 +277,25 @@ def _semantic_family(event: dict) -> str | None:
     if rule == "ICMP_FLOOD" or "icmp flood" in signature or "echo flood" in signature:
         return "icmp_flood"
 
-    # DNS tunneling / exfiltration
-    if rule == "DNS_ANOMALY" and ("dns_tunnel" in detail or "dns_exfil" in detail):
-        return "dns_tunnel"
+    # ICMP Tunneling / Covert Data Exfiltration
+    if rule == "ICMP_TUNNEL" or (rule == "DATA_EXFIL" and (event.get("protocol") or "").strip().upper() == "ICMP"):
+        return "icmp_tunnel"
+    if "icmp tunnel" in signature or "suspicious icmp" in signature or "icmp payload" in signature:
+        return "icmp_tunnel"
+
+    # DNS tunneling / exfiltration / DGA
+    if rule == "DNS_ANOMALY":
+        if any(k in detail or k in evidence_str for k in ["dns_tunnel", "dns_exfil"]):
+            return "dns_tunnel"
+        if any(k in detail or k in evidence_str for k in ["dns_dga", "dga"]):
+            return "dns_dga"
+        return "dns_anomaly"
     if "dns tunnel" in signature or "dns exfiltration" in signature:
         return "dns_tunnel"
+    if "dns dga" in signature:
+        return "dns_dga"
+    if "dns" in signature and any(k in signature for k in ["entropy", "suspicious", "anomalous"]):
+        return "dns_anomaly"
 
     # TLS anomalies
     if rule == "TLS_ANOMALY" or ("tls" in signature and ("sni" in signature or "certificate" in signature)):

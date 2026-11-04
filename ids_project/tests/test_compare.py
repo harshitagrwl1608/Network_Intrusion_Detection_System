@@ -204,6 +204,70 @@ class TestComparisonMatching(unittest.TestCase):
         self.assertEqual(_semantic_family(ng_zw), "tcp_zero_window")
         self.assertEqual(_semantic_family(sur_zw), "tcp_zero_window")
 
+        # ICS / SCADA Triconex TriStation corroboration
+        ng_ics = {"rule_name": "PAYLOAD_HIT", "detail": "matched DPI signature(s): ICS_TRISTATION_EXPLOIT"}
+        sur_ics = {"signature": "ET INDUSTRIAL Schneider Electric Triconex MP communication"}
+        self.assertEqual(_semantic_family(ng_ics), "ics_scada_exploit")
+        self.assertEqual(_semantic_family(sur_ics), "ics_scada_exploit")
+
+        # ICMP Tunnel corroboration
+        ng_icmp = {"rule_name": "ICMP_TUNNEL", "detail": "oversized high-entropy ICMP payload"}
+        sur_icmp = {"signature": "ET INFO Suspicious ICMP Packet Size / Tunneling"}
+        self.assertEqual(_semantic_family(ng_icmp), "icmp_tunnel")
+        self.assertEqual(_semantic_family(sur_icmp), "icmp_tunnel")
+
+        # TCP Stealth Scan / Flag Anomaly corroboration
+        ng_flags = {"rule_name": "TCP_FLAG_ANOMALY", "detail": "SYN+FIN flags set simultaneously"}
+        sur_flags = {"signature": "ET SCAN Nmap OS Detection Probe (SYN+FIN)"}
+        self.assertEqual(_semantic_family(ng_flags), "tcp_stealth_scan")
+        self.assertEqual(_semantic_family(sur_flags), "tcp_stealth_scan")
+
+        # DNS DGA / Anomaly corroboration
+        ng_dga = {"rule_name": "DNS_ANOMALY", "detail": "possible DNS_DGA high entropy"}
+        sur_dga = {"signature": "ET MALWARE Suspicious DNS DGA High Entropy Query"}
+        self.assertEqual(_semantic_family(ng_dga), "dns_dga")
+        self.assertEqual(_semantic_family(sur_dga), "dns_dga")
+
+    def test_icmp_port_none_and_zero_matching(self):
+        # ICMP events with port None vs 0 should match because ICMP has no ports
+        ng_icmp = {
+            "rule_name": "ICMP_TUNNEL",
+            "src_ip": "192.168.0.35",
+            "dst_ip": "192.168.1.1",
+            "dst_port": None,
+            "protocol": "ICMP",
+            "timestamp": 100.0,
+        }
+        sur_icmp = {
+            "signature": "ET INFO Suspicious ICMP",
+            "src_ip": "192.168.0.35",
+            "dst_ip": "192.168.1.1",
+            "dst_port": 0,
+            "protocol": "ICMP",
+            "timestamp": 101.0,
+        }
+        self.assertTrue(_events_match(ng_icmp, sur_icmp))
+
+    def test_tcp_stealth_scan_cross_engine_matching(self):
+        ng_scan = {
+            "rule_name": "TCP_FLAG_ANOMALY",
+            "src_ip": "192.168.100.103",
+            "dst_ip": "192.168.100.101",
+            "dst_port": 139,
+            "protocol": "TCP",
+            "timestamp": 200.0,
+        }
+        sur_scan = {
+            "signature": "ET SCAN Nmap OS Detection Probe",
+            "src_ip": "192.168.100.103",
+            "dst_ip": "192.168.100.101",
+            "dst_port": 445,
+            "protocol": "TCP",
+            "timestamp": 202.0,
+        }
+        # In stealth scans, destination ports can vary across probe packets
+        self.assertTrue(_events_match(ng_scan, sur_scan))
+
     def test_load_suricata_alerts_canonicalizes_ipv6(self):
         sample_eve = (
             '{"event_type": "alert", "timestamp": "2023-01-01T12:00:00Z", '
@@ -228,3 +292,4 @@ class TestComparisonMatching(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
