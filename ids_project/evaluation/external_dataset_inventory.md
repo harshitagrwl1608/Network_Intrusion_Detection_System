@@ -26,7 +26,7 @@ do not provide comprehensive coverage or a benign baseline.
 
 ## Rule-by-rule coverage
 
-The engine operates under **evidence-driven rule governance** (the historical 19-rule limit has been superseded by the requirement that every registered rule provide distinct, justified, tested value under $O(1)$ LRU state bounding). NetGuard currently registers 21 active detection rules. The table below lists all 21 rules and their coverage against the initial CTU-13 baseline:
+The engine operates under **evidence-driven rule governance** (the historical 19-rule limit has been superseded by the requirement that every registered rule provide distinct, justified, tested value under $O(1)$ LRU state bounding). NetGuard currently registers 22 active detection rules. The table below lists all 22 rules and their coverage against the initial CTU-13 baseline:
 
 | Existing rule | Telemetry needed | Baseline alerts | Relevant Suricata evidence |
 |---|---|---:|---|
@@ -51,6 +51,7 @@ The engine operates under **evidence-driven rule governance** (the historical 19
 | `TCP_ZERO_WINDOW` | TCP window advertisements by flow and time | 0 | No NetGuard alert to compare |
 | `NON_DNS_TRAFFIC_ON_DNS_PORT` | UDP/TCP port 53 non-DNS payload & shell indicators | 0 | Evaluated on port 53 captures; RFC 1035 QNAME validation prevents header evasion |
 | `ICMP_TUNNEL` | ICMP Echo payload size $\ge 64$B & Shannon entropy $\ge 4.5$ | 0 | Evaluated on covert channel PCAPs; Base64 & PE/ELF exfil detection |
+| `IP_FRAGMENT_ANOMALY` | IP fragmentation offsets, lengths and reassembly overlap | 0 | Evaluated on fragment captures; Teardrop (CVE-1997-0047), overflow, and tiny fragment evasion |
 
 Suricata also recorded 84,570 DNS events and 17,357 flow events, which confirm
 protocol telemetry was present for DNS and flow-based review. Rule-specific
