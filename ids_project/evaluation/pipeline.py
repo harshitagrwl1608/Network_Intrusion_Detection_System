@@ -6,27 +6,29 @@ Smart Asynchronous Dataset Acquisition and Evaluation Pipeline for NetGuard IDS.
 
 Features:
   - Worker A: Discovery & prioritized acquisition queue across independent publishers
-  - Worker B: Background downloader with HTTP resume (.part) and 90-min / 5-GiB resource budgeting
-  - Worker C: Integrity & metadata verification (SHA-256, safe extraction, PCAP validation)
-  - Worker D: Concurrent real-time evaluation against NetGuard detection engine
-  - Storage stages: incoming/ (.part) -> verified/ -> evaluation/
-  - Preserves external HDD invariants (>= 100 GiB free, <= 450 GiB total allocation)
+  - Worker B: Background downloader with HTTP resume (.part) and persistent 90-min / 5-GiB resource budgeting
+  - Worker C: Integrity & metadata verification (SHA-256, safe extraction, deep PCAP header validation)
+  - Worker D: Concurrent real-time evaluation against NetGuard detection engine with TemporaryDirectory isolation
+  - Automated Ground-Truth Verdict Classification (TP, TN, FP, Sub-Threshold)
+  - Storage stages: incoming/ (.part) -> verified/ -> evaluation/ (with quarantine/ fallback)
+  - Preserves external HDD invariants (>= 100 GiB free, <= 450 GiB total allocation, mount check)
 """
 
-import os
-import sys
-import time
-import json
-import shutil
-import hashlib
-import logging
-import threading
-import queue
-import lzma
 import gzip
+import hashlib
+import json
+import logging
+import lzma
+import os
+import queue
+import shutil
+import struct
+import sys
 import tempfile
-import urllib.request
+import threading
+import time
 import urllib.error
+import urllib.request
 
 # Ensure ids_project is in sys.path
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -45,15 +47,20 @@ logger = logging.getLogger("pipeline")
 HDD_DATASETS_DIR = "/run/media/harshitgarg/Data1/NetGuard-datasets"
 INCOMING_DIR = os.path.join(HDD_DATASETS_DIR, "incoming")
 VERIFIED_DIR = os.path.join(HDD_DATASETS_DIR, "verified")
+QUARANTINE_DIR = os.path.join(HDD_DATASETS_DIR, "quarantine")
 EVALUATION_DIR = os.path.join(HDD_DATASETS_DIR, "evaluation")
 EVALUATION_RESULTS_DIR = os.path.join(HDD_DATASETS_DIR, "evaluation-results")
 MANIFESTS_DIR = os.path.join(HDD_DATASETS_DIR, "manifests")
 HASHES_DIR = os.path.join(HDD_DATASETS_DIR, "hashes")
+COORDINATION_DIR = os.path.join(HDD_DATASETS_DIR, "coordination")
+CUMULATIVE_BUDGET_FILE = os.path.join(COORDINATION_DIR, "cumulative_budget.json")
 
-# Safety Limits
+# Invariants & Safety Limits
 MIN_FREE_DISK_GIB = 100.0
 MAX_INITIAL_ACQUISITION_GIB = 5.0
+MAX_ALLOCATION_GIB = 450.0
 MAX_DOWNLOAD_TIME_SECONDS = 90 * 60  # 90 minutes
+EXPECTED_MOUNT_POINT = "/run/media/harshitgarg/Data1"
 
 # PCAP Magic Numbers
 PCAP_MAGIC_LE = b"\xd4\xc3\xb2\xa1"
@@ -65,10 +72,21 @@ VALID_MAGICS = (PCAP_MAGIC_LE, PCAP_MAGIC_BE, PCAP_MAGIC_NS_LE, PCAP_MAGIC_NS_BE
 
 
 def check_disk_safety() -> bool:
-    """Verify that the external HDD is mounted and has >= 100 GiB free space."""
+    """Verify that the external HDD is mounted, has >= 100 GiB free space, and <= 450 GiB allocated."""
     if not os.path.isdir(HDD_DATASETS_DIR):
         logger.error(f"HDD dataset directory does not exist: {HDD_DATASETS_DIR}")
         return False
+
+    # Mount verification check
+    try:
+        with open("/proc/mounts", "r") as f:
+            mounts = [line.strip().split() for line in f if len(line.strip().split()) >= 2]
+        is_mounted = any(m[1] == EXPECTED_MOUNT_POINT for m in mounts)
+        if not is_mounted:
+            logger.warning(f"Mount point {EXPECTED_MOUNT_POINT} not found in /proc/mounts")
+    except Exception as exc:
+        logger.debug(f"Could not read /proc/mounts: {exc}")
+
     try:
         stat = os.statvfs(HDD_DATASETS_DIR)
         free_bytes = stat.f_bavail * stat.f_frsize
@@ -80,6 +98,133 @@ def check_disk_safety() -> bool:
     except Exception as exc:
         logger.error(f"Failed to check disk safety: {exc}")
         return False
+
+
+def load_cumulative_budget() -> dict:
+    """Load persistent cumulative acquisition budget from disk."""
+    os.makedirs(COORDINATION_DIR, exist_ok=True)
+    if os.path.isfile(CUMULATIVE_BUDGET_FILE):
+        try:
+            with open(CUMULATIVE_BUDGET_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "cumulative_downloaded_bytes" in data:
+                    return data
+        except Exception as exc:
+            logger.warning(f"Could not read cumulative budget file: {exc}")
+
+    initial_budget = {
+        "cumulative_downloaded_bytes": 0,
+        "cumulative_download_time_s": 0.0,
+        "max_acquisition_budget_bytes": int(MAX_INITIAL_ACQUISITION_GIB * (1024 ** 3)),
+        "max_download_time_s": MAX_DOWNLOAD_TIME_SECONDS,
+        "max_allocation_bytes": int(MAX_ALLOCATION_GIB * (1024 ** 3)),
+        "last_updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        with open(CUMULATIVE_BUDGET_FILE, "w", encoding="utf-8") as f:
+            json.dump(initial_budget, f, indent=2)
+    except Exception:
+        pass
+    return initial_budget
+
+
+def update_cumulative_budget(newly_downloaded_bytes: int, elapsed_time_s: float) -> dict:
+    """Atomically update persistent cumulative budget on disk."""
+    budget = load_cumulative_budget()
+    budget["cumulative_downloaded_bytes"] += newly_downloaded_bytes
+    budget["cumulative_download_time_s"] += elapsed_time_s
+    budget["last_updated_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    tmp_path = CUMULATIVE_BUDGET_FILE + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(budget, f, indent=2)
+        os.replace(tmp_path, CUMULATIVE_BUDGET_FILE)
+    except Exception as exc:
+        logger.error(f"Failed to update cumulative budget: {exc}")
+    return budget
+
+
+def validate_pcap_deep(pcap_path: str) -> tuple[bool, str]:
+    """
+    Perform deep structural validation of a PCAP or PCAPNG capture file:
+    1. Size >= 24 bytes (minimum standard PCAP global header).
+    2. Valid magic bytes.
+    3. Proper major/minor version (2.4 for classic PCAP, valid SHB length for PCAPNG).
+    4. First packet record header readable without premature EOF or corrupt packet length.
+    """
+    if not os.path.isfile(pcap_path):
+        return False, "File does not exist"
+
+    size = os.path.getsize(pcap_path)
+    if size < 24:
+        return False, f"File size ({size} bytes) smaller than minimum PCAP header (24 bytes)"
+
+    with open(pcap_path, "rb") as f:
+        magic = f.read(4)
+        if magic not in VALID_MAGICS:
+            return False, f"Invalid PCAP magic bytes: {magic.hex()}"
+
+        if magic == PCAPNG_MAGIC:
+            # PCAPNG: verify Section Header Block length >= 28
+            f.seek(4)
+            shb_len_bytes = f.read(4)
+            if len(shb_len_bytes) == 4:
+                shb_len = struct.unpack("<I", shb_len_bytes)[0]
+                if shb_len < 28 or shb_len > size:
+                    return False, f"Invalid PCAPNG SHB length: {shb_len}"
+            return True, "Valid PCAPNG format"
+
+        # Classic libpcap format
+        is_le = magic in (PCAP_MAGIC_LE, PCAP_MAGIC_NS_LE)
+        endian = "<" if is_le else ">"
+        f.seek(4)
+        hdr_rest = f.read(20)
+        if len(hdr_rest) < 20:
+            return False, "Truncated PCAP global header"
+
+        major, minor, tz, sigfigs, snaplen, network = struct.unpack(endian + "HHIIII", hdr_rest)
+        if major != 2:
+            return False, f"Unsupported PCAP major version {major} (expected 2)"
+
+        # Check if file has at least one packet header (16 bytes)
+        if size > 24:
+            pkt_hdr = f.read(16)
+            if len(pkt_hdr) < 16:
+                return False, "Truncated first packet record header"
+            ts_sec, ts_usec, incl_len, orig_len = struct.unpack(endian + "IIII", pkt_hdr)
+            if snaplen > 0 and incl_len > snaplen:
+                if incl_len > 65535 * 4:
+                    return False, f"Packet length exceeds sane boundaries: {incl_len}"
+
+    return True, "Valid classic libpcap format"
+
+
+def classify_ground_truth_verdict(candidate: dict, alerts: list[dict], rule_breakdown: dict) -> tuple[str, str]:
+    """
+    Automated Ground-Truth Verdict Classification.
+    Determines whether the evaluation outcome is a True Positive, True Negative, False Positive, or Below-Threshold.
+    """
+    cat = candidate.get("category", "").lower()
+    attack_type = candidate.get("attack_type", "").lower()
+    cid = candidate.get("id", "").lower()
+    is_benign = "benign" in cat or "benign" in attack_type or "honeypot" in cid
+
+    target_rules = set(candidate.get("target_rules", []))
+    fired_rules = set(rule_breakdown.keys())
+
+    if is_benign:
+        if len(alerts) == 0:
+            return "TRUE_NEGATIVE", "Zero false alarms raised on authentic benign traffic (100% specificity)"
+        return "FALSE_POSITIVE", f"Spurious alerts raised on benign traffic: {list(fired_rules)}"
+
+    # Malicious / Attack Traffic
+    if target_rules and (target_rules & fired_rules):
+        matched = list(target_rules & fired_rules)
+        return "TRUE_POSITIVE", f"Successfully detected targeted attack vector(s): {matched}"
+    if len(alerts) > 0:
+        return "PARTIAL_DETECTION", f"Detected network anomalies ({list(fired_rules)}), but targeted rules {list(target_rules)} did not trip"
+    return "FALSE_NEGATIVE_OR_SUBTHRESHOLD", "Zero alerts raised on attack capture (investigate threshold calibration or evasion)"
 
 
 def get_candidate_queue() -> list[dict]:
@@ -110,7 +255,7 @@ def get_candidate_queue() -> list[dict]:
             "size_est_bytes": 25600,
             "category": "DNS Anomalies & DPI",
             "attack_type": "Remote shell over DNS port 53",
-            "target_rules": ["DNS_ANOMALY", "PAYLOAD_HIT"],
+            "target_rules": ["NON_DNS_TRAFFIC_ON_DNS_PORT", "DNS_ANOMALY", "PAYLOAD_HIT"],
             "ground_truth": "Command shell payloads over UDP port 53",
             "compression": None,
         },
@@ -256,25 +401,29 @@ class PipelineCoordinator:
         self.verification_queue = queue.Queue()
         self.evaluation_queue = queue.Queue()
         self.completed_evaluations: list[dict] = []
-        self.total_bytes_downloaded = 0
-        self.total_download_time_s = 0.0
+
+        # Persistent cumulative budget tracking across runs
+        self.budget_state = load_cumulative_budget()
+        self.cumulative_bytes = self.budget_state.get("cumulative_downloaded_bytes", 0)
+        self.cumulative_time_s = self.budget_state.get("cumulative_download_time_s", 0.0)
+
         self.start_time = time.time()
         self.stop_requested = False
         self._lock = threading.Lock()
 
     def download_worker(self):
-        """Worker B: Downloads files sequentially with resume and bounds checks."""
+        """Worker B: Downloads files sequentially with resume and persistent budget bounds checks."""
         for candidate in self.candidates:
             if self.stop_requested:
                 break
             if not check_disk_safety():
                 logger.error("Disk safety check failed — stopping downloader.")
                 break
-            if self.total_download_time_s >= MAX_DOWNLOAD_TIME_SECONDS:
-                logger.warning(f"Download time budget reached ({self.total_download_time_s:.1f}s >= {MAX_DOWNLOAD_TIME_SECONDS}s).")
+            if self.cumulative_time_s >= MAX_DOWNLOAD_TIME_SECONDS:
+                logger.warning(f"Cumulative download time budget reached ({self.cumulative_time_s:.1f}s >= {MAX_DOWNLOAD_TIME_SECONDS}s).")
                 break
-            if self.total_bytes_downloaded >= MAX_INITIAL_ACQUISITION_GIB * (1024 ** 3):
-                logger.warning(f"Download size limit reached ({self.total_bytes_downloaded / (1024**3):.2f} GiB).")
+            if self.cumulative_bytes >= MAX_INITIAL_ACQUISITION_GIB * (1024 ** 3):
+                logger.warning(f"Cumulative download size budget reached ({self.cumulative_bytes / (1024**3):.2f} GiB >= {MAX_INITIAL_ACQUISITION_GIB} GiB).")
                 break
 
             cid = candidate["id"]
@@ -310,8 +459,9 @@ class PipelineCoordinator:
                 newly_downloaded = file_size - downloaded
 
                 with self._lock:
-                    self.total_bytes_downloaded += newly_downloaded
-                    self.total_download_time_s += elapsed
+                    self.cumulative_bytes += newly_downloaded
+                    self.cumulative_time_s += elapsed
+                    self.budget_state = update_cumulative_budget(newly_downloaded, elapsed)
 
                 throughput_mbs = (newly_downloaded / (1024 * 1024)) / elapsed
                 throughput_mbps = (newly_downloaded * 8) / (elapsed * 1_000_000)
@@ -329,7 +479,7 @@ class PipelineCoordinator:
         self.evaluation_queue.put(None)
 
     def verification_worker(self, candidate: dict, incoming_path: str):
-        """Worker C: Integrity, extraction, and validation."""
+        """Worker C: Integrity, extraction, deep PCAP header validation, and atomic promotion."""
         cid = candidate["id"]
         logger.info(f"[{cid}] Verifying integrity of: {incoming_path}")
 
@@ -364,11 +514,13 @@ class PipelineCoordinator:
             # Atomic promote
             os.replace(incoming_path, verified_pcap)
 
-        # Validate PCAP magic
-        with open(verified_pcap, "rb") as f:
-            magic = f.read(4)
-        if magic not in VALID_MAGICS:
-            logger.error(f"[{cid}] Invalid PCAP magic bytes: {magic!r}")
+        # Deep PCAP header and record validation
+        is_valid, validation_msg = validate_pcap_deep(verified_pcap)
+        if not is_valid:
+            logger.error(f"[{cid}] PCAP deep validation failed: {validation_msg} — moving to quarantine.")
+            os.makedirs(QUARANTINE_DIR, exist_ok=True)
+            quarantine_path = os.path.join(QUARANTINE_DIR, f"{cid}.corrupt.pcap")
+            os.replace(verified_pcap, quarantine_path)
             return
 
         # Write metadata manifest
@@ -384,18 +536,19 @@ class PipelineCoordinator:
             "attack_type": candidate["attack_type"],
             "target_rules": candidate["target_rules"],
             "ground_truth": candidate["ground_truth"],
+            "validation": validation_msg,
             "verified_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         meta_file = os.path.join(VERIFIED_DIR, f"{cid}.meta.json")
         with open(meta_file, "w") as f:
             json.dump(meta, f, indent=2)
 
-        logger.info(f"[{cid}] Successfully verified and promoted to {verified_pcap}")
+        logger.info(f"[{cid}] Successfully verified and promoted to {verified_pcap} ({validation_msg})")
         # Enqueue for real-time evaluation
         self.evaluation_queue.put({"candidate": candidate, "pcap_path": verified_pcap, "meta": meta})
 
     def evaluation_worker(self):
-        """Worker D: Processes verified PCAPs against NetGuard in real time."""
+        """Worker D: Processes verified PCAPs against NetGuard with bulletproof TemporaryDirectory isolation."""
         from storage.db import get_connection, init_db
         from engine.blocklist import load_blocklist, BlocklistData
         from capture.sniffer import replay_pcap
@@ -433,119 +586,120 @@ class PipelineCoordinator:
 
             logger.info(f"[{cid}] === STARTING NETGUARD EVALUATION ===")
 
-            # Create isolated temporary SQLite DB and ARP table
-            fd_db, tmp_db = tempfile.mkstemp(prefix=f"netguard_{cid}_", suffix=".db")
-            os.close(fd_db)
-            fd_arp, tmp_arp = tempfile.mkstemp(prefix=f"netguard_arp_{cid}_", suffix=".json")
-            os.close(fd_arp)
+            orig_sqlite = config.SQLITE_PATH
+            orig_arp = config.ARP_TABLE_PATH
 
-            config.SQLITE_PATH = tmp_db
-            config.ARP_TABLE_PATH = tmp_arp
+            # Use TemporaryDirectory for complete isolation and cleanup
+            with tempfile.TemporaryDirectory(prefix=f"netguard_iso_{cid}_") as tmpdir:
+                tmp_db = os.path.join(tmpdir, "isolated.db")
+                tmp_arp = os.path.join(tmpdir, "isolated_arp.json")
+                config.SQLITE_PATH = tmp_db
+                config.ARP_TABLE_PATH = tmp_arp
 
-            try:
-                conn = get_connection()
-                init_db(conn)
-                tracking_engine = create_replay_engine(conn, blocklist, config)
-
-                t0 = time.perf_counter()
-                replay_pcap(pcap_path, tracking_engine)
-                tracking_engine.flush()
-                eval_time = max(0.001, time.perf_counter() - t0)
-
-                # Read alerts from DB
-                conn.row_factory = None
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT rule_name, rule_version, src_ip, dst_ip, src_port, dst_port, "
-                    "protocol, detail, severity, confidence, evidence_json, timestamp FROM alerts ORDER BY timestamp"
-                )
-                raw_alerts = cursor.fetchall()
-                alerts = []
-                for row in raw_alerts:
-                    ev = {}
-                    if row[10]:
-                        try:
-                            ev = json.loads(row[10])
-                        except Exception:
-                            pass
-                    alerts.append({
-                        "rule_name": row[0],
-                        "rule_version": row[1],
-                        "src_ip": row[2],
-                        "dst_ip": row[3],
-                        "src_port": row[4],
-                        "dst_port": row[5],
-                        "protocol": row[6],
-                        "detail": row[7],
-                        "severity": row[8],
-                        "confidence": row[9],
-                        "evidence": ev,
-                        "timestamp": row[11],
-                    })
-
-                stats = tracking_engine.engine._stats.copy()
-                file_size = os.path.getsize(pcap_path)
-                packets = stats.get("packets_seen", len(alerts))  # approximate if not explicitly counted
-                mbs = (file_size / (1024 * 1024)) / eval_time
-
-                # Alert breakdown by rule
-                rule_breakdown = {}
-                for a in alerts:
-                    rn = a["rule_name"]
-                    rule_breakdown[rn] = rule_breakdown.get(rn, 0) + 1
-
-                logger.info(f"[{cid}] Replay finished in {eval_time:.2f}s ({mbs:.2f} MB/s). Alerts fired: {len(alerts)}")
-                logger.info(f"[{cid}] Rule breakdown: {rule_breakdown}")
-
-                eval_result = {
-                    "id": cid,
-                    "name": candidate["name"],
-                    "publisher": candidate["publisher"],
-                    "category": candidate["category"],
-                    "attack_type": candidate["attack_type"],
-                    "target_rules": candidate["target_rules"],
-                    "file_size_bytes": file_size,
-                    "eval_duration_s": eval_time,
-                    "eval_throughput_mbs": mbs,
-                    "total_alerts": len(alerts),
-                    "rule_breakdown": rule_breakdown,
-                    "alerts_sample": alerts[:50],  # first 50 alerts
-                    "stats": stats,
-                    "evaluated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                }
-
-                out_eval_file = os.path.join(EVALUATION_DIR, f"{cid}_eval.json")
-                out_results_file = os.path.join(EVALUATION_RESULTS_DIR, f"{cid}_eval.json")
-                with open(out_eval_file, "w") as f:
-                    json.dump(eval_result, f, indent=2)
                 try:
-                    with open(out_results_file, "w") as f:
+                    conn = get_connection()
+                    init_db(conn)
+                    tracking_engine = create_replay_engine(conn, blocklist, config)
+
+                    t0 = time.perf_counter()
+                    replay_pcap(pcap_path, tracking_engine)
+                    tracking_engine.flush()
+                    eval_time = max(0.001, time.perf_counter() - t0)
+
+                    # Read alerts from isolated DB
+                    conn.row_factory = None
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT rule_name, rule_version, src_ip, dst_ip, src_port, dst_port, "
+                        "protocol, detail, severity, confidence, evidence_json, timestamp FROM alerts ORDER BY timestamp"
+                    )
+                    raw_alerts = cursor.fetchall()
+                    alerts = []
+                    for row in raw_alerts:
+                        ev = {}
+                        if row[10]:
+                            try:
+                                ev = json.loads(row[10])
+                            except Exception:
+                                pass
+                        alerts.append({
+                            "rule_name": row[0],
+                            "rule_version": row[1],
+                            "src_ip": row[2],
+                            "dst_ip": row[3],
+                            "src_port": row[4],
+                            "dst_port": row[5],
+                            "protocol": row[6],
+                            "detail": row[7],
+                            "severity": row[8],
+                            "confidence": row[9],
+                            "evidence": ev,
+                            "timestamp": row[11],
+                        })
+
+                    stats = tracking_engine.engine._stats.copy()
+                    file_size = os.path.getsize(pcap_path)
+                    mbs = (file_size / (1024 * 1024)) / eval_time
+
+                    # Alert breakdown by rule
+                    rule_breakdown = {}
+                    for a in alerts:
+                        rn = a["rule_name"]
+                        rule_breakdown[rn] = rule_breakdown.get(rn, 0) + 1
+
+                    # Automated Ground-Truth Verdict Classification
+                    verdict, verdict_rationale = classify_ground_truth_verdict(candidate, alerts, rule_breakdown)
+
+                    logger.info(f"[{cid}] Replay finished in {eval_time:.2f}s ({mbs:.2f} MB/s). Alerts fired: {len(alerts)} | Verdict: {verdict}")
+                    logger.info(f"[{cid}] Rule breakdown: {rule_breakdown}")
+
+                    eval_result = {
+                        "id": cid,
+                        "name": candidate["name"],
+                        "publisher": candidate["publisher"],
+                        "category": candidate["category"],
+                        "attack_type": candidate["attack_type"],
+                        "target_rules": candidate["target_rules"],
+                        "file_size_bytes": file_size,
+                        "eval_duration_s": eval_time,
+                        "eval_throughput_mbs": mbs,
+                        "total_alerts": len(alerts),
+                        "rule_breakdown": rule_breakdown,
+                        "verdict": verdict,
+                        "verdict_rationale": verdict_rationale,
+                        "alerts_sample": alerts[:50],  # first 50 alerts
+                        "stats": stats,
+                        "evaluated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    }
+
+                    out_eval_file = os.path.join(EVALUATION_DIR, f"{cid}_eval.json")
+                    out_results_file = os.path.join(EVALUATION_RESULTS_DIR, f"{cid}_eval.json")
+                    with open(out_eval_file, "w") as f:
                         json.dump(eval_result, f, indent=2)
-                except OSError:
-                    pass
+                    try:
+                        with open(out_results_file, "w") as f:
+                            json.dump(eval_result, f, indent=2)
+                    except OSError:
+                        pass
 
-                with self._lock:
-                    self.completed_evaluations.append(eval_result)
+                    with self._lock:
+                        self.completed_evaluations.append(eval_result)
 
-            except Exception as exc:
-                logger.error(f"[{cid}] Evaluation error: {exc}", exc_info=True)
-            finally:
-                # Clean up temporary DB and ARP
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                for p in (tmp_db, tmp_arp):
-                    if os.path.exists(p):
-                        try:
-                            os.remove(p)
-                        except OSError:
-                            pass
+                except Exception as exc:
+                    logger.error(f"[{cid}] Evaluation error: {exc}", exc_info=True)
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    config.SQLITE_PATH = orig_sqlite
+                    config.ARP_TABLE_PATH = orig_arp
 
     def run(self):
         """Execute concurrent download and evaluation workers."""
         logger.info(f"Starting NetGuard Pipeline: {len(self.candidates)} candidates queued.")
         logger.info(f"Storage path: {HDD_DATASETS_DIR}")
+        logger.info(f"Cumulative downloaded: {self.cumulative_bytes / (1024 * 1024):.2f} MB | Cumulative time: {self.cumulative_time_s:.1f}s")
 
         downloader_thread = threading.Thread(target=self.download_worker, name="Worker-B-Downloader")
         evaluator_thread = threading.Thread(target=self.evaluation_worker, name="Worker-D-Evaluator")
@@ -558,8 +712,8 @@ class PipelineCoordinator:
         evaluator_thread.join()
 
         total_elapsed = time.perf_counter() - t_start
-        logger.info(f"Pipeline finished in {total_elapsed:.2f}s.")
-        logger.info(f"Total downloaded: {self.total_bytes_downloaded / (1024 * 1024):.2f} MB across {len(self.completed_evaluations)} evaluated captures.")
+        logger.info(f"Pipeline run finished in {total_elapsed:.2f}s.")
+        logger.info(f"Total cumulative budget: {self.cumulative_bytes / (1024 * 1024):.2f} MB across {len(self.completed_evaluations)} evaluated captures.")
         return self.completed_evaluations
 
 
@@ -568,9 +722,9 @@ if __name__ == "__main__":
     candidates = get_candidate_queue()
     coord = PipelineCoordinator(candidates, force_reeval=force)
     results = coord.run()
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print(f"PIPELINE SUMMARY: {len(results)} Captures Evaluated")
     for r in results:
-        print(f" - {r['id']} ({r['publisher']}): {r['total_alerts']} alerts | {r['eval_duration_s']:.2f}s | {r['rule_breakdown']}")
-    print("=" * 60)
-
+        v = r.get("verdict", "N/A")
+        print(f" - {r['id']} ({r['publisher']}): {r['total_alerts']} alerts | {r['eval_duration_s']:.2f}s | Verdict: {v} | {r['rule_breakdown']}")
+    print("=" * 70)
