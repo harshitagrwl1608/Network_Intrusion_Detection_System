@@ -6193,6 +6193,275 @@ class AlertSpool:
             self._count = 0
 
 
+# =============================================================================
+# Rule 23: IRC-Based Botnet C2 Beaconing Detection
+# =============================================================================
+
+class IrcC2BeaconingRule:
+    """
+    Detects IRC-based botnet Command-and-Control (C2) communications on
+    well-known IRC ports.
+
+    Attack families:
+    - IRC-based botnets (Mirai variants, IoT-23 iot23_malware_34_1 scenario,
+      classic IRC bots, Mirai/Hakai/Anna-senpai forks) that use IRC PING/PONG,
+      NICK/USER/JOIN/PRIVMSG protocol for command dispatch.
+
+    Detection signals (two independent paths):
+
+    IRC_PROTOCOL_SIGNATURE:
+      Payload inspection: TCP payload bytes contain IRC command verbs
+      (PING, PONG, NICK, USER, JOIN, PRIVMSG) on a known IRC port.
+      Minimum payload bytes = 4 for signature matching.
+      Requires direct observation of IRC protocol handshake or keepalive.
+
+    IRC_PORT_BEACONING:
+      Flow-rate heuristic: an internal source makes >= IRC_BEACONING_THRESHOLD
+      TCP connection attempts (SYN packets) to known IRC server ports within
+      IRC_BEACONING_WINDOW seconds. Covers encrypted or compressed sessions
+      where payload inspection is infeasible.
+
+    Observable network evidence:
+    - Persistent TCP connections from internal host to dst_port in
+      {194, 6660, 6661, 6662, 6663, 6664, 6665, 6666, 6667, 6668, 6669, 6697}
+    - IRC PING/PONG keepalives at ~60s intervals (keep connection alive through
+      NAT timeout by firing before the NAT table expires)
+    - ELF binary downloads over HTTP followed by IRC C2 registration
+      (NICK/USER handshake then JOIN #botnet)
+
+    State bounding:
+    - _connections: OrderedDict[src_ip → {dst_ip:count}] bounded to
+      MAX_TRACKED_SOURCES * MAX_TRACKED_DESTS entries total.
+    - _cooldown: OrderedDict[alert_key → last_alert_time], bounded to
+      MAX_TRACKED_SOURCES.
+    - prune_stale(now) evicts windows older than IRC_BEACONING_WINDOW + cooldown.
+
+    References:
+    - IoT-23 scenario CTU-IoT-Malware-Capture-34-1 (Mirai-variant IRC C2):
+      Zeek labels 6706 Malicious C&C flows; Suricata 2454 ET CHAT IRC alerts.
+    - RFC 1459 / RFC 2810-2813: Internet Relay Chat protocol specification.
+    - CVE-2016-10229, CVE-2017-17215, CVE-2018-10561 (Mirai exploit chain
+      targeting routers, terminating in IRC C2 registration).
+    """
+    name = "IRC_C2_BEACONING"
+    rule_version = "1.0"
+
+    # Known IRC server ports — RFC 1459 canonical port 194 (rarely used in practice),
+    # de facto standard 6667, SSL/TLS IRC 6697, and common variants 6660-6669.
+    IRC_PORTS: frozenset = frozenset({194, 6660, 6661, 6662, 6663, 6664, 6665, 6666, 6667, 6668, 6669, 6697})
+
+    # IRC protocol command verbs (ASCII, CR+LF terminated in protocol)
+    _IRC_VERBS: tuple = (b"PING ", b"PONG ", b"NICK ", b"USER ", b"JOIN ", b"PRIVMSG ", b"PART ", b"QUIT ", b"MODE ")
+
+    # Minimum number of SYN packets (connection attempts) to IRC ports
+    # from a single source before an IRC_PORT_BEACONING alert fires.
+    IRC_BEACONING_THRESHOLD: int = 5
+
+    # Time window in seconds for connection-count accumulation
+    IRC_BEACONING_WINDOW: int = 300  # 5 minutes (IRC PING interval ~60s, so 5+ pings = 5+ keepalives)
+
+    # Per-(src, dst, port) cooldown: suppress repeat alerts for this many seconds
+    IRC_ALERT_COOLDOWN_S: float = 300.0
+
+    # State bounding
+    MAX_TRACKED_SOURCES: int = 2048
+
+    def __init__(
+        self,
+        threshold: int = None,
+        window: int = None,
+        cooldown: float = None,
+        max_sources: int = None,
+    ):
+        self.threshold = int(threshold) if threshold is not None else self.IRC_BEACONING_THRESHOLD
+        self.window = int(window) if window is not None else self.IRC_BEACONING_WINDOW
+        self.cooldown = float(cooldown) if cooldown is not None else self.IRC_ALERT_COOLDOWN_S
+        self.max_sources = int(max_sources) if max_sources is not None else self.MAX_TRACKED_SOURCES
+        self._lock = threading.Lock()
+        # src_ip → OrderedDict[dst_ip → {count, window_start, port}]
+        self._connections: "OrderedDict[str, dict]" = OrderedDict()
+        # (src_ip, dst_ip, dst_port) → last_alert_time
+        self._cooldown_map: "OrderedDict[tuple, float]" = OrderedDict()
+
+    def prune_stale(self, now: float) -> None:
+        cutoff = now - (self.window + self.cooldown)
+        cooldown_cutoff = now - self.cooldown
+        with self._lock:
+            for src in list(self._connections):
+                for dst in list(self._connections[src]):
+                    entry = self._connections[src][dst]
+                    if entry.get("window_start", now) < cutoff or entry.get("window_start", now) > now:
+                        del self._connections[src][dst]
+                if not self._connections[src]:
+                    del self._connections[src]
+            for key in list(self._cooldown_map):
+                if self._cooldown_map[key] < cooldown_cutoff or self._cooldown_map[key] > now:
+                    del self._cooldown_map[key]
+
+    def _evict_sources(self) -> None:
+        """Remove oldest tracked sources when the LRU cap is reached."""
+        while len(self._connections) >= self.max_sources:
+            self._connections.popitem(last=False)
+
+    def _evict_cooldowns(self) -> None:
+        while len(self._cooldown_map) >= self.max_sources:
+            self._cooldown_map.popitem(last=False)
+
+    def _check_payload_signature(self, payload: bytes) -> str | None:
+        """Return IRC verb label if payload starts with a known IRC command."""
+        for verb in self._IRC_VERBS:
+            if payload.startswith(verb):
+                return verb.decode("ascii").strip()
+        return None
+
+    def check(self, record: dict) -> dict | None:
+        # Only TCP packets
+        if record.get("protocol") != "TCP":
+            return None
+
+        dst_port = record.get("dst_port")
+        try:
+            dst_port_i = int(dst_port)
+        except (TypeError, ValueError):
+            return None
+        if dst_port_i not in self.IRC_PORTS:
+            return None
+
+        # Validate port bounds
+        if not (1 <= dst_port_i <= 65535):
+            return None
+
+        src_ip = record.get("src_ip", "")
+        dst_ip = record.get("dst_ip", "")
+        if not src_ip or not dst_ip:
+            return None
+
+        # Skip trusted hosts
+        if src_ip in TRUSTED_HOSTS or dst_ip in TRUSTED_HOSTS:
+            return None
+
+        now_t = _finite_record_timestamp(record)
+        if now_t is None:
+            now_t = time.time()
+
+        # --- Path 1: IRC protocol payload signature ---
+        payload_raw = record.get("payload") or record.get("data") or b""
+        if isinstance(payload_raw, str):
+            try:
+                payload_raw = payload_raw.encode("latin-1", errors="replace")
+            except Exception:
+                payload_raw = b""
+
+        irc_verb = self._check_payload_signature(payload_raw) if payload_raw else None
+        if irc_verb:
+            alert_key = (src_ip, dst_ip, dst_port_i, "SIGNATURE")
+            with self._lock:
+                last = self._cooldown_map.get(alert_key)
+                if last is not None and now_t - last < self.cooldown and now_t >= last:
+                    return None
+                self._evict_cooldowns()
+                self._cooldown_map[alert_key] = now_t
+                self._cooldown_map.move_to_end(alert_key)
+            return {
+                "rule_name": self.name,
+                "rule_version": self.rule_version,
+                "src_ip": src_ip,
+                "dst_ip": dst_ip,
+                "src_port": record.get("src_port"),
+                "dst_port": dst_port_i,
+                "protocol": "TCP",
+                "severity": "high",
+                "confidence": "confirmed",
+                "detail": (
+                    f"{src_ip} sent IRC {irc_verb} command to {dst_ip}:{dst_port_i} "
+                    f"— IRC C2 protocol signature (botnet keepalive or registration)"
+                ),
+                "evidence": {
+                    "classification": "IRC_PROTOCOL_SIGNATURE",
+                    "irc_verb": irc_verb,
+                    "dst_port": dst_port_i,
+                    "payload_preview": payload_raw[:64].hex() if payload_raw else "",
+                    "cooldown_s": self.cooldown,
+                },
+                "window_start": now_t,
+                "window_end": now_t,
+            }
+
+        # --- Path 2: IRC port connection-rate beaconing (SYN packets) ---
+        flags = record.get("flags") or record.get("tcp_flags") or ""
+        flags_str = str(flags).upper()
+        is_syn = "SYN" in flags_str and "ACK" not in flags_str and flags_str not in ("", "NONE")
+
+        if not is_syn:
+            return None
+
+        with self._lock:
+            if src_ip not in self._connections:
+                self._evict_sources()
+                self._connections[src_ip] = {}
+            else:
+                self._connections.move_to_end(src_ip)
+
+            dst_key = (dst_ip, dst_port_i)
+            if dst_key not in self._connections[src_ip]:
+                self._connections[src_ip][dst_key] = {
+                    "count": 0,
+                    "window_start": now_t,
+                }
+
+            entry = self._connections[src_ip][dst_key]
+
+            # Reset window if expired or clock drift
+            if now_t - entry["window_start"] > self.window or now_t < entry["window_start"]:
+                entry["count"] = 0
+                entry["window_start"] = now_t
+
+            entry["count"] += 1
+            count = entry["count"]
+
+            if count < self.threshold:
+                return None
+
+            # Cooldown check
+            alert_key = (src_ip, dst_ip, dst_port_i, "BEACONING")
+            last = self._cooldown_map.get(alert_key)
+            if last is not None and now_t - last < self.cooldown and now_t >= last:
+                return None
+
+            # Reset window counter after alert
+            entry["count"] = 0
+            entry["window_start"] = now_t
+            self._evict_cooldowns()
+            self._cooldown_map[alert_key] = now_t
+            self._cooldown_map.move_to_end(alert_key)
+
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "src_port": record.get("src_port"),
+            "dst_port": dst_port_i,
+            "protocol": "TCP",
+            "severity": "high",
+            "confidence": "heuristic",
+            "detail": (
+                f"{src_ip} made {count} TCP connection attempts to IRC port "
+                f"{dst_ip}:{dst_port_i} in {self.window}s — possible IRC botnet C2 beaconing"
+            ),
+            "evidence": {
+                "classification": "IRC_PORT_BEACONING",
+                "connection_count": count,
+                "window_s": self.window,
+                "threshold": self.threshold,
+                "dst_port": dst_port_i,
+                "cooldown_s": self.cooldown,
+            },
+            "window_start": now_t - self.window,
+            "window_end": now_t,
+        }
+
+
 class RuleEngine:
     """
     Runs all rules against every packet record.
@@ -6308,6 +6577,12 @@ class RuleEngine:
             IpFragmentAnomalyRule(
                 cooldown=getattr(cfg, "IP_FRAGMENT_ANOMALY_COOLDOWN_S", 60.0),
                 reassembly_timeout=getattr(cfg, "IP_FRAGMENT_REASSEMBLY_TIMEOUT_S", 30.0),
+            ),
+            IrcC2BeaconingRule(
+                threshold=getattr(cfg, "IRC_BEACONING_THRESHOLD", 5),
+                window=getattr(cfg, "IRC_BEACONING_WINDOW", 300),
+                cooldown=getattr(cfg, "IRC_BEACONING_COOLDOWN_S", 300.0),
+                max_sources=getattr(cfg, "IRC_BEACONING_MAX_SOURCES", 2048),
             ),
         ]
 

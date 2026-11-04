@@ -185,3 +185,11 @@ ICMP_TUNNEL_ENTROPY_THRESHOLD  = _detection_float("ICMP_TUNNEL_ENTROPY_THRESHOLD
 ICMP_TUNNEL_MIN_BYTES          = _detection_int("ICMP_TUNNEL_MIN_BYTES", 64)
 ICMP_TUNNEL_COOLDOWN_S         = _detection_float("ICMP_TUNNEL_COOLDOWN_S", 60.0)
 
+# --- IRC-Based Botnet C2 Beaconing Detection (IrcC2BeaconingRule) ---
+# Detects repeated TCP connections to IRC ports (6667, 6697, 194, 6660-6669)
+# and IRC protocol verb signatures (PING/PONG/NICK/USER/JOIN/PRIVMSG).
+IRC_BEACONING_THRESHOLD    = _detection_int("IRC_BEACONING_THRESHOLD", 5)    # SYN count in window
+IRC_BEACONING_WINDOW       = _detection_int("IRC_BEACONING_WINDOW", 300)      # seconds (5 min)
+IRC_BEACONING_COOLDOWN_S   = _detection_float("IRC_BEACONING_COOLDOWN_S", 300.0)  # per-pair cooldown
+IRC_BEACONING_MAX_SOURCES  = _detection_int("IRC_BEACONING_MAX_SOURCES", 2048)    # LRU state cap
+
