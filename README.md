@@ -13,7 +13,7 @@
 > [!NOTE]
 > ### 🚧 Ongoing Project Notice
 > **NetGuard IDS is currently under active development.**  
-> The core packet-sniffing engine, 22-rule evidence-driven detection suite, 18-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization (including Triconex TriStation 1131 ICS signatures), Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, IP fragmentation reassembly attack detection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed **587 tests** (and 210 subtests). The synthetic evaluation detected 38/38 labelled scenarios across all registered rules with 100.0% precision, 100.0% recall, zero unmatched attack alerts, and zero alerts on the benign fixture. Real-world validation spans 16 PCAP captures across 6 independent publishers with cross-engine corroboration against Suricata and Zeek. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
+> The core packet-sniffing engine, 23-rule evidence-driven detection suite, 18-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization (including Triconex TriStation 1131 ICS signatures), Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, IP fragmentation reassembly attack detection, IRC botnet C2 beaconing detection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed **618 tests** (and 23 subtests). The synthetic evaluation detected 38/38 labelled scenarios across all registered rules with 100.0% precision, 100.0% recall, zero unmatched attack alerts, and zero alerts on the benign fixture. Real-world validation spans 18 PCAP captures across 6 independent publishers with cross-engine corroboration against Suricata and Zeek. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
 
 ---
 
@@ -75,8 +75,9 @@ Home and small-office networks generate continuous connection traffic, yet small
  │  │                   DNS_ANOMALY (Entropy + Tunneling + Hex-Chunks),│  │
  │  │                   BRUTE_FORCE (Auth Services), DATA_EXFIL,       │  │
  │  │                   TLS_ANOMALY (Direct-IP SNI),                   │  │
- │  │                   CLEAR_HTTP_ON_TLS_PORT,                        │  │
- │  │                   NON_DNS_TRAFFIC_ON_DNS_PORT, ICMP_TUNNEL       │  │
+ │  │                   CLEAR_HTTP_ON_TLS_PORT, ICMP_TUNNEL,           │  │
+ │  │                   NON_DNS_TRAFFIC_ON_DNS_PORT,                   │  │
+ │  │                   IP_FRAGMENT_ANOMALY, IRC_C2_BEACONING          │  │
  │  └──────────────────────────────────────────────────────────────────┘  │
  │                   • False-Positive Mitigations Filter                  │
  └───────────────────┬────────────────────────────────┬───────────────────┘
