@@ -215,13 +215,16 @@ def test_pre_invocation_hook():
 
 
 def test_stop_hook_safe_termination_non_looping():
+    active_run_file = os.path.join(WORKBENCH_DIR, "logs", "active_run.json")
+    if os.path.exists(active_run_file):
+        os.remove(active_run_file)
     payload = {
         "terminationReason": "NO_TOOL_CALL",
         "fullyIdle": True,
         "executionNum": 1
     }
     res = run_script("stop_checkpoint.py", payload)
-    # Critical invariant: must NOT return continue
+    # When no active run exists, must return allow
     assert res.get("decision") == "allow"
     assert "checkpoint saved" in res.get("reason", "").lower()
 
@@ -230,6 +233,110 @@ def test_stop_hook_safe_termination_non_looping():
     with open(checkpoint_file, "r", encoding="utf-8") as f:
         data = json.load(f)
         assert data.get("termination_reason") == "NO_TOOL_CALL"
+
+
+def test_stop_hook_active_before_deadline_continues():
+    """Active run before deadline must return decision: continue with next action."""
+    import time
+    active_run_file = os.path.join(WORKBENCH_DIR, "logs", "active_run.json")
+    future_deadline = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 7200))
+    manifest = {
+        "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "deadline_utc": future_deadline,
+        "duration_seconds": 21600,
+        "status": "running",
+        "cancel_requested": False,
+        "last_checkpoint_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "current_workstream": "Workstream A: Pipeline Hardening",
+        "next_work_item": "Validate PCAP buffer boundaries"
+    }
+    try:
+        with open(active_run_file, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        payload = {"terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 2}
+        res = run_script("stop_checkpoint.py", payload)
+        assert res.get("decision") == "continue"
+        assert "DO NOT STOP EARLY" in res.get("reason", "")
+        assert "Workstream A: Pipeline Hardening" in res.get("reason", "")
+        assert "Validate PCAP buffer boundaries" in res.get("reason", "")
+    finally:
+        if os.path.exists(active_run_file):
+            os.remove(active_run_file)
+
+
+def test_stop_hook_expired_deadline_completes():
+    """When deadline has passed, Stop hook must return allow and mark status completed."""
+    import time
+    active_run_file = os.path.join(WORKBENCH_DIR, "logs", "active_run.json")
+    past_deadline = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60))
+    manifest = {
+        "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 21660)),
+        "deadline_utc": past_deadline,
+        "duration_seconds": 21600,
+        "status": "running",
+        "cancel_requested": False,
+        "last_checkpoint_utc": past_deadline,
+        "current_workstream": "Final Wrapup",
+        "next_work_item": "Produce final execution proof"
+    }
+    try:
+        with open(active_run_file, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        payload = {"terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 5}
+        res = run_script("stop_checkpoint.py", payload)
+        assert res.get("decision") == "allow"
+        assert "deadline reached" in res.get("reason", "").lower()
+        with open(active_run_file, "r", encoding="utf-8") as f:
+            updated = json.load(f)
+            assert updated.get("status") == "completed"
+            assert "completed_at_utc" in updated
+    finally:
+        if os.path.exists(active_run_file):
+            os.remove(active_run_file)
+
+
+def test_stop_hook_explicit_cancellation_honored():
+    """When cancellation is requested or signaled, Stop hook must return allow and mark cancelled."""
+    import time
+    active_run_file = os.path.join(WORKBENCH_DIR, "logs", "active_run.json")
+    future_deadline = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 7200))
+    manifest = {
+        "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "deadline_utc": future_deadline,
+        "duration_seconds": 21600,
+        "status": "running",
+        "cancel_requested": True,
+        "last_checkpoint_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "current_workstream": "Workstream B: Datasets"
+    }
+    try:
+        with open(active_run_file, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        payload = {"terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 3}
+        res = run_script("stop_checkpoint.py", payload)
+        assert res.get("decision") == "allow"
+        assert "cancelled" in res.get("reason", "").lower()
+        with open(active_run_file, "r", encoding="utf-8") as f:
+            updated = json.load(f)
+            assert updated.get("status") == "cancelled"
+            assert "cancelled_at_utc" in updated
+    finally:
+        if os.path.exists(active_run_file):
+            os.remove(active_run_file)
+
+
+def test_stop_hook_error_handling_graceful():
+    """Corrupted manifest or invalid input must gracefully allow termination without crash."""
+    active_run_file = os.path.join(WORKBENCH_DIR, "logs", "active_run.json")
+    try:
+        with open(active_run_file, "w", encoding="utf-8") as f:
+            f.write("{invalid-corrupt-json")
+        payload = {"terminationReason": "ERROR", "error": "corrupt test", "fullyIdle": True, "executionNum": 4}
+        res = run_script("stop_checkpoint.py", payload)
+        assert res.get("decision") == "allow"
+    finally:
+        if os.path.exists(active_run_file):
+            os.remove(active_run_file)
 
 
 # --- 2. MCP Server Tests ---
