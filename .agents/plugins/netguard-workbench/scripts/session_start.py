@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 SessionStart Hook for NetGuard Engineering Workbench.
-Reads repository state, current branch, autonomous campaign state, and injects context into the session.
+Reads repository state, current branch, autonomous campaign state,
+and injects structured context into the session.
 """
 
 import json
@@ -9,21 +10,36 @@ import os
 import subprocess
 import sys
 
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+PLUGIN_DIR = os.path.abspath(os.path.join(SCRIPTS_DIR, ".."))
+
+
+def find_workspace_root():
+    d = PLUGIN_DIR
+    while d and d != os.path.dirname(d):
+        if os.path.exists(os.path.join(d, ".git")):
+            return d
+        d = os.path.dirname(d)
+    return PLUGIN_DIR
+
+
+WORKSPACE_ROOT = find_workspace_root()
+
 
 def get_git_info():
     try:
         branch = subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            ["git", "-C", WORKSPACE_ROOT, "rev-parse", "--abbrev-ref", "HEAD"],
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
         commit = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
+            ["git", "-C", WORKSPACE_ROOT, "rev-parse", "--short", "HEAD"],
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
         status = subprocess.check_output(
-            ["git", "status", "--porcelain"],
+            ["git", "-C", WORKSPACE_ROOT, "status", "--porcelain"],
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
@@ -34,8 +50,8 @@ def get_git_info():
 
 
 def get_autonomy_state():
-    state_file = os.path.join(os.getcwd(), "docs", "autonomy", "state.json")
-    if os.path.exists(state_file):
+    state_file = os.path.join(WORKSPACE_ROOT, "docs", "autonomy", "state.json")
+    if os.path.isfile(state_file):
         try:
             with open(state_file, "r", encoding="utf-8") as f:
                 data = json.load(f)

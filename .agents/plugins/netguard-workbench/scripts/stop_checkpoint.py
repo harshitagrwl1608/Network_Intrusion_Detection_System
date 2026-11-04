@@ -10,6 +10,11 @@ import os
 import sys
 import time
 
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+PLUGIN_DIR = os.path.abspath(os.path.join(SCRIPTS_DIR, ".."))
+LOGS_DIR = os.path.join(PLUGIN_DIR, "logs")
+CHECKPOINT_FILE = os.path.join(LOGS_DIR, "checkpoint.json")
+
 
 def main():
     try:
@@ -17,14 +22,10 @@ def main():
     except Exception:
         data = {}
 
-    term_reason = data.get("terminationReason", "UNKNOWN")
-    error_msg = data.get("error", "")
-    fully_idle = data.get("fullyIdle", True)
-    exec_num = data.get("executionNum", 1)
-
-    checkpoint_dir = os.path.join(os.getcwd(), ".agents", "plugins", "netguard-workbench", "logs")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    checkpoint_file = os.path.join(checkpoint_dir, "checkpoint.json")
+    term_reason = data.get("terminationReason", "UNKNOWN") if isinstance(data, dict) else "UNKNOWN"
+    error_msg = data.get("error", "") if isinstance(data, dict) else ""
+    fully_idle = data.get("fullyIdle", True) if isinstance(data, dict) else True
+    exec_num = data.get("executionNum", 1) if isinstance(data, dict) else 1
 
     record = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -36,7 +37,8 @@ def main():
     }
 
     try:
-        with open(checkpoint_file, "w", encoding="utf-8") as f:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
             json.dump(record, f, indent=2)
     except Exception:
         pass
