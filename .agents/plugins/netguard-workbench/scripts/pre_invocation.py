@@ -19,7 +19,7 @@ def main():
     # Inject ephemeral reminder for model focus
     reminder = (
         "NetGuard Workbench Invariants: "
-        "Strict 19-rule inventory in RuleEngine.rules | "
+        "Rule Governance (every rule distinct, justified, tested, maintainable) | "
         "Authorized branch 'antigravity/overnight-work' | "
         "Network telemetry boundary: packet PCAP over endpoint EVTX."
     )

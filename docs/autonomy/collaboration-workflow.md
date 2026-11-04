@@ -23,9 +23,9 @@ flowchart LR
 | Phase | Assigned Agent | Primary Responsibility | Mandatory Artifact / Output |
 | :--- | :--- | :--- | :--- |
 | **1. Research & Analysis** | `pcap-analyst`, `dataset-researcher`, or `zeek-analyst` | Packet forensics, protocol anomaly extraction, or capture evaluation. Strict read-only mode. | Structured Problem Brief with PCAP packet evidence and 5-tuple indicators. |
-| **2. Implementation** | `detection-rule-engineer` | Code enhancement within existing 19 rule instances. Holds exclusive write lock. | Modified source code with input validation and LRU state bounds. |
+| **2. Implementation** | `detection-rule-engineer` | Code enhancement and rule engineering under governance policy. Holds exclusive write lock. | Modified source code with input validation and LRU state bounds. |
 | **3. QA & Regression** | `regression-qa-reviewer` | Independent execution of `pytest` and `run_eval.py`. Verifies 100% detection and 0 benign FPs. | Test execution transcript with reproducible seed and benchmark metrics. |
-| **4. Security Audit** | `independent-security-auditor` | Adversarial evasion testing, boundary checks, clock-skew verification, Git branch discipline. | Adversarial audit report verifying 19-rule invariant and guardrail compliance. |
+| **4. Security Audit** | `independent-security-auditor` | Adversarial evasion testing, boundary checks, clock-skew verification, Git branch discipline. | Adversarial audit report verifying rule governance and guardrail compliance. |
 | **5. Evidence & Commit** | Coordinator / Lead Agent | Consolidates evidence, verifies clean `git status`, commits to `antigravity/overnight-work`. | Committed Git revision and updated `state.json` checkpoint. |
 
 ---
@@ -60,6 +60,6 @@ When communicating across agent boundaries:
 - Use structured JSON or bulleted Markdown specifying:
   1. `task_id`: Unique identifier for the engineering task.
   2. `evidence`: Concrete file paths, packet numbers, timestamps, or test outputs.
-  3. `invariants_checked`: Explicit confirmation that the 19-rule invariant and Git branch discipline were respected.
+  3. `invariants_checked`: Explicit confirmation that rule governance invariants and Git branch discipline were respected.
   4. `verdict`: `PASS`, `FAIL`, or `REQUIRES_REVISION`.
 

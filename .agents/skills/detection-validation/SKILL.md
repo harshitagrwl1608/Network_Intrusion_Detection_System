@@ -8,9 +8,9 @@ description: Methodology for validating NetGuard IDS rules against synthetic sce
 This skill governs the systematic validation of NetGuard IDS rules without inflating rule counts or creating new detection rules.
 
 ## Core Directives
-1. **Rule Set Invariance**:
-   - Exactly 19 rule instances are registered in `RuleEngine.rules`.
-   - Never add new rules to pass a validation test; optimize and harden existing rules.
+1. **Rule Governance Invariant**:
+   - Every registered rule must provide distinct, justified, tested, and maintainable value.
+   - Never add dummy or cosmetic rules to pass a validation test; optimize, harden, or propose justified new rules with complete verification.
 2. **Dual-Evaluation Methodology**:
    - **Ground-Truth Benchmarking**: Use `ids_project/evaluation/run_eval.py` for labeled evaluation (calculating Precision, Recall, F1, Latency, Memory).
    - **Engine Comparison**: Use `ids_project/evaluation/compare.py` for comparative agreement analysis against reference engines (e.g. Suricata EVE JSON).

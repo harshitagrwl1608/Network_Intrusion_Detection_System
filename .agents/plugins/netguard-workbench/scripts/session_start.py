@@ -73,7 +73,7 @@ def main():
     msg_lines = [
         "### NetGuard Engineering Workbench Initialized",
         f"- **Git Branch**: `{branch}` (`{commit}`) [{clean}]",
-        "- **Detection Rules**: Strictly enforcing 19 registered rules in `RuleEngine.rules`.",
+        "- **Detection Rules**: Enforcing rule governance in `RuleEngine.rules` (every rule distinct, justified, tested, and maintainable).",
         "- **Authorized Feature Branch**: `antigravity/overnight-work`.",
     ]
 

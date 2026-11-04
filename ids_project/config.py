@@ -172,3 +172,12 @@ TCP_ZERO_WINDOW_WINDOW    = _detection_int("TCP_ZERO_WINDOW_WINDOW", 10)     # s
 TCP_ZERO_WINDOW_COOLDOWN  = _detection_float("TCP_ZERO_WINDOW_COOLDOWN", 60.0)  # per-pair cooldown seconds
 TCP_ZERO_WINDOW_MIN_FLOWS = _detection_int("TCP_ZERO_WINDOW_MIN_FLOWS", 3)  # multi-flow corroboration
 PAYLOAD_ALERT_COOLDOWN_S = _detection_float("PAYLOAD_ALERT_COOLDOWN_S", 60.0)
+
+# --- Non-DNS Traffic on Port 53 (NonDnsTrafficOnDnsPortRule) ---
+NON_DNS_ON_DNS_PORT_COOLDOWN_S = _detection_float("NON_DNS_ON_DNS_PORT_COOLDOWN_S", 60.0)
+
+# --- ICMP Covert Tunnel & Shell Detection (IcmpTunnelRule) ---
+ICMP_TUNNEL_ENTROPY_THRESHOLD  = _detection_float("ICMP_TUNNEL_ENTROPY_THRESHOLD", 4.5)
+ICMP_TUNNEL_MIN_BYTES          = _detection_int("ICMP_TUNNEL_MIN_BYTES", 128)
+ICMP_TUNNEL_COOLDOWN_S         = _detection_float("ICMP_TUNNEL_COOLDOWN_S", 60.0)
+

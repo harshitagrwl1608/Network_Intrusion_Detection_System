@@ -305,12 +305,19 @@ def api_status():
         if s in sev_counts:
             sev_counts[s] += 1
 
+    active_rules = 19
+    try:
+        from engine.rules import RuleEngine
+        active_rules = len(RuleEngine(None, set(), config).rules)
+    except Exception:
+        pass
+
     return jsonify({
         "threat_level": threat_level,
         "alert_count_1h": len(alerts),
         "rule_breakdown": rule_counts,
         "severity_breakdown": sev_counts,
-        "active_rules_count": 19,
+        "active_rules_count": active_rules,
         "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "geo_cache_size": len(_GEO_CACHE),
     })

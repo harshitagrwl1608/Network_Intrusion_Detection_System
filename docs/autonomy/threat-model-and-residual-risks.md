@@ -55,7 +55,7 @@ flowchart TD
 | **Information Disclosure** | Leakage of API keys, GitHub tokens, JWTs, or passwords in tool audit logs. | **Medium** | PostToolUse audit logger writes strictly the executable token (e.g. `pytest`, `git`), omitting command arguments and payloads. Regex sanitization strips credentials, JWTs, PATs, and keys. |
 | **Denial of Service** | Extremely large PCAPs (>100 MB) or malformed captures exhausting memory in Scapy `rdpcap`. | **Medium** | Path validation bounds PCAP sizes to 100 MB max; Scapy parser wrapped in defensive exception blocks; unbounded log growth mitigated via 5 MB rotation. |
 | **Elevation of Privilege** | Arbitrary SQL injection in evaluation database inspector MCP server. | **High** | Parameterized SQL queries with strict identifier validation (`^[a-zA-Z0-9_]+$`) for table and column names; connection restricted to SQLite read-only URI mode (`mode=ro`). |
-| **Evasion (Rule Engine)** | Circumventing detection invariants by adding dummy rules or inflating rule counts. | **Critical** | Strict 19-rule invariant enforced in `RuleEngine.rules`; verified by `rule-review` skill and automated regression test suite. |
+| **Evasion (Rule Engine)** | Circumventing detection invariants by adding dummy rules or inflating rule counts. | **Critical** | Rule governance invariant enforced in `RuleEngine.rules`; verified by dynamic invariant test suite requiring distinct value, tests, and evidence for every rule. |
 
 ---
 

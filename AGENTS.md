@@ -8,15 +8,17 @@
   - Never destructively reset (`git reset --hard`) without absolute safety verification.
   - Push only to `origin/antigravity/overnight-work`.
 
-## 2. Core Detection Invariant: No New Detection Rules
-- **Rule Count Restriction**: The system strictly maintains exactly **19 rule instances** registered in `RuleEngine.rules`.
+## 2. Core Detection Governance: Distinct, Justified & Tested Rules
+- **Rule Governance Policy**: The historical 19-rule limit is retired. There is NO predetermined maximum or target number of detection rules. Every registered rule must provide distinct, justified, tested, and maintainable detection value.
 - **Prohibited**:
-  - Do NOT create new detection rules, dummy rules, or inflate rule counts.
-  - Do NOT create new Sigma detections, Splunk detections, or Suricata signatures.
+  - Do NOT create dummy rules, redundant rules, or inflate rule counts merely for statistics.
+  - Do NOT create separate rules for minor port or payload variations when existing rules can be extended.
+  - Do NOT remove rules merely to force passing benchmark scores.
 - **Permitted and Required**:
-  - Correct field mappings, normalization, and bounds checks.
+  - Genuinely unique detection rules with documented attack behaviors and observable network evidence.
+  - Correct field mappings, normalization, and bounds checks (`1 <= port <= 65535`, valid IPs).
   - Harden existing detection conditions against evasion and protocol edge cases.
-  - Fix memory leaks, stale state buildup, and unpruned caches.
+  - Fix memory leaks, stale state buildup, and enforce $O(1)$ LRU caches via `prune_stale()`.
   - Enhance forensic evidence in alerts.
   - Expand automated test fixtures, synthetic scenarios, and regression suites.
 

@@ -211,7 +211,7 @@ def test_pre_invocation_hook():
     assert "injectSteps" in res
     assert len(res["injectSteps"]) > 0
     ephem = res["injectSteps"][0].get("ephemeralMessage", "")
-    assert "19-rule inventory" in ephem
+    assert "Rule Governance" in ephem
 
 
 def test_stop_hook_safe_termination_non_looping():

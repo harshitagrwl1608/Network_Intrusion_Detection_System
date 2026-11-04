@@ -17,5 +17,5 @@ This skill governs the systematic discovery, cataloging, and ingestion of real-w
    - Extract PCAPs or flow logs safely using Python standard libraries or Scapy.
    - Never commit multi-megabyte raw PCAPs to Git. Downsample or slice reproducible micro-fixtures for automated regression suites.
 4. **Validation Mapping**:
-   - Map captured traffic scenarios directly against the existing 19 NetGuard detection rules.
+   - Map captured traffic scenarios directly against NetGuard detection rules.
    - Evaluate true positive detection rates and false positive baseline counts.

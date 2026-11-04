@@ -5249,6 +5249,483 @@ class TcpZeroWindowRule:
 
 
 # =============================================================================
+# Rule 20: Non-DNS Traffic on DNS Port 53 Detection
+# =============================================================================
+
+class NonDnsTrafficOnDnsPortRule:
+    """
+    Detects non-DNS protocols, reverse shells, interactive command prompts,
+    and cleartext HTTP traffic targeting or originating from DNS port 53 (TCP/UDP).
+
+    Standard DNS uses port 53. Threat actors frequently bind reverse shells or
+    tunnel non-DNS traffic over port 53 to bypass restrictive outbound perimeter
+    egress firewalls that permit DNS.
+
+    Key Indicators:
+    - Interactive shell / command prompt banners (e.g. Windows cmd.exe, /bin/sh, PowerShell)
+    - Cleartext HTTP methods (GET, POST, HEAD, PUT, OPTIONS, CONNECT) on port 53
+    - High-ratio printable ASCII command streams on port 53 that fail DNS message parsing
+    """
+    name = "NON_DNS_TRAFFIC_ON_DNS_PORT"
+    rule_version = "1.0"
+    DNS_PORT = 53
+    MAX_TRACKED_FLOWS = 4096
+
+    # Shell and prompt signatures
+    SHELL_SIGNATURES: tuple[bytes, ...] = (
+        b"Microsoft Windows",
+        b"Windows XP",
+        b"cmd.exe",
+        b"powershell",
+        b"C:\\",
+        b"C:>",
+        b"/bin/sh",
+        b"/bin/bash",
+        b"root@",
+        b"admin@",
+        b"Linux ",
+        b"uid=",
+        b"gid=",
+        b"whoami",
+        b"dir\r",
+        b"dir\n",
+        b"ls -l",
+    )
+
+    # HTTP method signatures
+    HTTP_METHODS: tuple[bytes, ...] = (
+        b"GET ",
+        b"POST ",
+        b"HEAD ",
+        b"PUT ",
+        b"OPTIONS ",
+        b"CONNECT ",
+        b"DELETE ",
+        b"HTTP/1.",
+        b"HTTP/2.",
+    )
+
+    def __init__(self, cooldown: float = 60.0, enabled: bool = True):
+        self.cooldown = _nonnegative_float_setting(
+            cooldown, 60.0, "NON_DNS_ON_DNS_PORT_COOLDOWN_S"
+        )
+        self.enabled = bool(enabled)
+        self._lock = threading.Lock()
+        # Key: (min_ip, max_ip, anomaly_type) -> float (last alert timestamp)
+        self._seen: OrderedDict[tuple, float] = OrderedDict()
+
+    @staticmethod
+    def _is_valid_dns_message(payload: bytes, is_tcp: bool) -> bool:
+        if is_tcp:
+            if len(payload) < 14:
+                return False
+            msg_len = int.from_bytes(payload[:2], "big")
+            if msg_len == 0 or msg_len > 65535:
+                return False
+            dns_header = payload[2:14]
+        else:
+            if len(payload) < 12:
+                return False
+            dns_header = payload[:12]
+
+        flags = int.from_bytes(dns_header[2:4], "big")
+        opcode = (flags >> 11) & 0x0F
+        rcode = flags & 0x0F
+        qdcount = int.from_bytes(dns_header[4:6], "big")
+        ancount = int.from_bytes(dns_header[6:8], "big")
+        nscount = int.from_bytes(dns_header[8:10], "big")
+        arcount = int.from_bytes(dns_header[10:12], "big")
+
+        if opcode not in (0, 1, 2, 4, 5):
+            return False
+        if rcode > 10:
+            return False
+        if qdcount > 100 or ancount > 500 or nscount > 100 or arcount > 500:
+            return False
+        if qdcount == 0 and ancount == 0 and nscount == 0 and arcount == 0:
+            return False
+        return True
+
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
+        cutoff = now - self.cooldown
+        with self._lock:
+            for k in list(self._seen):
+                if self._seen[k] < cutoff or self._seen[k] > now:
+                    del self._seen[k]
+
+    def check(self, record: dict) -> dict | None:
+        if not self.enabled:
+            return None
+        proto = record.get("protocol")
+        if record.get("type") != "IP" or proto not in ("TCP", "UDP"):
+            return None
+
+        src_port = _normalize_port(record.get("src_port"))
+        dst_port = _normalize_port(record.get("dst_port"))
+        if src_port != self.DNS_PORT and dst_port != self.DNS_PORT:
+            return None
+
+        src_ip = record.get("src_ip", "")
+        dst_ip = record.get("dst_ip", "")
+        if not src_ip or not dst_ip or _is_trusted(src_ip):
+            return None
+
+        payload: bytes = record.get("payload", b"")
+        if not payload or len(payload) < 4:
+            return None
+
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
+
+        # Exclude TLS handshake if running DoT (RFC 7858) on port 53
+        if payload.startswith((b"\x16\x03\x01", b"\x16\x03\x02", b"\x16\x03\x03")):
+            return None
+
+        # If already parsed as a valid DNS query or response by Scapy layer
+        if record.get("dns_query") is not None:
+            return None
+
+        is_tcp = (proto == "TCP")
+        if self._is_valid_dns_message(payload, is_tcp):
+            return None
+
+        # Inspect for non-DNS payload indicators
+        anomaly_type = None
+        severity = "medium"
+        confidence = "heuristic"
+        detail = ""
+        matched_sig = None
+
+        # 1. Check for interactive shell or command signatures
+        for sig in self.SHELL_SIGNATURES:
+            if sig in payload:
+                anomaly_type = "INTERACTIVE_SHELL"
+                severity = "high"
+                confidence = "high"
+                matched_sig = sig.decode("ascii", errors="replace")
+                detail = (
+                    f"{src_ip} transmitted interactive command shell data ('{matched_sig}') "
+                    f"over DNS port 53 ({proto}) to {dst_ip} — possible reverse shell or firewall bypass"
+                )
+                break
+
+        # 2. Check for cleartext HTTP traffic on port 53
+        if not anomaly_type:
+            for m in self.HTTP_METHODS:
+                if payload.startswith(m):
+                    anomaly_type = "CLEARTEXT_HTTP"
+                    severity = "medium"
+                    confidence = "high"
+                    matched_sig = m.decode("ascii", errors="replace").strip()
+                    detail = (
+                        f"{src_ip} sent cleartext HTTP request ('{matched_sig}') on DNS port 53 "
+                        f"to {dst_ip} — possible C2 tunneling or unauthorized HTTP service"
+                    )
+                    break
+
+        # 3. Check for general high-printable ASCII non-DNS stream (e.g. raw shell text)
+        if not anomaly_type and len(payload) >= 8:
+            printable_bytes = sum(1 for b in payload if 32 <= b <= 126 or b in (9, 10, 13))
+            ascii_ratio = printable_bytes / len(payload)
+            if ascii_ratio >= 0.85:
+                anomaly_type = "NON_DNS_PROTOCOL"
+                severity = "medium"
+                confidence = "heuristic"
+                preview_text = payload[:40].decode("ascii", errors="replace").strip()
+                matched_sig = f"ascii_ratio={ascii_ratio:.2f}"
+                detail = (
+                    f"{src_ip} sent non-DNS ASCII text stream on DNS port 53 to {dst_ip} "
+                    f"('{preview_text}') — possible covert tunnel or non-DNS protocol"
+                )
+
+        if not anomaly_type:
+            return None
+
+        # Direction-independent flow pair for cooldown deduplication
+        pair = tuple(sorted((str(src_ip), str(dst_ip))))
+        key = (pair, anomaly_type)
+
+        with self._lock:
+            last = self._seen.get(key)
+            if last is not None and now - last < self.cooldown:
+                self._seen.move_to_end(key)
+                return None
+            if key not in self._seen and len(self._seen) >= self.MAX_TRACKED_FLOWS:
+                self._seen.popitem(last=False)
+            self._seen[key] = now
+            self._seen.move_to_end(key)
+
+        preview = payload[:64].decode("latin1", errors="replace")
+        logger.debug(f"{self.name} [{anomaly_type}] fired: {detail}")
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "src_port": src_port,
+            "dst_port": dst_port,
+            "protocol": proto,
+            "severity": severity,
+            "confidence": confidence,
+            "detail": detail,
+            "evidence": {
+                "anomaly_type": anomaly_type,
+                "target_port": self.DNS_PORT,
+                "protocol": proto,
+                "payload_length": len(payload),
+                "payload_preview": preview,
+                "matched_signature": matched_sig,
+            },
+            "window_start": now,
+            "window_end": now,
+        }
+
+
+# =============================================================================
+# Rule 21: ICMP Covert Tunnel & Shell Detection
+# =============================================================================
+
+def _shannon_entropy_bytes(data: bytes) -> float:
+    """Return Shannon entropy in bits/byte for raw bytes (0.0 to 8.0)."""
+    if not data or not isinstance(data, (bytes, bytearray)):
+        return 0.0
+    n = len(data)
+    if n <= 1:
+        return 0.0
+    counts = Counter(data)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+class IcmpTunnelRule:
+    """
+    Detects covert ICMP tunneling, reverse shells (icmpsh), data exfiltration,
+    and embedded executable payloads transported inside ICMP Echo packets.
+
+    Standard diagnostic ICMP Echo Request (type 8/128) and Echo Reply (type 0/129)
+    packets carry small fixed-size payloads (Windows: 32 bytes, Linux: 56 bytes)
+    or repetitive diagnostic padding (all zeros or incrementing byte sequences).
+
+    Covert ICMP tunnels (ptunnel, icmpsh, hans, custom C2) abuse ICMP payloads
+    to bypass network controls, carrying encrypted payloads or command shells.
+
+    Detection Mechanisms:
+    1. Known Tunnel Tools: Ptunnel magic token (0xD5200804).
+    2. Embedded Executables: Windows PE (MZ header) or Linux ELF (\x7fELF).
+    3. Interactive Shells: Command prompts, shell execution tokens in ICMP payload.
+    4. High-Entropy Oversized Payloads: >=128 bytes with Shannon entropy >=4.5,
+       excluding legitimate diagnostic MTU sweeps (all zeros or sequential bytes).
+    """
+    name = "ICMP_TUNNEL"
+    rule_version = "1.0"
+    ALERT_COOLDOWN_S = 60.0
+    MAX_TRACKED_FLOWS = 4096
+
+    # Ptunnel magic signature
+    PTUNNEL_MAGIC = b"\xd5\x20\x08\x04"
+
+    # Shell and prompt indicators in ICMP payloads
+    ICMP_SHELL_STRINGS: tuple[bytes, ...] = (
+        b"cmd.exe",
+        b"/bin/sh",
+        b"/bin/bash",
+        b"powershell",
+        b"Microsoft Windows",
+        b"root@",
+        b"whoami",
+        b"C:\\WINDOWS",
+    )
+
+    def __init__(self, entropy_threshold: float = 4.5, min_bytes: int = 128,
+                 cooldown: float = 60.0, enabled: bool = True):
+        self.entropy_threshold = _nonnegative_float_setting(
+            entropy_threshold, 4.5, "ICMP_TUNNEL_ENTROPY_THRESHOLD"
+        )
+        self.min_bytes = _positive_setting(
+            min_bytes, 128, "ICMP_TUNNEL_MIN_BYTES"
+        )
+        self.cooldown = _nonnegative_float_setting(
+            cooldown, 60.0, "ICMP_TUNNEL_COOLDOWN_S"
+        )
+        self.enabled = bool(enabled)
+        self._lock = threading.Lock()
+        # Key: (min_ip, max_ip, anomaly_type) -> float (last alert timestamp)
+        self._seen: OrderedDict[tuple, float] = OrderedDict()
+
+    @staticmethod
+    def _is_diagnostic_ping(data: bytes) -> bool:
+        """
+        Check if payload is typical diagnostic ping padding (e.g. ping -s).
+        Returns True for all zeros, repeating small patterns, or sequential byte cycles.
+        """
+        if len(data) < 16:
+            return True
+        sample = data[16:] if len(data) >= 32 else data
+        if not sample:
+            return True
+        # Check sequential byte increment (e.g. 0x00, 0x01, 0x02...)
+        seq_count = sum(1 for i in range(len(sample) - 1) if (sample[i] + 1) % 256 == sample[i+1])
+        if seq_count >= len(sample) * 0.70:
+            return True
+        # Check low distinct alphabet (e.g. repeated "\x00" or repeating pattern)
+        if len(set(sample)) <= 8:
+            return True
+        return False
+
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
+        cutoff = now - self.cooldown
+        with self._lock:
+            for k in list(self._seen):
+                if self._seen[k] < cutoff or self._seen[k] > now:
+                    del self._seen[k]
+
+    def check(self, record: dict) -> dict | None:
+        if not self.enabled:
+            return None
+        proto = record.get("protocol")
+        if record.get("type") != "IP" or proto not in ("ICMP", "ICMPV6"):
+            return None
+
+        # Inspect ICMP Echo Request / Reply only
+        raw_type = record.get("icmp_type")
+        if raw_type is None:
+            return None
+        try:
+            icmp_type = int(raw_type)
+            raw_code = record.get("icmp_code", 0)
+            icmp_code = int(raw_code) if raw_code is not None else 0
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+        # IPv4: 8=Echo Request, 0=Echo Reply; IPv6: 128=Echo Request, 129=Echo Reply
+        is_echo = (proto == "ICMP" and icmp_type in (0, 8)) or (proto == "ICMPV6" and icmp_type in (128, 129))
+        if not is_echo:
+            return None
+
+        src_ip = record.get("src_ip", "")
+        dst_ip = record.get("dst_ip", "")
+        if not src_ip or not dst_ip or _is_trusted(src_ip):
+            return None
+
+        payload: bytes = record.get("payload", b"")
+        if not payload or not isinstance(payload, (bytes, bytearray)):
+            return None
+
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
+
+        anomaly_type = None
+        severity = "high"
+        confidence = "high"
+        detail = ""
+        matched_ind = None
+        entropy = 0.0
+
+        # Check 1: Ptunnel signature
+        if payload.startswith(self.PTUNNEL_MAGIC):
+            anomaly_type = "PTUNNEL_TRAFFIC"
+            severity = "critical"
+            matched_ind = "ptunnel_magic_0xd5200804"
+            detail = (
+                f"{src_ip} sent ICMP Echo containing Ptunnel protocol magic to {dst_ip} "
+                "— active ICMP tunnel detected"
+            )
+
+        # Check 2: Embedded executable (PE/ELF)
+        elif payload.startswith(b"\x7fELF"):
+            anomaly_type = "EMBEDDED_EXECUTABLE"
+            severity = "high"
+            matched_ind = "elf_header"
+            detail = (
+                f"{src_ip} sent ICMP Echo containing Linux ELF executable header to {dst_ip} "
+                "— covert binary transfer or staging"
+            )
+        elif payload.startswith(b"MZ") and len(payload) >= 64:
+            anomaly_type = "EMBEDDED_EXECUTABLE"
+            severity = "high"
+            matched_ind = "pe_mz_header"
+            detail = (
+                f"{src_ip} sent ICMP Echo containing Windows PE/MZ executable header to {dst_ip} "
+                "— covert binary transfer or staging"
+            )
+
+        # Check 3: Interactive shell / command patterns (icmpsh)
+        if not anomaly_type:
+            for s in self.ICMP_SHELL_STRINGS:
+                if s in payload:
+                    anomaly_type = "ICMP_SHELL_PAYLOAD"
+                    severity = "high"
+                    matched_ind = s.decode("ascii", errors="replace")
+                    detail = (
+                        f"{src_ip} sent ICMP Echo containing interactive shell data ('{matched_ind}') "
+                        f"to {dst_ip} — possible icmpsh reverse shell"
+                    )
+                    break
+
+        # Check 4: High-entropy oversized payload (encrypted/compressed tunnel)
+        if not anomaly_type and len(payload) >= self.min_bytes:
+            entropy = _shannon_entropy_bytes(payload)
+            if entropy >= self.entropy_threshold and not self._is_diagnostic_ping(payload):
+                anomaly_type = "HIGH_ENTROPY_TUNNEL"
+                severity = "medium"
+                confidence = "heuristic"
+                matched_ind = f"len={len(payload)},entropy={entropy:.2f}"
+                detail = (
+                    f"{src_ip} sent oversized high-entropy ICMP Echo payload ({len(payload)} bytes, "
+                    f"entropy {entropy:.2f} >= {self.entropy_threshold}) to {dst_ip} "
+                    "— possible encrypted ICMP data exfiltration or tunnel"
+                )
+
+        if not anomaly_type:
+            return None
+
+        # Deduplication pair
+        pair = tuple(sorted((str(src_ip), str(dst_ip))))
+        key = (pair, anomaly_type)
+
+        with self._lock:
+            last = self._seen.get(key)
+            if last is not None and now - last < self.cooldown:
+                self._seen.move_to_end(key)
+                return None
+            if key not in self._seen and len(self._seen) >= self.MAX_TRACKED_FLOWS:
+                self._seen.popitem(last=False)
+            self._seen[key] = now
+            self._seen.move_to_end(key)
+
+        logger.debug(f"{self.name} [{anomaly_type}] fired: {detail}")
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "src_port": None,
+            "dst_port": None,
+            "protocol": proto,
+            "severity": severity,
+            "confidence": confidence,
+            "detail": detail,
+            "evidence": {
+                "anomaly_type": anomaly_type,
+                "icmp_type": icmp_type,
+                "icmp_code": icmp_code,
+                "payload_bytes": len(payload),
+                "entropy": round(entropy, 3) if entropy else 0.0,
+                "matched_indicator": matched_ind,
+                "payload_preview_hex": payload[:32].hex(),
+            },
+            "window_start": now,
+            "window_end": now,
+        }
+
+
+
+# =============================================================================
 # Alert Spool & Rule Engine Orchestrator
 # =============================================================================
 
@@ -5501,6 +5978,14 @@ class RuleEngine:
                 window=getattr(cfg, "TCP_ZERO_WINDOW_WINDOW", 10),
                 cooldown=getattr(cfg, "TCP_ZERO_WINDOW_COOLDOWN", 60.0),
                 min_distinct_flows=getattr(cfg, "TCP_ZERO_WINDOW_MIN_FLOWS", 3),
+            ),
+            NonDnsTrafficOnDnsPortRule(
+                cooldown=getattr(cfg, "NON_DNS_ON_DNS_PORT_COOLDOWN_S", 60.0),
+            ),
+            IcmpTunnelRule(
+                entropy_threshold=getattr(cfg, "ICMP_TUNNEL_ENTROPY_THRESHOLD", 4.5),
+                min_bytes=getattr(cfg, "ICMP_TUNNEL_MIN_BYTES", 128),
+                cooldown=getattr(cfg, "ICMP_TUNNEL_COOLDOWN_S", 60.0),
             ),
         ]
 

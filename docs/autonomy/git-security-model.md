@@ -96,7 +96,7 @@ git push origin antigravity/overnight-work
 To merge changes to `main`:
 1. Push branch to `origin/antigravity/overnight-work`.
 2. Open a Pull Request from `antigravity/overnight-work` to `main`.
-3. Verify all automated tests, regression suites, and 19-rule detection invariants pass.
+3. Verify all automated tests, regression suites, and rule governance invariants pass.
 4. Obtain independent security and code review.
 5. Merge via reviewed pull request.
 

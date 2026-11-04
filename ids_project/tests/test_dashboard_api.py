@@ -101,7 +101,8 @@ class TestDashboardApi(unittest.TestCase):
         resp = self.client.get("/api/status")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
-        self.assertEqual(data.get("active_rules_count"), 19)
+        from engine.rules import RuleEngine
+        self.assertEqual(data.get("active_rules_count"), len(RuleEngine(None, set(), config).rules))
         self.assertEqual(data["severity_breakdown"]["high"], 1)
         self.assertEqual(data["rule_breakdown"]["TCP_ZERO_WINDOW"], 1)
 

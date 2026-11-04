@@ -11,7 +11,7 @@
 
 The **NetGuard Engineering Workbench** upgrades the NetGuard IDS repository into a customized, production-grade Antigravity engineering environment. The workbench packages **8 specialist subagents**, **9 modular engineering skills**, **5 lifecycle hooks**, and **2 local stdio MCP servers** into an official Antigravity plugin located at `.agents/plugins/netguard-workbench/`.
 
-The entire workbench adheres strictly to the Antigravity plugin specification, passes `agy plugin validate --strict` with zero warnings, enforces Git branch discipline via pre-tool hooks, and guarantees the preservation of NetGuard's core 19-rule detection invariant.
+The entire workbench adheres strictly to the Antigravity plugin specification, passes `agy plugin validate --strict` with zero warnings, enforces Git branch discipline via pre-tool hooks, and guarantees the preservation of NetGuard's core rule governance invariants.
 
 ---
 
@@ -102,7 +102,7 @@ Each agent defines dedicated tool permissions, system prompts, and strict file b
 3. **`dataset-deduplication`**: Multi-tier duplicate detection (file SHA-256, frame hash normalization, 5-tuple flow fingerprinting).
 4. **`suricata-validation`**: Resilient EVE JSON ingestion, timestamp normalization, and multi-engine concordance calculation.
 5. **`zeek-analysis`**: Parsing Zeek connection state flags (`history` strings like `ShADadFf`) and cross-referencing alerts with DNS/SSL logs.
-6. **`rule-review`**: Complete audit checklist for the 19 rules: port boundaries (`1 <= port <= 65535`), IP validation, and clock drift eviction (`timestamp > now`).
+6. **`rule-review`**: Complete audit checklist for detection rules: port boundaries (`1 <= port <= 65535`), IP validation, and clock drift eviction (`timestamp > now`).
 7. **`memory-performance-audit`**: Verification of `OrderedDict` with `popitem(last=False)` and `move_to_end(key)`, plus garbage collection defaults.
 8. **`reproducible-evaluation`**: Executing ground-truth evaluation across all 38 attack scenarios and asserting 100% precision/recall with 0 false positives.
 9. **`forensic-reporting`**: Extraction and schema validation of alert evidence dictionaries from SQLite databases.
@@ -116,7 +116,7 @@ Each agent defines dedicated tool permissions, system prompts, and strict file b
 | **`SessionStart`** | `scripts/session_start.py` | State awareness | Injects current Git branch, commit status, and autonomy cycle into the conversation trajectory. |
 | **`PreToolUse`** | `scripts/pre_tool_guard.py` | Git & directory protection | Tokenizes commands with `shlex.shlex(punctuation_chars=True)`. Fails closed on malformed/empty input. Blocks `git push origin main`, force-pushes (`-f`), `git reset --hard`, branch deletions (`-D`), refspec evasion (`+main`, `:main`), global flag bypasses (`git -C .`), and recursive deletion of datasets or core directories. Returns `decision: allow` or `decision: deny`. |
 | **`PostToolUse`** | `scripts/post_tool_logger.py` | Sanitized auditing | Records operational audit events to `.agents/plugins/netguard-workbench/logs/workbench_audit.log` (predictable workspace location). Implements 5 MB rotation and safe file locking. Redacts tokens, passwords, JWTs, and API keys. Returns `{}`. |
-| **`PreInvocation`** | `scripts/pre_invocation.py` | Context injection | Injects ephemeral workspace reminders regarding the 19-rule limit and authorized branch. |
+| **`PreInvocation`** | `scripts/pre_invocation.py` | Context injection | Injects ephemeral workspace reminders regarding rule governance and authorized branch. |
 | **`Stop`** | `scripts/stop_checkpoint.py` | Durable checkpointing | Saves a structured checkpoint to `logs/checkpoint.json`. **Guaranteed non-looping**: returns `decision: allow`. |
 
 ---
