@@ -294,15 +294,32 @@ This registry records all external network traffic datasets acquired, verified, 
 
 ---
 
+### Entry DS-18: `oisf_syn_flood` (OISF TCP SYN Flood Burst)
+- **Official Name:** input.pcap
+- **Publisher:** Open Information Security Foundation (OISF)
+- **Official Download URL:** `https://raw.githubusercontent.com/OISF/suricata-verify/master/tests/firewall/tcp-session-syn-flood-drop-precedence/input.pcap`
+- **Download Date:** 2026-11-04
+- **License / Terms:** Open Information Security Foundation (GPL v2)
+- **File Format:** libpcap (binary capture)
+- **Capture File Size:** 14,024 bytes (~14 KB)
+- **SHA-256 Digest:** `c8e0349e99229bd3b9a3a4dfb2122f0a9a5b6c9d234325fb6beb404197413441`
+- **Packet Count:** 200 packets
+- **Attack Behaviors:** High-rate volumetric TCP SYN flood burst (200 SYNs targeting `198.51.100.5:443` from incrementing source ports `40000..40199` in 0.199s, packet rate 1,005 packets/s).
+- **Target NetGuard Rules:** `SYN_FLOOD`.
+- **Evaluation Verdict:** `TRUE_POSITIVE` (detected 100-packet SYN burst threshold in window, fired alert with complete forensic evidence).
+- **Key Forensic Finding:** Rapid DoS burst triggered NetGuard `SYN_FLOOD` rule at packet 100 without dropped packets or queue lag.
+
+---
+
 ## 3. Storage Allocation and Quota Audit
 
 | Metric | Measured Value | Quota Limit | Status |
 |---|---|---|---|
 | **Mount Device** | `/dev/sdb1` | `/dev/sdb1` | Valid |
 | **Mount Location** | `/run/media/harshitgarg/Data1` | External HDD | Valid |
-| **Total Acquired Data** | 195,865,208 bytes (~0.182 GiB) | $\le 5.0$ GiB (initial) | **PASS** (3.6% of initial cap) |
+| **Total Acquired Data** | 195,879,232 bytes (~0.182 GiB) | $\le 5.0$ GiB (initial) | **PASS** (3.6% of initial cap) |
 | **Available Disk Space** | 625.3 GiB | $\ge 100$ GiB | **PASS** (625% above minimum) |
 | **Total NetGuard Allocation** | $\approx 0.19$ GiB | $\le 450$ GiB | **PASS** |
 | **Independent Publishers** | 6 (Stratosphere CTU, Wireshark, Nozomi Networks, Fox-IT, m-rau5, OISF) | $\ge 2$ | **PASS** |
-| **Distinct Verified Captures** | 17 | Multi-scenario | **PASS** |
+| **Distinct Verified Captures** | 18 | Multi-scenario | **PASS** |
 | **Registered Detection Rules** | 23 | Distinct & Tested | **PASS** |

@@ -268,5 +268,6 @@ During Phase 4 and the autonomous engineering cycle, NetGuard expanded beyond si
 | `foxit_quantum_insert` | Fox-IT | Port 80 cleartext injection | 1.8 KB | 0 | **True Negative / Unassessed**: Sequence racing on port 80 preserved outside TLS tamper scope |
 | `iot23_malware_20_1` | Stratosphere CTU | Torii Modular Botnet C2 | 4.1 MB | 0 | **True Negative / Unassessed**: Subthreshold volume TLS session validated |
 | `oisf_tls_sni_anomaly` | OISF | ClientHello SNI variations | 4.0 KB | 0 | **True Negative / Unassessed**: Host-level SNI allowlist policy verification |
+| `oisf_syn_flood` | OISF | TCP SYN flood burst | 14.0 KB | 1 | **True Positive**: High-rate volumetric TCP SYN flood burst (`SYN_FLOOD`: 1) |
 
-All 17 captures were evaluated with a cumulative network bandwidth budget of only **0.17 MB** and verified via SHA-256 provenance against `/run/media/harshitgarg/Data1/NetGuard-datasets`.
+All 18 captures were evaluated with a cumulative network bandwidth budget of only **0.17 MB** and verified via SHA-256 provenance against `/run/media/harshitgarg/Data1/NetGuard-datasets`.

@@ -810,6 +810,20 @@ def get_candidate_queue() -> list[dict]:
             "provenance_type": "curated_research_capture",
             "compression": None,
         },
+        {
+            "id": "oisf_syn_flood",
+            "name": "OISF TCP SYN Flood Burst",
+            "publisher": "Open Information Security Foundation (OISF)",
+            "url": "https://raw.githubusercontent.com/OISF/suricata-verify/master/tests/firewall/tcp-session-syn-flood-drop-precedence/input.pcap",
+            "type": "pcap",
+            "size_est_bytes": 14024,
+            "category": "Denial of Service (DoS)",
+            "attack_type": "High-rate volumetric TCP SYN flood burst (200 SYNs in 0.2s)",
+            "target_rules": ["SYN_FLOOD"],
+            "ground_truth": "OISF Suricata verify firewall test: 200 SYN packets targeting 198.51.100.5:443 from incrementing source ports in 0.199s",
+            "provenance_type": "curated_research_capture",
+            "compression": None,
+        },
     ]
 
 
