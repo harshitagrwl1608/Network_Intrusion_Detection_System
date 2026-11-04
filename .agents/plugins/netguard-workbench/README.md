@@ -15,7 +15,7 @@ The **NetGuard Engineering Workbench** is a specialized Google Antigravity plugi
 ├── assets/
 │   └── logo.svg              # NetGuard shield icon
 ├── rules/
-│   └── AGENTS.md             # Invariants: 19-rule limit, Git & telemetry discipline
+│   └── AGENTS.md             # Invariants: Rule governance, Git & telemetry discipline
 ├── agents/                   # Specialist subagents
 │   ├── pcap-analyst.md
 │   ├── detection-rule-engineer.md

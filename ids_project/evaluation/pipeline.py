@@ -8,7 +8,7 @@ Features:
   - Worker A: Discovery & prioritized acquisition queue across independent publishers
   - Worker B: Background downloader with HTTP resume (.part) and 90-min / 5-GiB resource budgeting
   - Worker C: Integrity & metadata verification (SHA-256, safe extraction, PCAP validation)
-  - Worker D: Concurrent real-time evaluation against NetGuard 19-rule engine
+  - Worker D: Concurrent real-time evaluation against NetGuard detection engine
   - Storage stages: incoming/ (.part) -> verified/ -> evaluation/
   - Preserves external HDD invariants (>= 100 GiB free, <= 450 GiB total allocation)
 """
