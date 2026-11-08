@@ -21,6 +21,7 @@ import logging
 import lzma
 import os
 import queue
+import re
 import shutil
 import struct
 import subprocess
@@ -34,6 +35,8 @@ import urllib.request
 # Ensure ids_project is in sys.path
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _IDS_ROOT = os.path.dirname(_HERE)
+IDS_PROJECT_DIR = _IDS_ROOT
+DATA_DIR = os.path.join(IDS_PROJECT_DIR, "data")
 if _IDS_ROOT not in sys.path:
     sys.path.insert(0, _IDS_ROOT)
 
@@ -62,6 +65,7 @@ MAX_INITIAL_ACQUISITION_GIB = 5.0
 MAX_ALLOCATION_GIB = 450.0
 MAX_DOWNLOAD_TIME_SECONDS = 90 * 60  # 90 minutes
 EXPECTED_MOUNT_POINT = "/run/media/harshitgarg/Data1"
+EXPECTED_BACKING_DEVICE = "/dev/sdb1"
 
 # PCAP Magic Numbers
 PCAP_MAGIC_LE = b"\xd4\xc3\xb2\xa1"
@@ -96,8 +100,16 @@ def check_disk_safety(require_mount: bool = True) -> bool:
                 for line in f:
                     parts = line.strip().split()
                     if len(parts) >= 2 and parts[1] == EXPECTED_MOUNT_POINT:
-                        mount_ok = True
-                        break
+                        dev = parts[0]
+                        if dev == EXPECTED_BACKING_DEVICE or os.path.realpath(dev) == os.path.realpath(EXPECTED_BACKING_DEVICE):
+                            mount_ok = True
+                            break
+                        else:
+                            logger.error(
+                                f"Mount check FAILED: {EXPECTED_MOUNT_POINT} is mounted on unexpected backing device "
+                                f"'{dev}' (expected '{EXPECTED_BACKING_DEVICE}'). Writes blocked."
+                            )
+                            return False
             if not mount_ok:
                 logger.error(
                     f"Mount check FAILED: {EXPECTED_MOUNT_POINT} not found in /proc/mounts. "
@@ -190,17 +202,11 @@ def update_cumulative_budget(newly_downloaded_bytes: int, elapsed_time_s: float)
 _EVALUATOR_VERSION = "1.3.0"
 
 
-def compute_eval_cache_key(pcap_path: str, candidate: dict) -> str:
+def compute_eval_cache_key(pcap_path: str, candidate: dict, labels_path: str = None) -> str:
     """
-    Compute a stable cache fingerprint for an evaluation result.
-
-    Incorporates:
-    - SHA-256 of the PCAP file bytes (content identity)
-    - Evaluator version string (invalidates on logic changes)
-    - Sorted target_rules list (invalidates when target_rules change)
-
-    Returns a 16-character hex prefix — compact and collision-resistant enough for
-    file-system caching (2^64 space; SHA-256 truncation, not a security primitive).
+    Compute a stable full SHA-256 cache fingerprint for an evaluation result.
+    Invalidates on changes to PCAP bytes, evaluator version, engine rules code,
+    registered rule versions, detection config, target rules, labels, or blocklist.
     """
     h = hashlib.sha256()
     try:
@@ -211,9 +217,57 @@ def compute_eval_cache_key(pcap_path: str, candidate: dict) -> str:
         logger.warning(f"compute_eval_cache_key: could not hash {pcap_path}: {exc}")
         h.update(pcap_path.encode())
     h.update(_EVALUATOR_VERSION.encode())
+    rules_src_path = os.path.join(IDS_PROJECT_DIR, "engine", "rules.py")
+    if os.path.isfile(rules_src_path):
+        try:
+            with open(rules_src_path, "rb") as rf:
+                h.update(hashlib.sha256(rf.read()).digest())
+        except OSError:
+            pass
+    try:
+        from engine.rules import ALL_RULE_CLASSES
+        r_versions = {rc.name: rc.rule_version for rc in ALL_RULE_CLASSES}
+        h.update(json.dumps(r_versions, sort_keys=True).encode())
+    except Exception:
+        pass
+    try:
+        import config
+        settings_to_hash = (
+            "PORT_SCAN_THRESHOLD", "UDP_SCAN_THRESHOLD", "UDP_FLOOD_THRESHOLD", "UDP_FLOOD_WINDOW",
+            "TCP_STEALTH_SCAN_THRESHOLD", "SYN_FLOOD_THRESHOLD", "RST_FLOOD_THRESHOLD",
+            "DISTRIBUTED_SYN_FLOOD_THRESHOLD", "DISTRIBUTED_SYN_FLOOD_MIN_SOURCES",
+            "ICMP_SWEEP_THRESHOLD", "ICMP_FLOOD_THRESHOLD", "ICMP_FLOOD_WINDOW",
+            "TIME_WINDOW", "DNS_ENTROPY_THRESHOLD", "DNS_QUERY_MAX_LEN",
+            "DNS_FREQ_THRESHOLD", "DNS_FREQ_WINDOW", "DNS_SUBDOMAIN_THRESHOLD",
+            "BRUTE_FORCE_THRESHOLD", "BRUTE_FORCE_WINDOW", "SLOW_SCAN_THRESHOLD",
+            "DATA_EXFIL_BYTE_THRESHOLD", "CLEAR_HTTP_TLS_MIN_REQUESTS",
+            "TCP_ZERO_WINDOW_THRESHOLD", "NON_DNS_ON_DNS_PORT_COOLDOWN_S",
+            "ICMP_TUNNEL_ENTROPY_THRESHOLD", "IP_FRAGMENT_ANOMALY_COOLDOWN_S",
+            "IRC_BEACONING_THRESHOLD", "IRC_BEACONING_WINDOW",
+        )
+        cfg_vals = {s: str(getattr(config, s, "")) for s in settings_to_hash}
+        h.update(json.dumps(cfg_vals, sort_keys=True).encode())
+    except Exception:
+        pass
     rules_str = json.dumps(sorted(candidate.get("target_rules", [])), separators=(",", ":"))
     h.update(rules_str.encode())
-    return h.hexdigest()[:16]
+    res_labels = labels_path or candidate.get("labels_path") or candidate.get("labels_file")
+    if res_labels and os.path.isfile(res_labels):
+        try:
+            with open(res_labels, "rb") as lf:
+                h.update(hashlib.sha256(lf.read()).digest())
+        except OSError:
+            pass
+    if "label_coverage" in candidate:
+        h.update(str(candidate["label_coverage"]).encode())
+    blocklist_path = os.path.join(DATA_DIR, "blocklist.txt")
+    if os.path.isfile(blocklist_path):
+        try:
+            with open(blocklist_path, "rb") as bf:
+                h.update(hashlib.sha256(bf.read()).digest())
+        except OSError:
+            pass
+    return h.hexdigest()
 
 
 def validate_pcap_deep(pcap_path: str) -> tuple[bool, str]:
@@ -498,6 +552,21 @@ def evaluate_ground_truth_labels(
         win_start = window.get("start")
         win_end = window.get("end")
 
+        # Require explicit matching evidence (must specify expected_rule or expected_family)
+        if not expected_family and not expected_rule:
+            unmatched_labels.append(dict(lbl, rejection_reason="Missing expected_rule or expected_family"))
+            continue
+
+        # Validate timestamp window if present
+        if win_start is not None and win_end is not None:
+            try:
+                if float(win_start) > float(win_end):
+                    unmatched_labels.append(dict(lbl, rejection_reason="Invalid time_window: start > end"))
+                    continue
+            except (ValueError, TypeError):
+                unmatched_labels.append(dict(lbl, rejection_reason="Malformed time_window timestamps"))
+                continue
+
         found = False
         for idx, alert in enumerate(alerts):
             if idx in matched_alert_indices:
@@ -509,8 +578,6 @@ def evaluate_ground_truth_labels(
             if expected_family and alert_family == expected_family:
                 rule_ok = True
             elif expected_rule and alert.get("rule_name") == expected_rule:
-                rule_ok = True
-            elif not expected_family and not expected_rule:
                 rule_ok = True
 
             if not rule_ok:
@@ -893,8 +960,10 @@ class PipelineCoordinator:
                     if downloaded > 0:
                         if status_code == 206:
                             content_range = resp.headers.get("Content-Range", "")
-                            if content_range and f"bytes {downloaded}-" not in content_range:
-                                logger.warning(f"[{cid}] Content-Range mismatch ({content_range}); restarting download from byte 0.")
+                            # Format: bytes <start>-<end>/<total>
+                            range_match = re.match(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", content_range.strip()) if content_range else None
+                            if not range_match or int(range_match.group(1)) != downloaded:
+                                logger.warning(f"[{cid}] Content-Range invalid or mismatched ({content_range}); restarting from 0.")
                                 downloaded = 0
                                 write_mode = "wb"
                             else:
@@ -909,11 +978,16 @@ class PipelineCoordinator:
                             chunk = resp.read(64 * 1024)
                             if not chunk:
                                 break
-                            # Incremental acquisition budget enforcement during streaming
+                            now_stream = time.perf_counter()
+                            # Incremental acquisition budget and transfer time enforcement during streaming
                             with self._lock:
                                 if self.cumulative_bytes + len(chunk) > MAX_INITIAL_ACQUISITION_GIB * (1024 ** 3):
                                     raise RuntimeError(
                                         f"Cumulative download budget ({MAX_INITIAL_ACQUISITION_GIB} GiB) exceeded during streaming."
+                                    )
+                                if self.cumulative_time_s + (now_stream - t0) > MAX_DOWNLOAD_TIME_SECONDS:
+                                    raise RuntimeError(
+                                        f"Cumulative transfer time budget ({MAX_DOWNLOAD_TIME_SECONDS}s) exceeded during streaming."
                                     )
                                 self.cumulative_bytes += len(chunk)
                             f_out.write(chunk)
@@ -936,6 +1010,14 @@ class PipelineCoordinator:
                 self.verification_worker(candidate, incoming_final)
 
             except Exception as exc:
+                # Persist partial bytes and elapsed time upon interruption
+                elapsed_partial = max(0.001, time.perf_counter() - t0)
+                part_size = os.path.getsize(incoming_part) if os.path.isfile(incoming_part) else 0
+                newly_part = max(0, part_size - downloaded)
+                if newly_part > 0 or elapsed_partial > 0:
+                    with self._lock:
+                        self.cumulative_time_s += elapsed_partial
+                        self.budget_state = update_cumulative_budget(newly_part, elapsed_partial)
                 logger.error(f"[{cid}] Download failed: {exc}")
 
         # Signal completion to evaluation worker
@@ -1158,6 +1240,37 @@ class PipelineCoordinator:
                     # Automated Ground-Truth Verdict Classification (capture-level heuristic)
                     verdict, verdict_rationale = classify_capture_level_signal(candidate, alerts, rule_breakdown)
 
+                    # Rigorous ground-truth evaluation: if structured labels exist, run evaluate_ground_truth_labels
+                    labels = candidate.get("labels")
+                    labels_file = candidate.get("labels_file") or candidate.get("labels_path")
+                    if not labels and labels_file and os.path.isfile(labels_file):
+                        try:
+                            with open(labels_file, "r", encoding="utf-8") as lf:
+                                labels = json.load(lf)
+                        except Exception as exc:
+                            logger.warning(f"[{cid}] Could not load labels from {labels_file}: {exc}")
+
+                    if labels and isinstance(labels, list):
+                        gt_result = evaluate_ground_truth_labels(
+                            labels, alerts,
+                            label_coverage=candidate.get("label_coverage", "complete")
+                        )
+                    else:
+                        gt_result = {
+                            "status": "UNASSESSED",
+                            "reason": "No validated structured flow labels available for capture",
+                            "label_coverage": "unassessed",
+                            "total_labels": 0,
+                            "total_alerts": len(alerts),
+                            "true_positives": 0,
+                            "false_negatives": 0,
+                            "false_positives": 0,
+                            "unassessed_alerts": len(alerts),
+                            "precision": None,
+                            "recall": None,
+                            "f1": None,
+                        }
+
                     logger.info(f"[{cid}] Replay finished in {eval_time:.2f}s ({mbs:.2f} MB/s). Alerts fired: {len(alerts)} | Verdict: {verdict}")
                     logger.info(f"[{cid}] Rule breakdown: {rule_breakdown}")
 
@@ -1179,6 +1292,11 @@ class PipelineCoordinator:
                         "rule_breakdown": rule_breakdown,
                         "verdict": verdict,
                         "verdict_rationale": verdict_rationale,
+                        "capture_level_signal": {
+                            "verdict": verdict,
+                            "rationale": verdict_rationale,
+                        },
+                        "ground_truth": gt_result,
                         "alerts_sample": alerts[:50],  # first 50 alerts
                         "stats": stats,
                         "packet_count": packet_cnt,

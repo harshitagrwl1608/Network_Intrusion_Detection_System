@@ -37,3 +37,7 @@ S35,TLS_ANOMALY,192.168.1.101,198.51.100.99,443,TCP,TLS Client Hello containing 
 S36,PAYLOAD_HIT,192.168.1.102,192.168.1.1,80,TCP,WebDAV PROPFIND directory reconnaissance and method tampering
 S37,TCP_ZERO_WINDOW,192.168.1.103,192.168.1.1,80,TCP,TCP Zero-Window / Sockstress burst: 25 zero-window packets in <1s
 S38,CLEAR_HTTP_ON_TLS_PORT,192.168.1.104,203.0.113.104,443,TCP,Repeated plaintext HTTP requests sent to a TLS service port
+S39,NON_DNS_TRAFFIC_ON_DNS_PORT,192.168.1.106,203.0.113.106,53,TCP,Interactive command shell prompt transmitted over TCP DNS port 53
+S40,ICMP_TUNNEL,192.168.1.107,203.0.113.107,,ICMP,Covert ICMP tunnel transporting interactive shell payload
+S41,IP_FRAGMENT_ANOMALY,192.168.1.108,192.168.1.1,,UDP,Teardrop overlapping fragment reassembly attack
+S42,IRC_C2_BEACONING,192.168.1.109,185.244.25.235,6667,TCP,Automated IRC botnet C2 connection beaconing to port 6667

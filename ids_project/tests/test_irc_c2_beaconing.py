@@ -89,17 +89,28 @@ def _udp_pkt(src="10.0.0.5", dst="185.244.25.235", dport=6667, ts=1000.0):
 class TestIrcSignatureDetection:
 
     def test_ping_verb_port_6667(self):
-        """PING on port 6667 → IRC_PROTOCOL_SIGNATURE confirmed alert."""
+        """PING on port 6667 → IRC_PROTOCOL_SIGNATURE alert with heuristic confidence (generic command)."""
         rule = _make_irc_rule()
         pkt = _tcp_pkt(dport=6667, flags="ACK", payload=b"PING :server.irc.net\r\n")
         result = rule.check(pkt)
         assert result is not None
         assert result["rule_name"] == "IRC_C2_BEACONING"
         assert result["evidence"]["classification"] == "IRC_PROTOCOL_SIGNATURE"
+        assert result["evidence"]["activity_assessment"] == "IRC_PROTOCOL_OBSERVED"
         assert result["evidence"]["irc_verb"] == "PING"
+        assert result["confidence"] == "heuristic"
+        assert result["severity"] == "medium"
+        assert result["dst_port"] == 6667
+
+    def test_mirai_botnet_command_confirmed_c2(self):
+        """IRC command with botnet indicators (e.g. mirai/bot/#botnet) → confirmed high-severity C2 alert."""
+        rule = _make_irc_rule()
+        pkt = _tcp_pkt(dport=6667, flags="ACK", payload=b"PING :mirai.botnet.c2\r\n")
+        result = rule.check(pkt)
+        assert result is not None
+        assert result["evidence"]["activity_assessment"] == "LIKELY_IRC_C2"
         assert result["confidence"] == "confirmed"
         assert result["severity"] == "high"
-        assert result["dst_port"] == 6667
 
     def test_pong_verb_port_6667(self):
         """PONG on port 6667 → IRC_PROTOCOL_SIGNATURE."""
@@ -309,3 +320,142 @@ class TestEvasionEdgeCases:
         result_a = rule.check(_tcp_pkt(src=src_a, dport=6667, flags="SYN", ts=1020.0))
         assert result_a is not None
         assert result_a["src_ip"] == src_a
+
+
+# ---------------------------------------------------------------------------
+# Scapy normalizer compatibility, TCP flags, deduplication & cardinality bounds
+# ---------------------------------------------------------------------------
+
+class TestScapyNormalizerAndIntegerFlags:
+    """Verifies integer TCP flag masks, sequence-based retransmission deduplication, and state bounds."""
+
+    def test_integer_syn_flag_mask_fires_beaconing(self):
+        """Integer flag mask 0x02 (SYN) correctly triggers IRC_PORT_BEACONING."""
+        rule = _make_irc_rule(threshold=5, window=300)
+        result = None
+        for i in range(5):
+            rec = {
+                "type": "IP",
+                "protocol": "TCP",
+                "src_ip": "10.0.0.99",
+                "dst_ip": "185.244.25.235",
+                "src_port": 50000 + i,
+                "dst_port": 6667,
+                "tcp_flags": 0x02,  # integer SYN mask
+                "initial_syn": True,
+                "tcp_seq": 1000 * (i + 1),
+                "timestamp": 1000.0 + i,
+                "event_timestamp": 1000.0 + i,
+            }
+            result = rule.check(rec)
+        assert result is not None
+        assert result["evidence"]["classification"] == "IRC_PORT_BEACONING"
+        assert result["evidence"]["connection_count"] >= 5
+
+    def test_syn_ack_integer_flag_mask_ignored(self):
+        """Integer flag mask 0x12 (SYN+ACK) is ignored as a server response, not a client connection attempt."""
+        rule = _make_irc_rule(threshold=3)
+        for i in range(5):
+            rec = {
+                "type": "IP",
+                "protocol": "TCP",
+                "src_ip": "185.244.25.235",
+                "dst_ip": "10.0.0.99",
+                "src_port": 6667,
+                "dst_port": 50000 + i,
+                "tcp_flags": 0x12,  # SYN (0x02) + ACK (0x10)
+                "initial_syn": False,
+                "timestamp": 1000.0 + i,
+            }
+            assert rule.check(rec) is None
+
+    def test_ack_only_integer_mask_ignored(self):
+        """Integer flag mask 0x10 (ACK) is ignored on beaconing path."""
+        rule = _make_irc_rule(threshold=3)
+        for i in range(5):
+            rec = {
+                "type": "IP",
+                "protocol": "TCP",
+                "src_ip": "10.0.0.99",
+                "dst_ip": "185.244.25.235",
+                "src_port": 50000,
+                "dst_port": 6667,
+                "tcp_flags": 0x10,  # ACK only
+                "initial_syn": False,
+                "timestamp": 1000.0 + i,
+            }
+            assert rule.check(rec) is None
+
+    def test_syn_retransmission_same_seq_deduplicated(self):
+        """Retransmissions with identical (src_port, tcp_seq) are deduplicated and do not count toward threshold."""
+        rule = _make_irc_rule(threshold=3, window=300)
+        # Attempt 1: src_port 51000, seq 12345
+        rec1 = {
+            "type": "IP", "protocol": "TCP", "src_ip": "10.0.0.5", "dst_ip": "185.244.25.235",
+            "src_port": 51000, "dst_port": 6667, "tcp_flags": 0x02, "tcp_seq": 12345, "timestamp": 1000.0
+        }
+        assert rule.check(rec1) is None
+
+        # Retransmissions of Attempt 1 (same src_port, same seq) at RTO intervals (1s, 3s, 6s)
+        for ts in [1001.0, 1003.0, 1006.0, 1012.0]:
+            dup = dict(rec1, timestamp=ts)
+            assert rule.check(dup) is None, "SYN retransmission must not trigger an alert"
+
+        # Now send Attempt 2 (new src_port, new seq)
+        rec2 = dict(rec1, src_port=51001, tcp_seq=67890, timestamp=1015.0)
+        assert rule.check(rec2) is None
+
+        # Retransmission of Attempt 2
+        assert rule.check(dict(rec2, timestamp=1016.0)) is None
+
+        # Attempt 3 (new src_port, new seq) -> should now reach threshold=3 independent attempts
+        rec3 = dict(rec1, src_port=51002, tcp_seq=99999, timestamp=1020.0)
+        result = rule.check(rec3)
+        assert result is not None
+        assert result["evidence"]["classification"] == "IRC_PORT_BEACONING"
+        assert result["evidence"]["connection_count"] == 3
+        assert result["evidence"]["retransmissions_suppressed"] >= 4
+
+    def test_beacon_interval_regularity_detection(self):
+        """Regular periodic beacon intervals (e.g. every 60s) are classified as LIKELY_IRC_C2."""
+        rule = _make_irc_rule(threshold=4, window=600)
+        result = None
+        # Send 4 SYNs exactly 60 seconds apart (typical IRC keepalive / ping timer)
+        for i in range(4):
+            rec = {
+                "type": "IP", "protocol": "TCP", "src_ip": "10.0.0.88", "dst_ip": "185.244.25.235",
+                "src_port": 40000 + i, "dst_port": 6667, "tcp_flags": 0x02, "tcp_seq": i * 1000,
+                "timestamp": 1000.0 + (i * 60.0),
+            }
+            result = rule.check(rec)
+        assert result is not None
+        assert result["evidence"]["activity_assessment"] == "LIKELY_IRC_C2"
+        assert result["severity"] == "high"
+        assert result["evidence"]["avg_interval_s"] == 60.0
+        assert result["evidence"]["std_interval_s"] == 0.0
+
+    def test_inner_destinations_per_source_bounded(self):
+        """Inner destination tracking per source is bounded to MAX_DESTS_PER_SOURCE."""
+        rule = _make_irc_rule(threshold=10, max_sources=10)
+        src = "10.0.0.77"
+        # Send SYN to 200 distinct destinations from the same source
+        for d in range(200):
+            dst = f"185.244.25.{d % 250 + 1}"
+            rec = {
+                "type": "IP", "protocol": "TCP", "src_ip": src, "dst_ip": dst,
+                "src_port": 45000 + d, "dst_port": 6667, "tcp_flags": 0x02,
+                "timestamp": 1000.0 + d,
+            }
+            rule.check(rec)
+        assert len(rule._connections[src]) <= rule.MAX_DESTS_PER_SOURCE
+
+    def test_malformed_ports_and_timestamps_rejected(self):
+        """Malformed port numbers and invalid timestamps are safely rejected."""
+        rule = _make_irc_rule()
+        # Invalid port
+        assert rule.check({"protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "1.2.3.4", "dst_port": "not_a_port"}) is None
+        assert rule.check({"protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "1.2.3.4", "dst_port": 70000}) is None
+        assert rule.check({"protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "1.2.3.4", "dst_port": 0}) is None
+        # Invalid timestamp
+        assert rule.check({"protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "1.2.3.4", "dst_port": 6667, "timestamp": -50.0}) is None
+        assert rule.check({"protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "1.2.3.4", "dst_port": 6667, "timestamp": float("nan")}) is None

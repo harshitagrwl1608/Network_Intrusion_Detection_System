@@ -255,6 +255,117 @@ class TestIpFragmentAnomalyRule(unittest.TestCase):
         self.assertIsNone(self.rule.check(arp))
 
 
+    def test_detects_conflicting_fragment_duplicate(self):
+        """Detects conflicting duplicate fragments with identical byte range but differing payload content."""
+        pkt1 = {
+            "type": "IP",
+            "protocol": "TCP",
+            "src_ip": "10.0.0.1",
+            "dst_ip": "10.0.0.2",
+            "ip_fragment_id": 8888,
+            "ip_fragment_offset": 0,
+            "ip_more_fragments": True,
+            "ip_fragmented": True,
+            "ip_fragment_data_len": 100,
+            "ip_fragment_data_digest": b"\x01" * 16,
+            "timestamp": 1000.0,
+        }
+        self.assertIsNone(self.rule.check(pkt1))
+
+        # Conflicting duplicate: identical offset 0 and len 100, but differing digest
+        pkt2 = {
+            "type": "IP",
+            "protocol": "TCP",
+            "src_ip": "10.0.0.1",
+            "dst_ip": "10.0.0.2",
+            "ip_fragment_id": 8888,
+            "ip_fragment_offset": 0,
+            "ip_more_fragments": True,
+            "ip_fragmented": True,
+            "ip_fragment_data_len": 100,
+            "ip_fragment_data_digest": b"\x02" * 16,
+            "timestamp": 1000.1,
+        }
+        alert = self.rule.check(pkt2)
+        self.assertIsNotNone(alert, "Conflicting fragment duplicate must trigger IP_FRAGMENT_ANOMALY")
+        self.assertEqual(alert["evidence"]["anomaly_type"], "CONFLICTING_FRAGMENT_DUPLICATE")
+        self.assertEqual(alert["confidence"], "confirmed")
+        self.assertEqual(alert["severity"], "high")
+
+    def test_ipv6_fragment_handling(self):
+        """IPv6 fragments with overlapping ranges trigger TEARDROP_OVERLAPPING_FRAGMENT."""
+        pkt1 = {
+            "type": "IP",
+            "protocol": "TCP",
+            "src_ip": "2001:db8::1",
+            "dst_ip": "2001:db8::2",
+            "ip_fragment_id": 123456,
+            "ip_fragment_offset": 0,
+            "ip_more_fragments": True,
+            "ip_fragmented": True,
+            "ip_fragment_data_len": 64,
+            "timestamp": 2000.0,
+        }
+        self.assertIsNone(self.rule.check(pkt1))
+
+        pkt2 = {
+            "type": "IP",
+            "protocol": "TCP",
+            "src_ip": "2001:db8::1",
+            "dst_ip": "2001:db8::2",
+            "ip_fragment_id": 123456,
+            "ip_fragment_offset": 32,
+            "ip_more_fragments": False,
+            "ip_fragmented": True,
+            "ip_fragment_data_len": 64,
+            "timestamp": 2000.01,
+        }
+        alert = self.rule.check(pkt2)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["anomaly_type"], "TEARDROP_OVERLAPPING_FRAGMENT")
+        self.assertEqual(alert["evidence"]["overlap_bytes"], 32)
+
+    def test_per_datagram_fragment_count_bounded(self):
+        """A single datagram cannot exceed MAX_FRAGMENTS_PER_DATAGRAM tracked ranges."""
+        flow_key = ("10.1.1.1", "10.1.1.2", "UDP", 77777)
+        for i in range(120):
+            pkt = {
+                "type": "IP",
+                "protocol": "UDP",
+                "src_ip": "10.1.1.1",
+                "dst_ip": "10.1.1.2",
+                "ip_fragment_id": 77777,
+                "ip_fragment_offset": i * 100,
+                "ip_more_fragments": True,
+                "ip_fragmented": True,
+                "ip_fragment_data_len": 100,
+                "timestamp": 3000.0 + (i * 0.01),
+            }
+            self.rule.check(pkt)
+        self.assertIn(flow_key, self.rule._flows)
+        self.assertLessEqual(len(self.rule._flows[flow_key]["fragments"]), self.rule.MAX_FRAGMENTS_PER_DATAGRAM)
+
+    def test_total_fragment_ranges_globally_bounded(self):
+        """Global total fragment ranges across all flows cannot exceed MAX_TOTAL_FRAGMENT_RANGES."""
+        for flow_idx in range(500):
+            for frag_idx in range(40):
+                pkt = {
+                    "type": "IP",
+                    "protocol": "UDP",
+                    "src_ip": f"10.{flow_idx // 256}.{flow_idx % 256}.1",
+                    "dst_ip": "10.2.2.2",
+                    "ip_fragment_id": 1000 + flow_idx,
+                    "ip_fragment_offset": frag_idx * 50,
+                    "ip_more_fragments": True,
+                    "ip_fragmented": True,
+                    "ip_fragment_data_len": 50,
+                    "timestamp": 4000.0,
+                }
+                self.rule.check(pkt)
+        self.assertLessEqual(self.rule._total_ranges, self.rule.MAX_TOTAL_FRAGMENT_RANGES)
+        self.assertLessEqual(len(self.rule._flows), self.rule.MAX_TRACKED_FLOWS)
+
+
 if __name__ == "__main__":
     unittest.main()
 

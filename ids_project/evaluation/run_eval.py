@@ -125,22 +125,8 @@ def _load_labels(path: str) -> list:
     if missing:
         logger.error(f"Labels CSV missing required columns: {missing}")
         sys.exit(2)
-    from engine.rules import (
-        ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
-        IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
-        TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
-        TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
-        TlsAnomalyRule, TcpZeroWindowRule, CleartextHttpOnTlsPortRule,
-    )
-    known_rules = {
-        rule.name for rule in (
-            ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
-            IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
-            TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
-            TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
-            TlsAnomalyRule, TcpZeroWindowRule, CleartextHttpOnTlsPortRule,
-        )
-    }
+    from engine.rules import REGISTERED_RULE_NAMES
+    known_rules = REGISTERED_RULE_NAMES
     protocols = {"TCP", "UDP", "ICMP", "ICMPV6", "ARP"}
     seen_ids = set()
     for line_number, row in enumerate(rows, start=2):
@@ -175,21 +161,9 @@ def _load_labels(path: str) -> list:
 def _run_metadata() -> dict:
     """Return reproducibility metadata without serializing secrets or host IPs."""
     import config
-    from engine.rules import (
-        ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
-        IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
-        TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
-        TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
-        TlsAnomalyRule, TcpZeroWindowRule, CleartextHttpOnTlsPortRule,
-    )
+    from engine.rules import ALL_RULE_CLASSES
 
-    rules = (
-        ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
-        IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
-        TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
-        TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
-        TlsAnomalyRule, TcpZeroWindowRule, CleartextHttpOnTlsPortRule,
-    )
+    rules = ALL_RULE_CLASSES
     setting_names = (
         "PORT_SCAN_THRESHOLD", "UDP_SCAN_THRESHOLD", "UDP_FLOOD_THRESHOLD", "UDP_FLOOD_WINDOW",
         "TCP_STEALTH_SCAN_THRESHOLD",
@@ -208,6 +182,11 @@ def _run_metadata() -> dict:
         "TCP_ZERO_WINDOW_THRESHOLD", "TCP_ZERO_WINDOW_WINDOW",
         "TCP_ZERO_WINDOW_MIN_FLOWS",
         "PAYLOAD_INSPECTION", "PAYLOAD_MAX_BYTES", "PAYLOAD_ALERT_COOLDOWN_S",
+        "NON_DNS_ON_DNS_PORT_COOLDOWN_S",
+        "ICMP_TUNNEL_ENTROPY_THRESHOLD", "ICMP_TUNNEL_MIN_BYTES", "ICMP_TUNNEL_COOLDOWN_S",
+        "IP_FRAGMENT_ANOMALY_COOLDOWN_S", "IP_FRAGMENT_REASSEMBLY_TIMEOUT_S",
+        "IRC_BEACONING_THRESHOLD", "IRC_BEACONING_WINDOW", "IRC_BEACONING_COOLDOWN_S",
+        "IRC_BEACONING_MAX_SOURCES",
     )
     return {
         "schema_version": 1,

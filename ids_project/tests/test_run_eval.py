@@ -87,5 +87,23 @@ class TestRunEvalHarness(unittest.TestCase):
             self.assertEqual(alerts[0]["evidence"]["target_port"], 80)
 
 
+    def test_all_23_rules_in_eval_metadata_and_labels(self):
+        """All 23 registered engine rules must be discoverable in evaluation metadata and labels CSV."""
+        from engine.rules import ALL_RULE_CLASSES, REGISTERED_RULE_NAMES
+        from evaluation.run_eval import _run_metadata
+
+        self.assertEqual(len(ALL_RULE_CLASSES), 23)
+        self.assertEqual(len(REGISTERED_RULE_NAMES), 23)
+
+        meta = _run_metadata()
+        meta_rules = set(meta["rule_versions"].keys())
+        self.assertEqual(meta_rules, set(REGISTERED_RULE_NAMES), "Evaluation metadata must cover all 23 rules")
+
+        labels_path = os.path.join(PROJECT_DIR, "evaluation", "scenarios", "test_labels.csv")
+        with open(labels_path, newline="", encoding="utf-8") as f:
+            labels_rules = {row["expected_rule"] for row in csv.DictReader(f)}
+        self.assertEqual(labels_rules, set(REGISTERED_RULE_NAMES), "Labels CSV must cover scenarios for all 23 rules")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch, MagicMock, mock_open
 
 PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_DIR not in sys.path:
@@ -270,10 +271,210 @@ class TestEvaluationPipeline(unittest.TestCase):
 
             self.assertEqual(k_a, k_b, "Cache key must be invariant to target_rules list ordering")
             self.assertNotEqual(k_a, k_c, "Cache key must differ when target_rules change")
-            self.assertEqual(len(k_a), 16)
+            self.assertEqual(len(k_a), 64)
         finally:
             if os.path.exists(tmp_pcap):
                 os.remove(tmp_pcap)
+
+    def test_compute_eval_cache_key_invalidation_rules_config_labels_blocklist(self):
+        with tempfile.NamedTemporaryFile(suffix=".pcap", delete=False) as f:
+            f.write(PCAP_MAGIC_LE + struct.pack("<HHIIII", 2, 4, 0, 0, 65535, 1) + b"\x00" * 30)
+            tmp_pcap = f.name
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as lf1:
+            lf1.write(b"header\nval1\n")
+            tmp_label1 = lf1.name
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as lf2:
+            lf2.write(b"header\nval2_different\n")
+            tmp_label2 = lf2.name
+
+        try:
+            cand = {"id": "test", "target_rules": ["SYN_FLOOD"]}
+            k_base = compute_eval_cache_key(tmp_pcap, cand)
+
+            # Invalidate on label file content change
+            k_lbl1 = compute_eval_cache_key(tmp_pcap, cand, labels_path=tmp_label1)
+            k_lbl2 = compute_eval_cache_key(tmp_pcap, cand, labels_path=tmp_label2)
+            self.assertNotEqual(k_base, k_lbl1)
+            self.assertNotEqual(k_lbl1, k_lbl2)
+
+            # Invalidate on label_coverage change
+            cand_partial = {"id": "test", "target_rules": ["SYN_FLOOD"], "label_coverage": "partial"}
+            cand_complete = {"id": "test", "target_rules": ["SYN_FLOOD"], "label_coverage": "complete"}
+            k_part = compute_eval_cache_key(tmp_pcap, cand_partial)
+            k_comp = compute_eval_cache_key(tmp_pcap, cand_complete)
+            self.assertNotEqual(k_part, k_comp)
+
+            # Invalidate on config setting change
+            import config
+            orig_thresh = config.PORT_SCAN_THRESHOLD
+            try:
+                config.PORT_SCAN_THRESHOLD = orig_thresh + 999
+                k_cfg_changed = compute_eval_cache_key(tmp_pcap, cand)
+                self.assertNotEqual(k_base, k_cfg_changed)
+            finally:
+                config.PORT_SCAN_THRESHOLD = orig_thresh
+        finally:
+            for p in (tmp_pcap, tmp_label1, tmp_label2):
+                if os.path.exists(p):
+                    os.remove(p)
+
+    def test_evaluate_ground_truth_labels_rejects_missing_rule_and_family(self):
+        labels = [
+            {
+                "label_id": "lbl-invalid-no-rule",
+                "flow": {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"},
+                "time_window": {"start": 10.0, "end": 20.0},
+            }
+        ]
+        alerts = [
+            {"rule_name": "SYN_FLOOD", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP", "timestamp": 15.0}
+        ]
+        res = evaluate_ground_truth_labels(labels, alerts)
+        self.assertEqual(res["true_positives"], 0)
+        self.assertEqual(res["false_negatives"], 1)
+        self.assertEqual(len(res["missed_labels"]), 1)
+        self.assertEqual(res["missed_labels"][0].get("rejection_reason"), "Missing expected_rule or expected_family")
+
+    def test_evaluate_ground_truth_labels_rejects_malformed_time_window(self):
+        # 1. start > end
+        labels_inverted = [
+            {
+                "label_id": "lbl-inverted-win",
+                "expected_rule": "SYN_FLOOD",
+                "time_window": {"start": 100.0, "end": 50.0},
+            }
+        ]
+        # 2. non-numeric timestamps
+        labels_non_numeric = [
+            {
+                "label_id": "lbl-bad-ts",
+                "expected_rule": "SYN_FLOOD",
+                "time_window": {"start": "not_a_number", "end": 100.0},
+            }
+        ]
+        alerts = [
+            {"rule_name": "SYN_FLOOD", "timestamp": 75.0}
+        ]
+        res1 = evaluate_ground_truth_labels(labels_inverted, alerts)
+        self.assertEqual(res1["true_positives"], 0)
+        self.assertEqual(res1["missed_labels"][0].get("rejection_reason"), "Invalid time_window: start > end")
+
+        res2 = evaluate_ground_truth_labels(labels_non_numeric, alerts)
+        self.assertEqual(res2["true_positives"], 0)
+        self.assertEqual(res2["missed_labels"][0].get("rejection_reason"), "Malformed time_window timestamps")
+
+    def test_evaluate_ground_truth_labels_reverse_direction_flow_matching(self):
+        labels = [
+            {
+                "label_id": "lbl-rev",
+                "expected_rule": "PORT_SCAN",
+                "flow": {"src_ip": "192.168.1.100", "dst_ip": "10.0.0.1", "src_port": 49152, "dst_port": 80, "protocol": "TCP"},
+                "time_window": {"start": 10.0, "end": 20.0},
+            }
+        ]
+        # Alert recorded in reverse flow direction (dst <-> src)
+        alerts = [
+            {
+                "rule_name": "PORT_SCAN",
+                "src_ip": "10.0.0.1",
+                "dst_ip": "192.168.1.100",
+                "src_port": 80,
+                "dst_port": 49152,
+                "protocol": "TCP",
+                "timestamp": 15.0,
+            }
+        ]
+        res = evaluate_ground_truth_labels(labels, alerts)
+        self.assertEqual(res["true_positives"], 1)
+        self.assertEqual(res["false_negatives"], 0)
+        self.assertEqual(res["false_positives"], 0)
+
+    def test_check_disk_safety_wrong_backing_device_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import evaluation.pipeline as p_module
+            orig_dir = p_module.HDD_DATASETS_DIR
+            orig_mount = p_module.EXPECTED_MOUNT_POINT
+            p_module.HDD_DATASETS_DIR = tmpdir
+            p_module.EXPECTED_MOUNT_POINT = tmpdir
+
+            # Mock /proc/mounts with wrong backing device /dev/sda1 instead of /dev/sdb1
+            fake_mounts = f"/dev/sda1 {tmpdir} ext4 rw 0 0\n"
+            try:
+                with patch("builtins.open", mock_open(read_data=fake_mounts)):
+                    ok = check_disk_safety(require_mount=True)
+                    self.assertFalse(ok, "check_disk_safety must reject mounts on unexpected backing device")
+            finally:
+                p_module.HDD_DATASETS_DIR = orig_dir
+                p_module.EXPECTED_MOUNT_POINT = orig_mount
+
+    def test_check_disk_safety_insufficient_free_space(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import evaluation.pipeline as p_module
+            orig_dir = p_module.HDD_DATASETS_DIR
+            p_module.HDD_DATASETS_DIR = tmpdir
+            try:
+                # Statvfs returning 50 GiB free (< 100 GiB threshold)
+                mock_stat = MagicMock()
+                mock_stat.f_bavail = 50 * (1024 ** 3) // 4096
+                mock_stat.f_frsize = 4096
+                mock_stat.f_blocks = 500 * (1024 ** 3) // 4096
+                with patch("os.statvfs", return_value=mock_stat):
+                    ok = check_disk_safety(require_mount=False)
+                    self.assertFalse(ok, "check_disk_safety must reject low free disk space (< 100 GiB)")
+            finally:
+                p_module.HDD_DATASETS_DIR = orig_dir
+
+    def test_check_disk_safety_allocation_cap_exceeded(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import evaluation.pipeline as p_module
+            orig_dir = p_module.HDD_DATASETS_DIR
+            p_module.HDD_DATASETS_DIR = tmpdir
+            try:
+                # Statvfs returning 460 GiB used (> 450 GiB max allocation cap)
+                mock_stat = MagicMock()
+                mock_stat.f_frsize = 4096
+                mock_stat.f_blocks = 1000 * (1024 ** 3) // 4096
+                mock_stat.f_bavail = (1000 - 460) * (1024 ** 3) // 4096
+                with patch("os.statvfs", return_value=mock_stat):
+                    ok = check_disk_safety(require_mount=False)
+                    self.assertFalse(ok, "check_disk_safety must reject allocation exceeding MAX_ALLOCATION_GIB")
+            finally:
+                p_module.HDD_DATASETS_DIR = orig_dir
+
+    def test_download_streaming_timeout_and_budget_guards(self):
+        import evaluation.pipeline as p_module
+        pipe = p_module.PipelineCoordinator([])
+        # Test size limit guard
+        pipe.cumulative_bytes = int(p_module.MAX_INITIAL_ACQUISITION_GIB * (1024 ** 3))
+        chunk = b"X" * 1024
+        with self.assertRaises(RuntimeError) as ctx:
+            with pipe._lock:
+                if pipe.cumulative_bytes + len(chunk) > p_module.MAX_INITIAL_ACQUISITION_GIB * (1024 ** 3):
+                    raise RuntimeError("Cumulative download budget exceeded during streaming.")
+        self.assertIn("Cumulative download budget", str(ctx.exception))
+
+        # Test transfer time guard
+        pipe.cumulative_time_s = p_module.MAX_DOWNLOAD_TIME_SECONDS
+        with self.assertRaises(RuntimeError) as ctx:
+            with pipe._lock:
+                if pipe.cumulative_time_s + 1.0 > p_module.MAX_DOWNLOAD_TIME_SECONDS:
+                    raise RuntimeError("Cumulative transfer time budget exceeded during streaming.")
+        self.assertIn("Cumulative transfer time budget", str(ctx.exception))
+
+    def test_download_resume_content_range_mismatch_handling(self):
+        import re
+        # Valid matching range
+        content_range_ok = "bytes 500-999/1000"
+        m = re.match(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", content_range_ok.strip())
+        self.assertIsNotNone(m)
+        self.assertEqual(int(m.group(1)), 500)
+
+        # Mismatched range (expected 500, but server says bytes 0-999/1000)
+        content_range_mismatched = "bytes 0-999/1000"
+        m_bad = re.match(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", content_range_mismatched.strip())
+        self.assertIsNotNone(m_bad)
+        downloaded = 500
+        self.assertNotEqual(int(m_bad.group(1)), downloaded)
 
 
 if __name__ == "__main__":

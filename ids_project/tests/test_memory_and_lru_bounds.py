@@ -173,18 +173,46 @@ class TestMemoryAndLruBounds(unittest.TestCase):
         for i in range(5000):
             src = f"10.{i // 256}.{i % 256}.1"
             rec = {
+                "type": "IP",
                 "timestamp": now,
                 "protocol": "UDP",
                 "src_ip": src,
                 "dst_ip": "192.168.1.1",
-                "ip_id": i,
-                "ip_flags": "MF",
-                "frag_offset": 0,
-                "payload_len": 64,
+                "ip_fragment_id": i,
+                "ip_fragment_offset": 0,
+                "ip_more_fragments": True,
+                "ip_fragmented": True,
+                "ip_fragment_data_len": 64,
             }
             rule.check(rec)
 
+        self.assertGreater(len(rule._flows), 0, "Tracking state must be actively populated")
         self.assertLessEqual(len(rule._flows), rule.MAX_TRACKED_FLOWS)
+        self.assertLessEqual(rule._total_ranges, rule.MAX_TOTAL_FRAGMENT_RANGES)
+
+    def test_irc_c2_inner_destination_lru_bounding(self):
+        """Rule 23 (IRC_C2_BEACONING) bounds inner per-source destination map under scanning/spoofing."""
+        rule = IrcC2BeaconingRule(config)
+        now = 1000.0
+        src = "10.0.0.1"
+        for i in range(500):
+            dst = f"192.168.{i // 256}.{i % 256}"
+            rec = {
+                "type": "IP",
+                "protocol": "TCP",
+                "timestamp": now,
+                "src_ip": src,
+                "dst_ip": dst,
+                "src_port": 40000 + (i % 1000),
+                "dst_port": 6667,
+                "tcp_flags": 0x02,
+                "initial_syn": True,
+                "tcp_seq": i * 100,
+            }
+            rule.check(rec)
+
+        self.assertIn(src, rule._connections)
+        self.assertLessEqual(len(rule._connections[src]), rule.MAX_DESTS_PER_SOURCE)
 
     def test_future_clock_drift_handling_in_prune(self):
         """Packets with future clock drift timestamps must be pruned cleanly."""
