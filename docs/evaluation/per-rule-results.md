@@ -150,5 +150,5 @@ In the November 8 autonomous engineering sprint, all 23 detection rules were pro
 | `oisf_tls_sni_anomaly` | Curated Research Fixture | Standard TLS Handshake | 25 | 0 | None | **Zero False Alarms**: Clean TLS SNI validation. |
 
 ### 5.4 Unit & Integration Test Coverage
-- **Total Tests Passing:** **651 passed** across 26 test modules in 109s.
-- **Coverage:** Zero skipped, zero failures, zero disabled tests.
+- **Total Tests Passing:** **656 passed** across 27 test modules in 114s.
+- **Coverage:** Zero skipped, zero failures, zero disabled tests. Includes adversarial evasion stress testing (multi-threaded ingestion, asymmetric routing, DGA case randomization, subthreshold ICMP suppression, and Ping of Death overflow).

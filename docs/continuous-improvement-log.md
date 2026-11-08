@@ -674,4 +674,9 @@ Across 15 substantive engineering cycles, the NetGuard IDS repository was system
      - Tested on real-world/curated captures: `ws_teardrop.pcap` (detected), `ws_dns_remoteshell.pcap` (detected), `m_rau5_icmp_tunnel.pcap` (detected), `ws_skype_irc.pcap` (0 false alarms), `ws_http_browsing.pcap` (0 false alarms), and `oisf_tls_sni_anomaly.pcap` (0 false alarms).
   6. **Threshold Sensitivity & Holdout Plan (`docs/evaluation/threshold-sensitivity-and-holdout-plan.md`)**:
      - Documented corpus status: acknowledged that no untouched blind holdout currently exists in the corpus and established a 4-step holdout validation protocol for future campaigns.
-- **Test Suite Status**: **651 passed in 109s** (0 failures, 0 errors across 26 test modules).
+  7. **Adversarial Evasion & Stress Testing (`ids_project/tests/test_adversarial_evasion_stress.py`)**:
+     - Validated multi-threaded concurrent packet ingestion under continuous background garbage collection with zero crashes or race conditions.
+     - Confirmed asymmetric routing pure-ACK suppression across port scan and SYN flood rules.
+     - Confirmed DNS DGA entropy stability under mixed-case randomization.
+     - Confirmed subthreshold ICMP chunking suppression and Layer 3 Ping-of-Death buffer overflow detection.
+- **Test Suite Status**: **656 passed in 114s** (0 failures, 0 errors across 27 test modules).
