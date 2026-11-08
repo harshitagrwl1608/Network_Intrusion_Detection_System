@@ -267,3 +267,20 @@ def test_strict_freeze_blocks_on_dirty(monkeypatch):
             )
         assert "Holdout evaluation blocked by engine freeze check" in str(exc_info.value)
 
+
+def test_holdout_pipeline_cli():
+    """Verify holdout pipeline CLI runs --verify-freeze and outputs valid JSON."""
+    import subprocess
+    proc = subprocess.run(
+        [sys.executable, os.path.join(_IDS_ROOT, "evaluation", "holdout_pipeline.py"), "--verify-freeze", "--allow-dirty"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert proc.returncode == 0
+    res = json.loads(proc.stdout)
+    assert "frozen" in res
+    assert "engine_fingerprint" in res
+    assert len(res["engine_fingerprint"]) == 64
+
+
