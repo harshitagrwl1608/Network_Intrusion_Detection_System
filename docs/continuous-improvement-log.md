@@ -702,4 +702,12 @@ Across 15 substantive engineering cycles, the NetGuard IDS repository was system
       - Verified 0 false positives across benign captures (`ws_http_browsing`, `ws_skype_irc`, `oisf_modbus`, `iot23_honeypot_4_1`, `ws_arp_storm`).
       - Verified authentic attack detection across diverse categories (`ws_teardrop`, `ws_dns_remoteshell`, `m_rau5_icmp_tunnel`, `foxit_log4shell`, `ws_nmap_stealth_scan`, `oisf_syn_flood`, `nozomi_triton_exec`, `iot23_malware_34_1`, `iot23_malware_3_1`).
       - Updated `docs/evaluation/per-rule-results.md` and `docs/evaluation/suricata-zeek-comparison.md`.
-- **Test Suite Status**: **694 passed** across 29 test modules (0 failures, 0 skipped, 0 disabled).
+    13. **Independent Holdout Validation Pipeline Formalization (`holdout_pipeline.py` & `test_holdout_pipeline.py`)**:
+       - Formalized and implemented the 4-step holdout protocol from Section 8 of `threshold-sensitivity-and-holdout-plan.md`.
+       - `verify_engine_freeze`: Checks clean git working tree and computes an aggregate 64-char SHA-256 fingerprint over all core detection engine files (`rules.py`, `config.py`, `sniffer.py`, `db.py`, `pipeline.py`, `replay.py`, `compare.py`).
+       - `verify_holdout_quarantine`: Validates existence, non-emptiness, valid PCAP magic bytes, read-only file permissions (`0o444`), and SHA-256 integrity.
+       - `register_holdout_candidate`: Stages incoming candidate captures into quarantine, sets read-only permissions, and saves immutable metadata manifests.
+       - `run_blind_holdout_evaluation`: Executes single-pass blind replay in an isolated temporary SQLite database, completely bypassing calibration caches, and outputs an immutable read-only JSON audit log (`holdout_<cid>_<uuid>.json`).
+       - Created candidate pre-registration catalog in `docs/evaluation/holdout-registry.json` targeting independent third-party sources (CIC-Bell-DNS-2021, MAWI WIDE, unseen Stratosphere CTU Mirai variant).
+       - Added 9 unit tests in `ids_project/tests/test_holdout_pipeline.py` covering all verification steps, permissions enforcement, benign/attack fixtures, and strict freeze violation blocking. Total test suite expanded to 703 tests across 30 modules.
+- **Test Suite Status**: **703 passed** across 30 test modules (0 failures, 0 skipped, 0 disabled).

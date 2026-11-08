@@ -1,27 +1,29 @@
 # NetGuard IDS — Per-Rule Detection Results & Operational Metrics
 
-**Document Version:** 2.0.0  
-**Date:** 2026-11-04  
+**Document Version:** 2.1.0  
+**Date:** 2026-11-08  
 **Evaluator:** Automated Asynchronous Evaluation Pipeline  
-**Corpus:** Synthetic Baseline (38 scenarios) + 12 Independent Real-World Captures (~195.7 MB across 4 Publishers)
+**Corpus:** Synthetic Baseline (42 scenarios) + 18 Independent Real-World Captures (~205 MB across 6 Publishers)
 
 ---
 
 ## 1. Overview & Evaluation Scope
 
-This report presents per-rule detection accuracy, false positive analysis, and operational performance metrics across both controlled synthetic benchmarks and 12 independent real-world traffic captures from 4 publishers:
+This report presents per-rule detection accuracy, false positive analysis, and operational performance metrics across both controlled synthetic benchmarks and 18 independent real-world traffic captures from 6 publishers:
 1. **Stratosphere Laboratory, AIC Group, Czech Technical University (CTU) in Prague & Avast Software**
 2. **Wireshark Foundation Sample Captures Archive**
 3. **Nozomi Networks Industrial Security Research**
-4. **Fox-IT Research (BroCon 2015)**
+4. **Fox-IT Research / NCC Group**
+5. **Open Information Security Foundation (OISF / Suricata)**
+6. **m-rau5 Covert Channel Research**
 
 ---
 
 ## 2. Global Confusion Matrix & Accuracy Metrics
 
 ### 2.1 Synthetic Benchmark Corpus
-- **Labelled Scenarios:** 38
-- **True Positives (TP):** 38
+- **Labelled Scenarios:** 42
+- **True Positives (TP):** 42
 - **False Negatives (FN):** 0
 - **False Positives (FP):** 0
 - **Precision:** 100.0%

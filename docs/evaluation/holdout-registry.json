@@ -1,0 +1,46 @@
+{
+  "version": "1.0.0",
+  "policy": "docs/evaluation/threshold-sensitivity-and-holdout-plan.md",
+  "quarantine_root": "/run/media/harshitgarg/Data1/NetGuard-datasets/holdout_quarantine",
+  "reports_root": "/run/media/harshitgarg/Data1/NetGuard-datasets/holdout_reports",
+  "governing_principles": [
+    "Independent third-party origin (no overlap with Phase 1-4 calibration sets)",
+    "Strict cryptographic quarantine with read-only permissions (0o444)",
+    "Engine code freeze verification (clean git tree & 64-char engine SHA-256 fingerprint)",
+    "Single-pass blind execution with zero cache pollution",
+    "Immutable verbatim audit reporting"
+  ],
+  "candidate_holdout_datasets": [
+    {
+      "candidate_id": "cic_bell_dns_2021_tunnel",
+      "name": "CIC-Bell-DNS-2021 Covert Tunneling Holdout",
+      "publisher": "Canadian Institute for Cybersecurity (CIC) / University of New Brunswick",
+      "source_url": "https://www.unb.ca/cic/datasets/dns-2021.html",
+      "expected_attack_family": "DNS Covert Tunneling (iodine/dnscat2)",
+      "target_rules": ["DNS_ANOMALY"],
+      "ground_truth_source": "CIC-Bell-DNS-2021 Gold Standard Labelled Flows",
+      "quarantine_status": "PENDING_ACQUISITION"
+    },
+    {
+      "candidate_id": "mawi_working_group_clean_baseline",
+      "name": "MAWI Wide-Area Transpacific Clean Baseline",
+      "publisher": "WIDE Project / MAWI Working Group",
+      "source_url": "http://mawi.wide.ad.jp/mawi/samplepoint-F/",
+      "expected_attack_family": "Benign Wide-Area Traffic",
+      "is_benign": true,
+      "target_rules": ["FP_BENIGN"],
+      "ground_truth_source": "MAWI Anomaly-Filtered Backbone Trace",
+      "quarantine_status": "PENDING_ACQUISITION"
+    },
+    {
+      "candidate_id": "stratosphere_ctu_mirai_botnet_48_1",
+      "name": "Stratosphere CTU IoT-23 Malware Capture 48-1 (Unseen Mirai Variant)",
+      "publisher": "Stratosphere IPS / CTU University",
+      "source_url": "https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset/IndividualScenarios/CTU-IoT-Malware-Capture-48-1/",
+      "expected_attack_family": "Mirai Telnet Brute Force & SYN Flooding",
+      "target_rules": ["PORT_SCAN", "SYN_FLOOD", "BRUTE_FORCE"],
+      "ground_truth_source": "CTU University Verified Malware Execution",
+      "quarantine_status": "PENDING_ACQUISITION"
+    }
+  ]
+}
