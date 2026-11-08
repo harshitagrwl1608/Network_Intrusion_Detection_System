@@ -693,4 +693,13 @@ Across 15 substantive engineering cycles, the NetGuard IDS repository was system
      - Implemented cross-telemetry correlation (`correlate_netguard_zeek`): matches alerts against independent Zeek flow states (`S0` unacknowledged SYN scans, `REJ` rejected probes, `HIGH_VOLUME_EGRESS` data exfiltration, `IRC_SESSION_CONFIRMED`).
      - Added `--zeek` CLI flag to `compare.py` supporting evaluation result JSON inputs and live SQLite databases.
      - Tested on authentic 23,145-row CTU IoT-23 Mirai capture log (`iot23_malware_34_1_zeek_conn.log`): achieved 100% corroboration on authentic C2 beaconing alerts.
-- **Test Suite Status**: **693 passed in 106s** (0 failures, 0 errors across 29 test modules).
+   11. **Zeek & Suricata Dual Cross-Engine Telemetry Corroboration**:
+      - Hardened `ids_project/evaluation/compare.py` to seamlessly execute simultaneous dual corroboration (`--zeek` and `--eve` together) on JSON evaluation outputs and isolated SQLite databases.
+      - Added unit test `test_dual_zeek_suricata_cli_json_db` in `ids_project/tests/test_compare.py`.
+      - Evaluated against authentic Mirai botnet C2 traffic (`iot23_malware_34_1`): achieved 100% flow-level Zeek corroboration (`IRC_SESSION_CONFIRMED` on 50/50 alerts) and Suricata agreement mapping 1,632 `ET CHAT IRC` events on endpoint pair `192.168.1.195` <-> `185.244.25.235:6667`.
+   12. **Authentic PCAP Corpus Re-evaluation & Evaluation Cache Invalidation**:
+      - Replayed all 18 authentic and curated captures in the NetGuard evaluation pipeline with isolated database execution and 64-char SHA-256 cache key fingerprinting.
+      - Verified 0 false positives across benign captures (`ws_http_browsing`, `ws_skype_irc`, `oisf_modbus`, `iot23_honeypot_4_1`, `ws_arp_storm`).
+      - Verified authentic attack detection across diverse categories (`ws_teardrop`, `ws_dns_remoteshell`, `m_rau5_icmp_tunnel`, `foxit_log4shell`, `ws_nmap_stealth_scan`, `oisf_syn_flood`, `nozomi_triton_exec`, `iot23_malware_34_1`, `iot23_malware_3_1`).
+      - Updated `docs/evaluation/per-rule-results.md` and `docs/evaluation/suricata-zeek-comparison.md`.
+- **Test Suite Status**: **694 passed** across 29 test modules (0 failures, 0 skipped, 0 disabled).
