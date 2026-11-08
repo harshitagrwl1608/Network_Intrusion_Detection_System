@@ -938,9 +938,15 @@ def main():
         print(f"ERROR: {args.eve} not found")
         sys.exit(1)
 
-    conn = _get_conn(args.db)
-    netguard_alerts = read_all_alerts(conn)
-    logging.info(f"NetGuard alerts: {len(netguard_alerts)}")
+    if not args.zeek:
+        if args.db and args.db.endswith(".json") and os.path.exists(args.db):
+            with open(args.db, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                netguard_alerts = data.get("alerts_sample") or data.get("alerts") or []
+        else:
+            conn = _get_conn(args.db)
+            netguard_alerts = read_all_alerts(conn)
+        logging.info(f"NetGuard alerts: {len(netguard_alerts)}")
 
     suricata_alerts = load_suricata_alerts(args.eve)
     results = match_alerts_agreement(netguard_alerts, suricata_alerts)

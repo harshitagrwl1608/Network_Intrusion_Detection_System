@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import unittest
@@ -535,6 +536,57 @@ class TestComparisonMatching(unittest.TestCase):
         # Ensure at least some S0 scan states are captured
         s0_count = sum(1 for c in conns if c["conn_state"] == "S0")
         self.assertGreater(s0_count, 10)
+
+    def test_dual_zeek_suricata_cli_json_db(self):
+        """Verify dual corroboration mode (both --zeek and --eve) works with JSON evaluation inputs."""
+        import subprocess
+        # Mock Zeek log
+        zeek_content = (
+            '{"ts": 1545403816.0, "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "dst_port": 80, "proto": "tcp", "conn_state": "S0", "history": "S"}\n'
+        )
+        # Mock Suricata EVE
+        eve_content = (
+            '{"timestamp": "2018-12-21T14:50:16.000000+0000", "event_type": "alert", "src_ip": "10.0.0.1", "dest_ip": "10.0.0.2", "dest_port": 80, "proto": "TCP", "alert": {"signature": "ET SCAN Possible Port Scan", "severity": 2}}\n'
+        )
+        # Mock NetGuard eval JSON
+        eval_json_content = json.dumps({
+            "id": "mock_test",
+            "alerts_sample": [{
+                "rule_name": "PORT_SCAN",
+                "src_ip": "10.0.0.1",
+                "dst_ip": "10.0.0.2",
+                "dst_port": 80,
+                "protocol": "TCP",
+                "timestamp": 1545403816.0,
+                "detail": "Port scan detected"
+            }]
+        })
+
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".log") as f_zeek, \
+             tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f_eve, \
+             tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f_db:
+            f_zeek.write(zeek_content)
+            f_eve.write(eve_content)
+            f_db.write(eval_json_content)
+            p_zeek, p_eve, p_db = f_zeek.name, f_eve.name, f_db.name
+
+        try:
+            cmd = [
+                sys.executable,
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "evaluation", "compare.py"),
+                "--zeek", p_zeek,
+                "--eve", p_eve,
+                "--db", p_db
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            self.assertIn("ZEEK CROSS-ENGINE TELEMETRY CORROBORATION REPORT", res.stdout)
+            self.assertIn("ENGINE AGREEMENT REPORT", res.stdout)
+            self.assertIn("Corroborated by Zeek:", res.stdout)
+            self.assertIn("Matched by both engines:", res.stdout)
+        finally:
+            for p in (p_zeek, p_eve, p_db):
+                if os.path.exists(p):
+                    os.remove(p)
 
 
 if __name__ == "__main__":

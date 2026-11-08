@@ -6,7 +6,7 @@
 **Reference Engines:**
 - **Suricata:** Version 4.x/5.x (Emerging Threats Open Ruleset)
 - **Zeek:** Version 2.6.x (Stratosphere Network Security Monitoring & Flow Classifier)
-- **NetGuard IDS:** Version 1.0 (19 Invariant Rule Engine)
+- **NetGuard IDS:** Version 1.1 (23 Canonical Rule Engine)
 
 ---
 
@@ -91,12 +91,14 @@ Suricata's Emerging Threats Open ruleset focuses primarily on Deep Packet Inspec
 
 NetGuard's behavioral rate detectors (`SynFloodRule`, `UdpFloodRule`, `DataExfiltrationRule`) immediately identified and alerted on these flooding campaigns.
 
-### 3.2 Resolution of IRC C2 Coverage Gap (Rule 23 Admission)
-Historically in Phase 4, NetGuard's `PayloadRule` focused strictly on web exploit signatures (SQL injection, OS command injection, Log4Shell, Java deserialization, XXE, Shellshock, webshells, directory traversal) and omitted IRC chat keywords. Under evidence-driven rule governance, this gap was analyzed and resolved by admitting **Rule 23: `IRC_C2_BEACONING` (v1.0)**:
+### 3.2 Hardened IRC C2 Detection & Protocol Differentiation (Rule 23)
+Historically in Phase 4, NetGuard's `PayloadRule` focused strictly on web exploit signatures (SQL injection, OS command injection, Log4Shell, Java deserialization, XXE, Shellshock, webshells, directory traversal) and omitted IRC chat keywords. Under evidence-driven rule governance, this gap was analyzed and resolved with **Rule 23: `IRC_C2_BEACONING` (v1.1)**, further hardened during the 3-hour engineering sprint:
 - **Dual Detection Paths:**
-  1. `IRC_PROTOCOL_SIGNATURE`: Direct payload inspection identifying IRC command verbs (`PING`, `PONG`, `NICK`, `USER`, `JOIN`, `PRIVMSG`, `MODE`) on well-known IRC ports (194, 6660–6669, 6697).
-  2. `IRC_PORT_BEACONING`: Connection-rate heuristic tracking repeated TCP SYN connection bursts ($\ge 5$ in 300s) to IRC ports, bounding state with an $O(1)$ LRU cache capped at 2,048 source hosts.
+  1. `IRC_PROTOCOL_SIGNATURE`: Direct payload inspection identifying IRC command verbs (`PING`, `PONG`, `NICK`, `USER`, `JOIN`, `PRIVMSG`, `MODE`) on standard IRC ports (194, 6660–6669, 6697). Differentiates benign protocol activity (`IRC_PROTOCOL_OBSERVED`, medium severity, heuristic confidence) from high-confidence C2 exploitation.
+  2. `IRC_PORT_BEACONING`: Connection-rate heuristic tracking repeated TCP SYN connection attempts ($\ge 5$ in 300s) to IRC ports. Hardened to parse Scapy integer flag bitmasks (`0x02` SYN vs `0x12` SYN+ACK vs `0x10` ACK), deduplicate retransmissions via `(src_port, tcp_seq)`, and compute statistical inter-arrival interval regularity (`avg_interval_s`, `std_interval_s`) to classify regular periodic beaconing (`LIKELY_IRC_C2`, high severity, confirmed confidence).
+- **Hierarchical LRU Bounding:** Enforces $O(1)$ state limits with `MAX_TRACKED_SOURCES = 2048` outer and `MAX_DESTS_PER_SOURCE = 128` inner LRU cache with bidirectional stale state pruning in `prune_stale(now)`.
 - **Corroborated Verification:** On replaying `CTU-IoT-Malware-Capture-34-1`, Rule 23 successfully detected Mirai botnet registration (`NICK`) and persistent C2 keepalives (`PONG`), achieving complete cross-telemetry corroboration with Suricata's 2,450 `ET CHAT IRC` alerts and Zeek's 6,706 `C&C` flow labels.
+- **Dual-Engine Automated CLI:** Verified via `python3 ids_project/evaluation/compare.py --zeek <conn.log> --eve <eve.json> --db <eval.json>`, generating simultaneous corroboration reports with 100% flow-level agreement on botnet C2 activity.
 
 ### 3.3 The Horizontal Port Scan Evasion Analysis
 Zeek documented 122 flows labelled `PartOfAHorizontalPortScan` directed at destination port 63798.

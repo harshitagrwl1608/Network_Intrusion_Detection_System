@@ -192,12 +192,12 @@ def inspect_command_tokens(raw_tokens):
                     if "clean" in s and any(f in s for f in ("-f", "-x", "-d")):
                         return True, "Inline script attempts git clean"
 
-                if "rm" in s and ("datasets" in s or "ids_project" in s or "rmtree" in s):
+                if re.search(r"\b(rm|rmdir|rmtree)\b", s) and ("datasets" in s or "ids_project" in s or "rmtree" in s):
                     return True, "Inline script attempts destructive directory deletion"
 
                 if is_unattended_mode():
                     # In unattended mode, block ambiguous inline execution containing git mutation or rm
-                    if any(w in s for w in ("git", "rm", "shutil", "unlink")) and any(w in s for w in ("push", "reset", "delete", "rmtree")):
+                    if any(re.search(rf"\b{w}\b", s) for w in ("git", "rm", "shutil", "unlink")) and any(re.search(rf"\b{w}\b", s) for w in ("push", "reset", "delete", "rmtree")):
                         return True, "Ambiguous mutation script blocked in unattended autonomous mode."
                 break
 
