@@ -13,7 +13,7 @@
 > [!NOTE]
 > ### 🚧 Ongoing Project Notice
 > **NetGuard IDS is currently under active development.**  
-> The core packet-sniffing engine, 23-rule evidence-driven detection suite, 18-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization (including Triconex TriStation 1131 ICS signatures), Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, IP fragmentation reassembly attack detection, IRC botnet C2 beaconing detection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed **656 tests** (across 27 unit and integration test modules). The synthetic evaluation detected **42/42 labelled scenarios** across all registered rules with 100.0% precision, 100.0% recall, zero unmatched attack alerts, and zero alerts on the benign fixture. Real-world validation spans 18 PCAP captures across 6 independent publishers with cross-engine corroboration against Suricata and Zeek. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
+> The core packet-sniffing engine, 23-rule evidence-driven detection suite, 18-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization (including Triconex TriStation 1131 ICS signatures), Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, IP fragmentation reassembly attack detection, IRC botnet C2 beaconing detection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed **687 tests** (across 29 unit and integration test modules). The synthetic evaluation detected **42/42 labelled scenarios** across all registered rules with 100.0% precision, 100.0% recall, zero unmatched attack alerts, and zero alerts on the benign fixture. Real-world validation spans 18 PCAP captures across 6 independent publishers with cross-engine corroboration against Suricata and Zeek. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
 
 ---
 
@@ -230,7 +230,7 @@ python evaluation/run_eval.py
 **Evaluation Results Summary:**
 - **Attack Detection:** **42 / 42 labelled scenarios detected** across all 23 registered rules; zero unmatched attack alerts in the fixture replay (100.0% Recall, 100.0% Precision).
 - **Benign Background Traffic:** **0 alerts** on the 837-packet benign fixture (100.0% Specificity).
-- **Unit Test Suite:** **656 passed tests** (`python -m pytest -q`, from `ids_project/`).
+- **Unit Test Suite:** **687 passed tests** (`python -m pytest -q`, from `ids_project/`, across 29 test modules).
 - *Note:* Synthetic benchmark results validate rule mechanics and do not imply 100% real-world accuracy on unlabelled production traffic. Independent holdout validation protocol is detailed in `docs/evaluation/threshold-sensitivity-and-holdout-plan.md`.
 
 This command runs with zero contamination:

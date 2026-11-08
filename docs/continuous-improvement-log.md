@@ -679,4 +679,13 @@ Across 15 substantive engineering cycles, the NetGuard IDS repository was system
      - Confirmed asymmetric routing pure-ACK suppression across port scan and SYN flood rules.
      - Confirmed DNS DGA entropy stability under mixed-case randomization.
      - Confirmed subthreshold ICMP chunking suppression and Layer 3 Ping-of-Death buffer overflow detection.
-- **Test Suite Status**: **656 passed in 114s** (0 failures, 0 errors across 27 test modules).
+  8. **Cryptographic Dataset Hash Verification Suite (`ids_project/tests/test_dataset_hash_verify.py`)**:
+     - Automated streaming cryptographic SHA-256 verification of all 18 PCAP captures on external volume `/run/media/harshitgarg/Data1/NetGuard-datasets`.
+     - Strict reconciliation between raw PCAPs, `.sha256` checksum files, `.meta.json` manifests, and `dataset-registry.md`.
+     - Reconciled archive vs decompressed PCAP digests for `iot23_honeypot_4_1` and `ws_nmap_stealth_scan`.
+     - Tested MCP tool `tool_dataset_hash_verify` for valid matching, mismatch detection, missing files, and directory traversal rejection.
+  9. **Forensic Alert Evidence Schema Audit (`ids_project/tests/test_alert_evidence_schema.py`)**:
+     - Audited and verified that all 23 canonical detection rules emit rich, non-empty, JSON-serializable `evidence` dictionaries.
+     - Verified `RuleEngine.check()` serialization to `evidence_json` with unique `idempotency_key` generation.
+     - Validated SQLite round-trip storage and retrieval without field truncation or serialization errors.
+- **Test Suite Status**: **687 passed in 118s** (0 failures, 0 errors across 29 test modules).

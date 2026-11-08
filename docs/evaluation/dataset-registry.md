@@ -86,8 +86,9 @@ This registry records all external network traffic datasets acquired, verified, 
 - **Download Date:** 2026-11-04
 - **License / Terms:** Creative Commons Attribution 2.0 Generic (CC BY 2.0)
 - **Archive Size (XZ):** 376,840 bytes (~0.36 MB)
+- **Archive SHA-256 (XZ):** `bc5a57306d9a5f614b09d9c0976f007667fee5b6de3427fbab094fa3084b9b64`
 - **Extracted Size (PCAP):** 4,594,492 bytes (~4.38 MB)
-- **SHA-256 Digest (PCAP):** `bc5a57306d9a5f614b09d9c0976f007667fee5b6de3427fbab094fa3084b9b64`
+- **SHA-256 Digest (PCAP):** `3fb775c0391b6ad313a3f7845e634a277b07c3f6377346c2486ba63e1c22e90c`
 - **Monitored Hardware:** Somfy connected doorlock (physical hardware device, `192.168.1.132`)
 - **Traffic Nature:** 100% Genuine Benign IoT Operational Traffic (mDNS, TLS, HTTP, NTP, SSDP).
 - **Label Granularity:** Fully benign ground truth.
@@ -225,7 +226,7 @@ This registry records all external network traffic datasets acquired, verified, 
 - **License / Terms:** Open Source Research (MIT)
 - **File Format:** libpcap (curated mock test fixture)
 - **Capture File Size:** 1,956 bytes (~1.9 KB)
-- **SHA-256 Digest:** `26841fb2b75ebf91fc726053f3e580a9d9e4a30a21a50a1db48dca2aa7a48dbe`
+- **SHA-256 Digest:** `2c59acde7870fb1210e65f914b9f08df6502dcba61bfd4bf890b5b92a06b5edf`
 - **Attack Behaviors:** 100-byte high-entropy Base64 data exfiltration payload chunks transported inside ICMP Echo Request packets (CVE-covert-channel).
 - **Target NetGuard Rules:** `ICMP_TUNNEL` (v1.1 `BASE64_EXFILTRATION`), `DNS_ANOMALY`.
 - **Key Forensic Finding:** Detected with 100% precision: `ICMP_TUNNEL` fired with `b64_ratio=1.00`, `entropy=5.40`, and `severity=high`.
@@ -240,7 +241,7 @@ This registry records all external network traffic datasets acquired, verified, 
 - **License / Terms:** Open Source Security Research (CC0 / Public Domain)
 - **File Format:** libpcap
 - **Capture File Size:** 56,278 bytes (~55 KB)
-- **SHA-256 Digest:** `52b96e51c8a41031aa265c102dfc05988220023ee45c4aa3d567bb075c3efc5b`
+- **SHA-256 Digest:** `f328c22f25fa74f59628a2cc5abfaa180d677cdccb5bc3d309c53526fa65d9c0`
 - **Attack Behaviors:** Apache Log4j 2 CVE-2021-44228 remote code execution attempt with nested URL-encoded lookup obfuscation (`${${::-j}${::-n}${::-d}${::-i}:ldap://...}`).
 - **Target NetGuard Rules:** `PAYLOAD_HIT` (`LOG4SHELL` signature).
 - **Key Forensic Finding:** NetGuard multi-pass URL deobfuscation decoded `%24%7B...` and matched `LOG4SHELL` signature on packet 4.
@@ -254,7 +255,7 @@ This registry records all external network traffic datasets acquired, verified, 
 - **Download Date:** 2026-11-04
 - **License / Terms:** Open Information Security Foundation (GPL v2)
 - **File Format:** libpcap
-- **Capture File Size:** 3,596 bytes (~3.5 KB)
+- **Capture File Size:** 4,020 bytes (~3.9 KB)
 - **SHA-256 Digest:** `da73184c5cacd3a509f8aaaa8628da19f172f478fae35cbfef45025339d78963`
 - **Attack Behaviors:** OISF Suricata verify firewall test checking SNI whitelist drop policies (`suricata.io` allowed, `evil.example` blocked, omitted SNI blocked).
 - **Target NetGuard Rules:** `UNASSESSED_FIREWALL_POLICY` (firewall policy enforcement).
@@ -268,9 +269,10 @@ This registry records all external network traffic datasets acquired, verified, 
 - **Official Download URL:** `https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/NMap-Captures.zip`
 - **Download Date:** 2026-11-04
 - **License / Terms:** Open Wireshark sample capture repository
-- **File Format:** libpcap (extracted from ZIP archive)
-- **Capture File Size:** 114,641 bytes (~112 KB)
-- **SHA-256 Digest:** `d29d44c80387446df3c285994fbc87da9694e9f9064c17240c49fc078f45a7c2`
+- **File Format:** libpcap (extracted from ZIP archive `ws_nmap_stealth_scan.zip`)
+- **Archive SHA-256 (ZIP):** `3fac3f99402b5b6a2bc819ce7c9ba4aab58756e3353412a7834bfce02f098305`
+- **Capture File Size:** 157,862 bytes (~154 KB)
+- **SHA-256 Digest (PCAP):** `2eaca3a56fbdc1c95338ae85f00567fae41daa7d791293133094f544fe869459`
 - **Attack Behaviors:** Nmap stealth OS fingerprinting scan utilizing illegal TCP flag combinations (NULL 0x00, XMAS 0x29, SYN+FIN 0x2b) and rapid port probing.
 - **Target NetGuard Rules:** `PORT_SCAN`, `SLOW_PORT_SCAN`, `TCP_STEALTH_SCAN`, `TCP_FLAG_ANOMALY`.
 - **Key Forensic Finding:** Generated 3 alerts (`PORT_SCAN`, `SLOW_PORT_SCAN`, `TCP_FLAG_ANOMALY`) detecting both scanning and illegal flag combinations.
