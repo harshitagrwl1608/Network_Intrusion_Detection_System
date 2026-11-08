@@ -710,4 +710,8 @@ Across 15 substantive engineering cycles, the NetGuard IDS repository was system
        - `run_blind_holdout_evaluation`: Executes single-pass blind replay in an isolated temporary SQLite database, completely bypassing calibration caches, and outputs an immutable read-only JSON audit log (`holdout_<cid>_<uuid>.json`).
        - Created candidate pre-registration catalog in `docs/evaluation/holdout-registry.json` targeting independent third-party sources (CIC-Bell-DNS-2021, MAWI WIDE, unseen Stratosphere CTU Mirai variant).
        - Added 9 unit tests in `ids_project/tests/test_holdout_pipeline.py` covering all verification steps, permissions enforcement, benign/attack fixtures, and strict freeze violation blocking. Total test suite expanded to 703 tests across 30 modules.
-- **Test Suite Status**: **703 passed** across 30 test modules (0 failures, 0 skipped, 0 disabled).
+    14. **Workbench MCP Server Boundary Hardening for External Volume Telemetry**:
+       - Fixed `validate_and_resolve_path` in `pcap_mcp_server.py` and `validate_and_resolve_db_path` in `eval_db_mcp_server.py` to allow legitimate access to the external dataset root `/run/media/harshitgarg/Data1/NetGuard-datasets`.
+       - Preserved strict path traversal defenses rejecting access outside allowed roots (e.g. `/etc/passwd`, `/etc/shadow`).
+       - Added `test_pcap_mcp_server_external_dataset_access` in `ids_project/tests/test_workbench.py` (26 passed).
+- **Test Suite Status**: **704 passed** across 30 test modules (0 failures, 0 skipped, 0 disabled).

@@ -620,6 +620,43 @@ def test_pcap_mcp_server_path_traversal_prevention():
     assert "error" in res3
 
 
+def test_pcap_mcp_server_external_dataset_access():
+    """Verifies that PCAP MCP server permits access to external datasets root on /dev/sdb1."""
+    ext_dir = "/run/media/harshitgarg/Data1/NetGuard-datasets/verified"
+    if not os.path.isdir(ext_dir):
+        pytest.skip("External datasets directory not mounted")
+
+    test_file = os.path.join(ext_dir, "ws_teardrop.pcap")
+    if not os.path.isfile(test_file):
+        pytest.skip("ws_teardrop.pcap not present on external drive")
+
+    script_path = os.path.join(SCRIPTS_DIR, "pcap_mcp_server.py")
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "pcap_metadata", "arguments": {"pcap_path": test_file}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "dataset_hash_verify", "arguments": {"file_path": test_file}}},
+    ]
+    proc = subprocess.Popen(
+        ["python3", script_path],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    in_text = "\n".join(json.dumps(r) for r in requests) + "\n"
+    stdout, stderr = proc.communicate(in_text)
+    assert proc.returncode == 0
+
+    responses = [json.loads(line) for line in stdout.strip().splitlines() if line.strip()]
+    res_meta = json.loads(responses[1]["result"]["content"][0]["text"])
+    assert "error" not in res_meta
+    assert res_meta.get("total_packets") == 17
+
+    res_hash = json.loads(responses[2]["result"]["content"][0]["text"])
+    assert "error" not in res_hash
+    assert len(res_hash.get("sha256", "")) == 64
+
+
 def test_eval_db_mcp_server_summary_and_stats():
     script_path = os.path.join(SCRIPTS_DIR, "eval_db_mcp_server.py")
     test_db = os.path.join(PROJECT_ROOT, "ids_project", "storage", "alerts.db")

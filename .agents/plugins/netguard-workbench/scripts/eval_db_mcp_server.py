@@ -60,11 +60,14 @@ def validate_and_resolve_db_path(raw_path: str) -> tuple[str | None, str | None]
 
     real_path = os.path.realpath(resolved)
 
+    external_datasets_dir = "/run/media/harshitgarg/Data1/NetGuard-datasets"
     allowed_roots = [
         os.path.realpath(WORKSPACE_ROOT),
         "/tmp",
         "/var/tmp"
     ]
+    if os.path.exists(external_datasets_dir):
+        allowed_roots.append(os.path.realpath(external_datasets_dir))
     if not any(real_path == ar or real_path.startswith(ar + os.sep) for ar in allowed_roots):
         return None, f"Access denied: path '{raw_path}' resolves outside allowed workspace boundaries."
 
