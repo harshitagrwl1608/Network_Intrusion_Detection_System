@@ -13,7 +13,7 @@
 > [!NOTE]
 > ### 🚧 Ongoing Project Notice
 > **NetGuard IDS is currently under active development.**  
-> The core packet-sniffing engine, 21-rule evidence-driven detection suite, 18-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization (including Triconex TriStation 1131 ICS signatures), Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed **560 tests** (and 210 subtests). The synthetic evaluation detected 38/38 labelled scenarios across all registered rules with 100.0% precision, 100.0% recall, zero unmatched attack alerts, and zero alerts on the benign fixture. Real-world validation spans 16 PCAP captures across 6 independent publishers with cross-engine corroboration against Suricata and Zeek. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
+> The core packet-sniffing engine, 23-rule evidence-driven detection suite, 18-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization (including Triconex TriStation 1131 ICS signatures), Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, IP fragmentation reassembly attack detection, IRC botnet C2 beaconing detection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed **651 tests** (across 26 unit and integration test modules). The synthetic evaluation detected **42/42 labelled scenarios** across all registered rules with 100.0% precision, 100.0% recall, zero unmatched attack alerts, and zero alerts on the benign fixture. Real-world validation spans 18 PCAP captures across 6 independent publishers with cross-engine corroboration against Suricata and Zeek. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
 
 ---
 
@@ -102,7 +102,7 @@ Home and small-office networks generate continuous connection traffic, yet small
 
 ## 🔍 Core Detection Rules
 
-NetGuard implements **21 evidence-driven detection rules** spanning stateless lookups, stateful sliding windows, deep packet inspection, TLS inspection, and algorithmic information theory under strict distinct value governance:
+NetGuard implements **23 evidence-driven detection rules** spanning stateless lookups, stateful sliding windows, deep packet inspection, TLS inspection, and algorithmic information theory under strict distinct value governance:
 
 | Rule ID | Detection Mechanism | Methodology | Tunable Defaults |
 |---|---|---|---|
@@ -127,6 +127,8 @@ NetGuard implements **21 evidence-driven detection rules** spanning stateless lo
 | **`TCP_ZERO_WINDOW`** | Sockstress / Zero-Window DoS | Tracks repeated TCP Zero-Window (`win=0`) advertisements per endpoint pair, with bounded per-key evidence and state; counts are reported as a lower bound when the threshold-sized evidence window is full. | $\ge 20$ packets in $10\text{s}$; 60s cooldown |
 | **`NON_DNS_TRAFFIC_ON_DNS_PORT`** | Non-DNS Protocol or Shell on Port 53 | Detects non-DNS protocols, interactive command shells (`cmd.exe`, `/bin/sh`), and unauthorized bidirectional communications operating on UDP/TCP port 53; RFC 1035 QNAME validation prevents header evasion. | Instant trigger; 60s cooldown |
 | **`ICMP_TUNNEL`** | Covert ICMP Tunneling & Exfiltration | Detects covert tunneling channels, reverse shells (`icmpsh`), Base64 exfiltration chunks, and embedded PE/ELF executables within oversized high-entropy ICMP Echo requests/replies. | Length $\ge 64$B, entropy $\ge 4.5$; 60s cooldown |
+| **`IP_FRAGMENT_ANOMALY`** | Overlapping Fragments & Ping of Death | Detects Layer 3 IPv4/IPv6 fragmentation reassembly anomalies: overlapping fragment byte ranges (CVE-1997-0047 Teardrop, Bonk, Boink), fragment buffer overflow exceeding 65,535 bytes (Ping of Death), and tiny initial fragments splitting transport headers (RFC 1858 / RFC 3128). | 30s reassembly timeout; 60s cooldown |
+| **`IRC_C2_BEACONING`** | IRC Botnet C&C Beaconing | Detects IRC-based botnet Command-and-Control communications on ports 194/6660-6669/6697. Two independent detection paths: (1) IRC protocol verb signature matching (PING/PONG/NICK/USER/JOIN/PRIVMSG in TCP payload) for confirmed detection; (2) threshold SYN connection rate to IRC ports for heuristic beaconing detection. Corroborated by IoT-23 Mirai-variant captures. | ≥5 SYN in 300s; 300s cooldown; 2048-source LRU cap |
 
 ### 🔬 Deep Packet Inspection (DPI) Signatures
 `PayloadRule` evaluates raw packet payloads and ordered, bounded TCP streams against 18 categorized threat signatures with automatic multi-pass URL decoding (up to 3 passes), form decoding (`+` to space), null-byte stripping (`%00` and `\x00`), and inline SQL comment collapsing (`/*...*/`):
@@ -212,7 +214,7 @@ python evaluation/replay.py --pcap data/test_attacks.pcap
 * **Constant-Memory Streaming:** Streams binary libpcap frames iteratively instead of buffering whole multi-gigabyte captures in memory.
 * **Dual Format Auto-Detection:** Automatically detects whether `log.pcap` is a binary libpcap capture or an ASCII `tcpdump` text dump (supporting both `YYYY-MM-DD` and `HH:MM:SS` timestamp formats).
 * **Protocol & Field Extraction:** Decodes IP endpoints, ports, protocol flags, TCP window size, DNS query name/type, ARP mappings, and raw payloads.
-* **Rule Engine Execution:** Evaluates all 19 detection rules concurrently against every packet with zero early-exit truncation.
+* **Rule Engine Execution:** Evaluates all 23 detection rules concurrently against every packet with zero early-exit truncation.
 * **Database Storage:** Inserts all detected security incidents directly into `storage/alerts.db` with durable disk spooling.
 
 ### 3. Automated Isolated Evaluation Runner
@@ -225,10 +227,10 @@ python evaluation/run_eval.py
 ```
 
 **Evaluation Results Summary:**
-- **Attack Detection:** **38 / 38 labelled scenarios detected** (100.0% Recall, 100.0% Precision, 100.0% F1 on this fixture).
-- **Benign Background Traffic:** **0 False Positives** on the 832-packet benign fixture.
-- **Unit Test Suite:** **409 passed tests** (`python -m pytest -q`).
-- *Note:* Synthetic benchmark results validate rule mechanics and do not imply 100% real-world accuracy on unlabelled production traffic.
+- **Attack Detection:** **42 / 42 labelled scenarios detected** across all 23 registered rules; zero unmatched attack alerts in the fixture replay (100.0% Recall, 100.0% Precision).
+- **Benign Background Traffic:** **0 alerts** on the 837-packet benign fixture (100.0% Specificity).
+- **Unit Test Suite:** **651 passed tests** (`python -m pytest -q`).
+- *Note:* Synthetic benchmark results validate rule mechanics and do not imply 100% real-world accuracy on unlabelled production traffic. Independent holdout validation protocol is detailed in `docs/evaluation/threshold-sensitivity-and-holdout-plan.md`.
 
 This command runs with zero contamination:
 * Replays `data/test_attacks.pcap` into an isolated temporary database.
@@ -270,7 +272,7 @@ Networking_Project/
 │   ├── capture/
 │   │   └── sniffer.py           # Scapy packet capture, field extraction & protocol decoding
 │   ├── engine/
-│   │   ├── rules.py             # 10 detection rules + RuleEngine orchestrator
+│   │   ├── rules.py             # 23 detection rules + RuleEngine orchestrator
 │   │   └── blocklist.py         # abuse.ch Feodo Tracker feed loader & auto-downloader
 │   ├── storage/
 │   │   └── db.py                # Database abstraction layer (SQLite + PostgreSQL)

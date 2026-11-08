@@ -13,7 +13,7 @@
 > [!NOTE]
 > ### 🚧 Ongoing Project Notice
 > **NetGuard IDS is currently under active development.**  
-> The core packet-sniffing engine, 23-rule evidence-driven detection suite, 18-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization (including Triconex TriStation 1131 ICS signatures), Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, IP fragmentation reassembly attack detection, IRC botnet C2 beaconing detection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed **618 tests** (and 23 subtests). The synthetic evaluation detected 38/38 labelled scenarios across all registered rules with 100.0% precision, 100.0% recall, zero unmatched attack alerts, and zero alerts on the benign fixture. Real-world validation spans 18 PCAP captures across 6 independent publishers with cross-engine corroboration against Suricata and Zeek. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
+> The core packet-sniffing engine, 23-rule evidence-driven detection suite, 18-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization (including Triconex TriStation 1131 ICS signatures), Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, IP fragmentation reassembly attack detection, IRC botnet C2 beaconing detection, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed **651 tests** (across 26 unit and integration test modules). The synthetic evaluation detected **42/42 labelled scenarios** across all registered rules with 100.0% precision, 100.0% recall, zero unmatched attack alerts, and zero alerts on the benign fixture. Real-world validation spans 18 PCAP captures across 6 independent publishers with cross-engine corroboration against Suricata and Zeek. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
 
 ---
 
@@ -215,7 +215,7 @@ python evaluation/replay.py --pcap data/test_attacks.pcap
 * **Constant-Memory Streaming:** Streams binary libpcap frames iteratively instead of buffering whole multi-gigabyte captures in memory.
 * **Dual Format Auto-Detection:** Automatically detects whether `log.pcap` is a binary libpcap capture or an ASCII `tcpdump` text dump (supporting both `YYYY-MM-DD` and `HH:MM:SS` timestamp formats).
 * **Protocol & Field Extraction:** Decodes IP endpoints, ports, protocol flags, TCP window size, DNS query name/type, ARP mappings, and raw payloads.
-* **Rule Engine Execution:** Evaluates all 19 detection rules concurrently against every packet with zero early-exit truncation.
+* **Rule Engine Execution:** Evaluates all 23 detection rules concurrently against every packet with zero early-exit truncation.
 * **Database Storage:** Inserts all detected security incidents directly into `storage/alerts.db` with durable disk spooling.
 
 ### 3. Automated Isolated Evaluation Runner
@@ -228,10 +228,10 @@ python evaluation/run_eval.py
 ```
 
 **Evaluation Results Summary:**
-- **Attack Detection:** **38 / 38 labelled scenarios detected**; no unmatched attack alerts in the fixture replay.
-- **Benign Background Traffic:** **0 alerts** on the 832-packet benign fixture.
-- **Unit Test Suite:** **409 passed tests** (`python -m pytest -q`, from `ids_project/`).
-- *Note:* Synthetic benchmark results validate rule mechanics and do not imply 100% real-world accuracy on unlabelled production traffic.
+- **Attack Detection:** **42 / 42 labelled scenarios detected** across all 23 registered rules; zero unmatched attack alerts in the fixture replay (100.0% Recall, 100.0% Precision).
+- **Benign Background Traffic:** **0 alerts** on the 837-packet benign fixture (100.0% Specificity).
+- **Unit Test Suite:** **651 passed tests** (`python -m pytest -q`, from `ids_project/`).
+- *Note:* Synthetic benchmark results validate rule mechanics and do not imply 100% real-world accuracy on unlabelled production traffic. Independent holdout validation protocol is detailed in `docs/evaluation/threshold-sensitivity-and-holdout-plan.md`.
 
 This command runs with zero contamination:
 * Replays `data/test_attacks.pcap` into an isolated temporary database.
@@ -273,7 +273,7 @@ Networking_Project/
 │   ├── capture/
 │   │   └── sniffer.py           # Scapy packet capture, field extraction & protocol decoding
 │   ├── engine/
-│   │   ├── rules.py             # 10 detection rules + RuleEngine orchestrator
+│   │   ├── rules.py             # 23 detection rules + RuleEngine orchestrator
 │   │   └── blocklist.py         # abuse.ch Feodo Tracker feed loader & auto-downloader
 │   ├── storage/
 │   │   └── db.py                # Database abstraction layer (SQLite + PostgreSQL)

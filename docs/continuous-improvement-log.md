@@ -642,3 +642,36 @@ Across 15 substantive engineering cycles, the NetGuard IDS repository was system
   - Full pytest test suite: **618 passed, 23 subtests passed in 64.52s**.
   - Synthetic ground-truth evaluation: **38/38 TP, 0 FN, 0 FP (100% Precision, Recall, F1)**.
   - Active detection rules: **23 registered, distinct, justified, and tested rules**.
+
+---
+
+## 3-Hour Autonomous Engineering Sprint (2026-11-08)
+**Detection Correctness, Evaluation Integrity & Adversarial Validation**
+
+- **Sprint Goal**: Address concrete defects identified in IRC C2 rule, IP fragmentation rule, synthetic evaluation harness, ground-truth pipeline, evaluation cache, and dataset acquisition safeguards without adding new rules.
+- **Rules Verified**: 23 canonical rules (`ALL_RULE_CLASSES`). Zero dummy or redundant rules.
+- **Key Enhancements**:
+  1. **IRC C2 Detection Correctness & Hardening (`IrcC2BeaconingRule` v1.1)**:
+     - Fixed TCP flag extraction: now handles integer bitmasks (`0x02` SYN vs `0x12` SYN+ACK vs `0x10` ACK) alongside string flags.
+     - Deduplicated SYN retransmissions via `(src_port, tcp_seq)` matching.
+     - Two-level bounded LRU: outer source tracking (`MAX_TRACKED_SOURCES = 2048`) and inner destination tracking (`MAX_DESTS_PER_SOURCE = 128`) with bidirectional stale-state pruning.
+     - Differentiated generic IRC activity (`IRC_PROTOCOL_OBSERVED`, medium severity, heuristic confidence) from confirmed botnet commands (`LIKELY_IRC_C2`, high severity, confirmed confidence). Added inter-arrival interval regularity analysis (`avg_interval_s`, `std_interval_s`).
+  2. **IP Fragmentation Anomaly Correctness & Hardening (`IpFragmentAnomalyRule` v1.1)**:
+     - Enforced per-datagram fragment cap (`MAX_FRAGMENTS_PER_DATAGRAM = 64`), datagram flow cap (`MAX_TRACKED_FLOWS = 4096`), and global range cap (`MAX_TOTAL_FRAGMENT_RANGES = 16384`).
+     - Content digest comparison: detects `CONFLICTING_FRAGMENT_DUPLICATE` when byte ranges match but digests differ; treats matching digests as benign retransmissions.
+     - Verified IPv6 fragment extraction and offset alignment (8-byte units) for non-overlapping vs teardrop overlap detection.
+  3. **Canonical Rule Registry & Dynamic Synthetic Evaluation**:
+     - Dynamic rule registration in `evaluation/run_eval.py` via `REGISTERED_RULE_NAMES`.
+     - Synthetic scenarios expanded to 42 attack scenarios (adding S39 `NON_DNS_TRAFFIC_ON_DNS_PORT`, S40 `ICMP_TUNNEL`, S41 `IP_FRAGMENT_ANOMALY`, S42 `IRC_C2_BEACONING`) and 29 benign scenarios (B01–B29).
+     - Full evaluation: **42/42 TP, 0 FN, 0 FP (100.0% Precision, 100.0% Recall, 100.0% F1)**.
+  4. **Ground-Truth Evaluation Integrity & Invariant Hardening**:
+     - Enforced backing device `/dev/sdb1` validation in `check_disk_safety`.
+     - Bijective flow-level ground-truth matching with window timestamp validation and semantic family mapping.
+     - Separated structured ground-truth metrics from capture-level signals.
+     - Hardened cache fingerprinting with full 64-character SHA-256 keys invalidating on changes to rules code, config settings, target rules, labels, and blocklists.
+  5. **PCAP-to-Alert Integration Matrix (`test_pcap_to_alert_matrix.py`)**:
+     - 10-point test matrix exercising the complete pipeline (`PCAP -> Scapy -> RuleEngine -> DB alerts -> Evaluation`).
+     - Tested on real-world/curated captures: `ws_teardrop.pcap` (detected), `ws_dns_remoteshell.pcap` (detected), `m_rau5_icmp_tunnel.pcap` (detected), `ws_skype_irc.pcap` (0 false alarms), `ws_http_browsing.pcap` (0 false alarms), and `oisf_tls_sni_anomaly.pcap` (0 false alarms).
+  6. **Threshold Sensitivity & Holdout Plan (`docs/evaluation/threshold-sensitivity-and-holdout-plan.md`)**:
+     - Documented corpus status: acknowledged that no untouched blind holdout currently exists in the corpus and established a 4-step holdout validation protocol for future campaigns.
+- **Test Suite Status**: **651 passed in 109s** (0 failures, 0 errors across 26 test modules).
