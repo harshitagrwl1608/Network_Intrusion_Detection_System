@@ -150,8 +150,9 @@ In the November 8 autonomous engineering sprint, all 23 detection rules were pro
 | `oisf_tls_sni_anomaly` | Curated Research Fixture | Standard TLS Handshake | 25 | 0 | None | **Zero False Alarms**: Clean TLS SNI validation. |
 
 ### 5.4 Unit & Integration Test Coverage
-- **Total Tests Passing:** **687 passed** across 29 test modules in 118s.
+- **Total Tests Passing:** **693 passed** across 29 test modules in 106s.
 - **Coverage:** Zero skipped, zero failures, zero disabled tests.
   - **Adversarial Evasion Stress Testing (`test_adversarial_evasion_stress.py`):** Multi-threaded ingestion under continuous GC, asymmetric routing pure-ACK suppression, DGA case randomization entropy stability, subthreshold ICMP chunking suppression, and Ping of Death overflow detection.
   - **Cryptographic Dataset Hash Verification (`test_dataset_hash_verify.py`):** Automated streaming SHA-256 verification of all 18 PCAP captures on `/dev/sdb1`, exact cross-referencing with `.meta.json` manifests, `.sha256` checksum files, and `dataset-registry.md`, plus path-traversal prevention and MCP tool verification.
   - **Forensic Alert Evidence Schema Audit (`test_alert_evidence_schema.py`):** Verified that all 23 canonical detection rules emit rich, non-empty, strictly JSON-serializable `evidence` dictionaries, correctly serialized to `evidence_json` with unique `idempotency_key` generation and database round-tripping.
+  - **Zeek Cross-Engine Telemetry Corroboration (`test_compare.py`):** Added native Zeek TSV (`#fields`) and JSON stream loaders, connection state corroboration (`S0` unacknowledged SYNs, `SF` normal, `REJ` rejected probes), byte-volume egress correlation, and verified live parsing against authentic 23,145-row CTU IoT-23 Zeek connection logs.

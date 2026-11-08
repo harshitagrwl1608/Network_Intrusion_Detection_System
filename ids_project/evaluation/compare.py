@@ -459,6 +459,226 @@ def print_agreement_report(results: dict):
 
 
 # ---------------------------------------------------------------------------
+# Zeek conn.log loader & cross-telemetry corroboration (§3.10)
+# ---------------------------------------------------------------------------
+
+def load_zeek_connections(conn_path: str, max_records: int | None = None) -> list[dict]:
+    """Parse Zeek conn.log (supports TSV with #fields header or JSON lines)."""
+    records = []
+    fields = None
+    with open(conn_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line_str = line.strip()
+            if not line_str:
+                continue
+
+            # JSON format detection
+            if line_str.startswith("{") and line_str.endswith("}"):
+                try:
+                    obj = json.loads(line_str)
+                    if isinstance(obj, dict):
+                        ts = float(obj.get("ts", 0.0) or 0.0)
+                        src_ip = _norm_ip(obj.get("id.orig_h") or obj.get("src_ip"))
+                        dst_ip = _norm_ip(obj.get("id.resp_h") or obj.get("dst_ip"))
+                        src_port = _norm_port(obj.get("id.orig_p") or obj.get("src_port"))
+                        dst_port = _norm_port(obj.get("id.resp_p") or obj.get("dst_port"))
+                        proto = str(obj.get("proto") or "").strip().upper()
+                        service = str(obj.get("service") or "").strip()
+                        state = str(obj.get("conn_state") or "").strip()
+                        history = str(obj.get("history") or "").strip()
+                        orig_bytes = int(obj.get("orig_bytes") or 0) if str(obj.get("orig_bytes") or "").isdigit() else 0
+                        resp_bytes = int(obj.get("resp_bytes") or 0) if str(obj.get("resp_bytes") or "").isdigit() else 0
+                        orig_pkts = int(obj.get("orig_pkts") or 0) if str(obj.get("orig_pkts") or "").isdigit() else 0
+                        label = str(obj.get("label") or "").strip()
+                        records.append({
+                            "timestamp": ts, "src_ip": src_ip, "dst_ip": dst_ip,
+                            "src_port": src_port, "dst_port": dst_port, "protocol": proto,
+                            "service": service, "conn_state": state, "history": history,
+                            "orig_bytes": orig_bytes, "resp_bytes": resp_bytes,
+                            "orig_pkts": orig_pkts, "label": label,
+                        })
+                except Exception:
+                    continue
+                if max_records and len(records) >= max_records:
+                    break
+                continue
+
+            # Standard TSV format with #fields header
+            if line_str.startswith("#fields"):
+                fields = line_str.split("\t")[1:]
+                continue
+            if line_str.startswith("#"):
+                continue
+            if not fields:
+                continue
+
+            parts = line_str.split("\t")
+            if len(parts) < len(fields):
+                continue
+            row = dict(zip(fields, parts))
+
+            def _clean_val(v):
+                return "" if v in ("-", "(empty)", None) else str(v).strip()
+
+            def _to_float(v):
+                c = _clean_val(v)
+                try:
+                    return float(c) if c else 0.0
+                except (ValueError, TypeError):
+                    return 0.0
+
+            def _to_int(v):
+                c = _clean_val(v)
+                try:
+                    return int(c) if c else 0
+                except (ValueError, TypeError):
+                    return 0
+
+            ts = _to_float(row.get("ts"))
+            src_ip = _norm_ip(_clean_val(row.get("id.orig_h")))
+            dst_ip = _norm_ip(_clean_val(row.get("id.resp_h")))
+            src_port = _norm_port(_clean_val(row.get("id.orig_p")))
+            dst_port = _norm_port(_clean_val(row.get("id.resp_p")))
+            proto = _clean_val(row.get("proto")).upper()
+            service = _clean_val(row.get("service"))
+            state = _clean_val(row.get("conn_state"))
+            history = _clean_val(row.get("history"))
+            orig_bytes = _to_int(row.get("orig_bytes"))
+            resp_bytes = _to_int(row.get("resp_bytes"))
+            orig_pkts = _to_int(row.get("orig_pkts"))
+            label = _clean_val(row.get("label"))
+
+            records.append({
+                "timestamp": ts, "src_ip": src_ip, "dst_ip": dst_ip,
+                "src_port": src_port, "dst_port": dst_port, "protocol": proto,
+                "service": service, "conn_state": state, "history": history,
+                "orig_bytes": orig_bytes, "resp_bytes": resp_bytes,
+                "orig_pkts": orig_pkts, "label": label,
+            })
+            if max_records and len(records) >= max_records:
+                break
+
+    logging.info(f"Zeek connections loaded: {len(records)}")
+    return records
+
+
+def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict], tolerance: float = 30.0) -> dict:
+    """
+    Corroborates NetGuard alerts against Zeek connection flow state and telemetry.
+    Differentiates scan, flood, and exfil behaviors based on conn_state and byte volumes.
+    """
+    corroborated = []
+    unmatched = []
+
+    # Index Zeek connections by (src_ip, dst_ip) for fast lookups
+    zeek_by_pair = {}
+    for z in zeek_conns:
+        pair = (z["src_ip"], z["dst_ip"])
+        zeek_by_pair.setdefault(pair, []).append(z)
+
+    for alert in netguard_alerts:
+        src = _norm_ip(alert.get("src_ip"))
+        dst = _norm_ip(alert.get("dst_ip"))
+        rule = str(alert.get("rule_name") or "")
+        proto = str(alert.get("protocol") or "").strip().upper()
+        alert_ts = float(alert.get("timestamp") or 0.0)
+
+        matching_flows = zeek_by_pair.get((src, dst), [])
+        if not matching_flows:
+            # Try reverse pair (e.g. for server response or bidirectional alerts)
+            matching_flows = zeek_by_pair.get((dst, src), [])
+
+        # Filter by time tolerance if timestamp present
+        if alert_ts > 0.0:
+            window_flows = [
+                f for f in matching_flows
+                if abs(f["timestamp"] - alert_ts) <= tolerance or f["timestamp"] == 0.0
+            ]
+            if window_flows:
+                matching_flows = window_flows
+
+        if not matching_flows:
+            unmatched.append({"alert": alert, "reason": "NO_MATCHING_FLOW"})
+            continue
+
+        # Evaluate semantic corroboration based on rule category
+        corroboration_type = None
+        evidence_notes = []
+
+        # Check for scanning / flood corroboration (unanswered SYNs: S0, or rejected: REJ)
+        scan_rules = ("PORT_SCAN", "SLOW_PORT_SCAN", "TCP_STEALTH_SCAN", "SYN_FLOOD", "DISTRIBUTED_SYN_FLOOD")
+        if rule in scan_rules:
+            s0_flows = [f for f in matching_flows if f["conn_state"] == "S0" or f["history"] == "S"]
+            if s0_flows:
+                corroboration_type = "UNANSWERED_SYN_SCAN"
+                evidence_notes.append(f"{len(s0_flows)} Zeek flow(s) in S0 state (unacknowledged SYNs)")
+            elif any(f["conn_state"] in ("REJ", "RSTOS0") for f in matching_flows):
+                corroboration_type = "REJECTED_CONNECTION_PROBE"
+                evidence_notes.append("Zeek recorded rejected connection attempts")
+
+        # Check for Data Exfiltration corroboration
+        elif rule == "DATA_EXFIL":
+            high_vol_flows = [f for f in matching_flows if f["orig_bytes"] >= 50000 or f["orig_pkts"] >= 50]
+            if high_vol_flows:
+                corroboration_type = "HIGH_VOLUME_EGRESS"
+                max_bytes = max(f["orig_bytes"] for f in high_vol_flows)
+                evidence_notes.append(f"Zeek recorded outbound flow with {max_bytes} bytes")
+
+        # Check for Botnet / C2 corroboration
+        elif rule == "IRC_C2_BEACONING":
+            irc_flows = [f for f in matching_flows if f["dst_port"] in (194, 6660, 6661, 6662, 6663, 6664, 6665, 6666, 6667, 6668, 6669, 6697)]
+            if irc_flows:
+                corroboration_type = "IRC_SESSION_CONFIRMED"
+                evidence_notes.append(f"Zeek confirmed {len(irc_flows)} connection(s) to IRC service ports")
+
+        # Generic flow corroboration (traffic was confirmed by Zeek)
+        if not corroboration_type:
+            corroboration_type = "FLOW_OBSERVED"
+            evidence_notes.append(f"Zeek observed {len(matching_flows)} flow(s) between endpoints")
+
+        corroborated.append({
+            "alert": alert,
+            "corroboration_type": corroboration_type,
+            "flow_count": len(matching_flows),
+            "evidence": "; ".join(evidence_notes),
+            "sample_flow": matching_flows[0],
+        })
+
+    return {
+        "total_alerts": len(netguard_alerts),
+        "corroborated": corroborated,
+        "unmatched": unmatched,
+        "corroboration_rate": len(corroborated) / max(len(netguard_alerts), 1),
+    }
+
+
+def print_zeek_corroboration_report(results: dict):
+    total = results["total_alerts"]
+    corroborated = len(results["corroborated"])
+    unmatched = len(results["unmatched"])
+    rate = results["corroboration_rate"] * 100
+
+    print("\n" + "=" * 65)
+    print("  ZEEK CROSS-ENGINE TELEMETRY CORROBORATION REPORT")
+    print("  NOTE: Zeek logs independent flow telemetry for corroboration.")
+    print("=" * 65)
+    print(f"  NetGuard total alerts:       {total:4d}")
+    print(f"  Corroborated by Zeek:        {corroborated:4d}")
+    print(f"  Unmatched:                   {unmatched:4d}")
+    print(f"  Corroboration rate:          {rate:.1f}%")
+    print("-" * 65)
+    if results["corroborated"]:
+        print("  Sample Corroborated Findings:")
+        for item in results["corroborated"][:8]:
+            a = item["alert"]
+            print(
+                f"    [{a.get('rule_name')}] {a.get('src_ip')} → {a.get('dst_ip')} "
+                f"({item['corroboration_type']}): {item['evidence']}"
+            )
+    print("=" * 65)
+
+
+# ---------------------------------------------------------------------------
 # Ground-truth mode (§3.10)
 # ---------------------------------------------------------------------------
 
@@ -663,7 +883,11 @@ def main():
     )
     parser.add_argument(
         "--eve",
-        help="Path to Suricata eve.json (required for agreement mode)",
+        help="Path to Suricata eve.json (required for agreement mode unless --zeek provided)",
+    )
+    parser.add_argument(
+        "--zeek",
+        help="Path to Zeek conn.log for cross-engine flow corroboration",
     )
     parser.add_argument(
         "--labels",
@@ -687,7 +911,26 @@ def main():
         run_ground_truth(args.labels, db_path=args.db)
         return
 
-    # Agreement mode (default)
+    # Zeek cross-engine corroboration mode
+    if args.zeek:
+        if not os.path.exists(args.zeek):
+            print(f"ERROR: {args.zeek} not found")
+            sys.exit(1)
+        if args.db and args.db.endswith(".json") and os.path.exists(args.db):
+            with open(args.db, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                netguard_alerts = data.get("alerts_sample") or data.get("alerts") or []
+        else:
+            conn = _get_conn(args.db)
+            netguard_alerts = read_all_alerts(conn)
+        logging.info(f"NetGuard alerts: {len(netguard_alerts)}")
+        zeek_conns = load_zeek_connections(args.zeek)
+        z_results = correlate_netguard_zeek(netguard_alerts, zeek_conns)
+        print_zeek_corroboration_report(z_results)
+        if not args.eve:
+            return
+
+    # Agreement mode (default with Suricata)
     if not args.eve:
         print("ERROR: --eve is required for agreement mode")
         sys.exit(1)

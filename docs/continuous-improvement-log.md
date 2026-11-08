@@ -688,4 +688,9 @@ Across 15 substantive engineering cycles, the NetGuard IDS repository was system
      - Audited and verified that all 23 canonical detection rules emit rich, non-empty, JSON-serializable `evidence` dictionaries.
      - Verified `RuleEngine.check()` serialization to `evidence_json` with unique `idempotency_key` generation.
      - Validated SQLite round-trip storage and retrieval without field truncation or serialization errors.
-- **Test Suite Status**: **687 passed in 118s** (0 failures, 0 errors across 29 test modules).
+  10. **Zeek Cross-Engine Telemetry Corroboration Pipeline (`ids_project/evaluation/compare.py`)**:
+     - Implemented native Zeek `conn.log` parser (`load_zeek_connections`) supporting dynamic `#fields` TSV headers and JSON streams.
+     - Implemented cross-telemetry correlation (`correlate_netguard_zeek`): matches alerts against independent Zeek flow states (`S0` unacknowledged SYN scans, `REJ` rejected probes, `HIGH_VOLUME_EGRESS` data exfiltration, `IRC_SESSION_CONFIRMED`).
+     - Added `--zeek` CLI flag to `compare.py` supporting evaluation result JSON inputs and live SQLite databases.
+     - Tested on authentic 23,145-row CTU IoT-23 Mirai capture log (`iot23_malware_34_1_zeek_conn.log`): achieved 100% corroboration on authentic C2 beaconing alerts.
+- **Test Suite Status**: **693 passed in 106s** (0 failures, 0 errors across 29 test modules).

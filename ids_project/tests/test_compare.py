@@ -12,7 +12,9 @@ from evaluation.compare import (
     _norm_ip,
     _norm_port,
     _semantic_family,
+    correlate_netguard_zeek,
     load_suricata_alerts,
+    load_zeek_connections,
     match_alerts_agreement,
 )
 import tempfile
@@ -397,6 +399,142 @@ class TestComparisonMatching(unittest.TestCase):
 
         sur_frag = {"signature": "SURICATA IP fragment overlap attack detected"}
         self.assertEqual(_semantic_family(sur_frag), "ip_fragment_anomaly")
+
+    def test_load_zeek_connections_tsv(self):
+        sample_zeek_tsv = (
+            "#separator \\x09\n"
+            "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tservice\tduration\torig_bytes\tresp_bytes\tconn_state\thistory\torig_pkts\tlabel\n"
+            "1545403816.962094\tCrDn63WjJEmrWGjqf\t192.168.1.195\t41040\t185.244.25.235\t80\ttcp\t-\t3.139211\t0\t0\tS0\tS\t3\tBenign\n"
+            "1545403848.981338\tCDrkrSobGYxHhYfth\t192.168.1.195\t41040\t185.244.25.235\t80\ttcp\thttp\t1.477656\t149\t128252\tSF\tShADadttcfF\t94\tBenign\n"
+            "#close\t2019-03-15-14-50-49\n"
+        )
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".log") as tf:
+            tf.write(sample_zeek_tsv)
+            tf_path = tf.name
+
+        try:
+            conns = load_zeek_connections(tf_path)
+            self.assertEqual(len(conns), 2)
+            # Row 1: S0 scan attempt
+            self.assertEqual(conns[0]["src_ip"], "192.168.1.195")
+            self.assertEqual(conns[0]["dst_ip"], "185.244.25.235")
+            self.assertEqual(conns[0]["dst_port"], 80)
+            self.assertEqual(conns[0]["conn_state"], "S0")
+            self.assertEqual(conns[0]["history"], "S")
+            self.assertEqual(conns[0]["orig_pkts"], 3)
+            # Row 2: SF established HTTP
+            self.assertEqual(conns[1]["conn_state"], "SF")
+            self.assertEqual(conns[1]["service"], "http")
+            self.assertEqual(conns[1]["orig_bytes"], 149)
+            self.assertEqual(conns[1]["resp_bytes"], 128252)
+        finally:
+            if os.path.exists(tf_path):
+                os.remove(tf_path)
+
+    def test_load_zeek_connections_json(self):
+        sample_json = (
+            '{"ts": 1545403816.962, "id.orig_h": "192.168.1.195", "id.orig_p": 41040, "id.resp_h": "185.244.25.235", "id.resp_p": 80, "proto": "tcp", "conn_state": "S0", "history": "S"}\n'
+            '{"ts": 1545403820.0, "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "dst_port": 443, "proto": "tcp", "conn_state": "SF"}\n'
+        )
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".log") as tf:
+            tf.write(sample_json)
+            tf_path = tf.name
+
+        try:
+            conns = load_zeek_connections(tf_path)
+            self.assertEqual(len(conns), 2)
+            self.assertEqual(conns[0]["src_ip"], "192.168.1.195")
+            self.assertEqual(conns[0]["conn_state"], "S0")
+            self.assertEqual(conns[1]["src_ip"], "10.0.0.1")
+            self.assertEqual(conns[1]["dst_port"], 443)
+        finally:
+            if os.path.exists(tf_path):
+                os.remove(tf_path)
+
+    def test_correlate_netguard_zeek_scan_s0(self):
+        alerts = [{
+            "rule_name": "PORT_SCAN",
+            "src_ip": "192.168.1.195",
+            "dst_ip": "185.244.25.235",
+            "dst_port": 80,
+            "protocol": "TCP",
+            "timestamp": 1545403816.0,
+        }]
+        zeek_conns = [{
+            "timestamp": 1545403816.96,
+            "src_ip": "192.168.1.195",
+            "dst_ip": "185.244.25.235",
+            "dst_port": 80,
+            "protocol": "TCP",
+            "conn_state": "S0",
+            "history": "S",
+            "orig_bytes": 0,
+            "orig_pkts": 3,
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["corroborated"]), 1)
+        self.assertEqual(len(res["unmatched"]), 0)
+        self.assertEqual(res["corroborated"][0]["corroboration_type"], "UNANSWERED_SYN_SCAN")
+
+    def test_correlate_netguard_zeek_data_exfil(self):
+        alerts = [{
+            "rule_name": "DATA_EXFIL",
+            "src_ip": "10.0.0.5",
+            "dst_ip": "198.51.100.99",
+            "dst_port": 9000,
+            "protocol": "TCP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [{
+            "timestamp": 102.0,
+            "src_ip": "10.0.0.5",
+            "dst_ip": "198.51.100.99",
+            "dst_port": 9000,
+            "protocol": "TCP",
+            "conn_state": "SF",
+            "history": "ShADadFf",
+            "orig_bytes": 150000,
+            "orig_pkts": 120,
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["corroborated"]), 1)
+        self.assertEqual(res["corroborated"][0]["corroboration_type"], "HIGH_VOLUME_EGRESS")
+
+    def test_correlate_netguard_zeek_unmatched(self):
+        alerts = [{
+            "rule_name": "BRUTE_FORCE",
+            "src_ip": "10.0.0.99",
+            "dst_ip": "10.0.0.1",
+            "dst_port": 22,
+            "protocol": "TCP",
+            "timestamp": 500.0,
+        }]
+        zeek_conns = [{
+            "timestamp": 100.0,
+            "src_ip": "192.168.1.1",
+            "dst_ip": "192.168.1.2",
+            "dst_port": 80,
+            "protocol": "TCP",
+            "conn_state": "SF",
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["corroborated"]), 0)
+        self.assertEqual(len(res["unmatched"]), 1)
+        self.assertEqual(res["unmatched"][0]["reason"], "NO_MATCHING_FLOW")
+
+    def test_real_zeek_log_parsing_if_mounted(self):
+        """Parse genuine 23,145-flow CTU IoT-23 Zeek log when external drive is mounted."""
+        zeek_path = "/run/media/harshitgarg/Data1/NetGuard-datasets/verified/iot23_malware_34_1_zeek_conn.log"
+        if not (os.path.ismount("/run/media/harshitgarg/Data1") and os.path.isfile(zeek_path)):
+            self.skipTest("Zeek dataset not available on external storage.")
+
+        conns = load_zeek_connections(zeek_path, max_records=500)
+        self.assertEqual(len(conns), 500)
+        self.assertTrue(all(isinstance(c["timestamp"], float) for c in conns))
+        self.assertTrue(all(isinstance(c["src_ip"], str) for c in conns))
+        # Ensure at least some S0 scan states are captured
+        s0_count = sum(1 for c in conns if c["conn_state"] == "S0")
+        self.assertGreater(s0_count, 10)
 
 
 if __name__ == "__main__":
