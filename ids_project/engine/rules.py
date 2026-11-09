@@ -223,45 +223,81 @@ WELL_KNOWN_SERVICE_PORTS = {
 # Trusted hosts/IPs that should never be flagged by scan, SYN-flood, or ICMP rules.
 # Add your gateway, DNS server, trusted CDN IPs here.
 TRUSTED_HOSTS: set = set()  # populated from config by RuleEngine
-_TRUSTED_NETWORKS_CACHE_LOCK = threading.Lock()
-_TRUSTED_NETWORKS_CACHE_STATE: tuple[frozenset[str] | None, tuple] = (None, ())
+_TRUSTED_STATE_LOCK = threading.Lock()
+_CACHED_ENTRIES_KEY: frozenset[str] | None = None
+_CACHED_EXACT_IPS: frozenset[str] = frozenset()
+_CACHED_CIDR_NETWORKS: tuple = ()
+_IS_TRUSTED_LRU: dict[str, bool] = {}
+_IS_TRUSTED_LRU_MAX: int = 4096
+
+
+def _refresh_trusted_cache(entries: frozenset[str]):
+    global _CACHED_ENTRIES_KEY, _CACHED_EXACT_IPS, _CACHED_CIDR_NETWORKS, _IS_TRUSTED_LRU
+    exact_ips = set()
+    cidr_nets = []
+    for entry in entries:
+        if "/" in entry:
+            try:
+                cidr_nets.append(ipaddress.ip_network(entry, strict=False))
+            except (TypeError, ValueError):
+                continue
+        else:
+            exact_ips.add(entry)
+    _CACHED_EXACT_IPS = frozenset(exact_ips)
+    _CACHED_CIDR_NETWORKS = tuple(cidr_nets)
+    _CACHED_ENTRIES_KEY = entries
+    _IS_TRUSTED_LRU.clear()
 
 
 def _trusted_networks(entries: frozenset[str]) -> tuple:
     """Compile configured CIDRs once, refreshing when the trusted set changes."""
-    global _TRUSTED_NETWORKS_CACHE_STATE
-    cached_key, networks = _TRUSTED_NETWORKS_CACHE_STATE
-    if entries == cached_key:
-        return networks
-    with _TRUSTED_NETWORKS_CACHE_LOCK:
-        cached_key, networks = _TRUSTED_NETWORKS_CACHE_STATE
-        if entries != cached_key:
-            compiled = []
-            for entry in entries:
-                try:
-                    compiled.append(ipaddress.ip_network(entry, strict=False))
-                except (TypeError, ValueError):
-                    continue
-            networks = tuple(compiled)
-            _TRUSTED_NETWORKS_CACHE_STATE = (entries, networks)
-    return networks
+    global _CACHED_ENTRIES_KEY
+    if entries != _CACHED_ENTRIES_KEY:
+        with _TRUSTED_STATE_LOCK:
+            if entries != _CACHED_ENTRIES_KEY:
+                _refresh_trusted_cache(entries)
+    return _CACHED_CIDR_NETWORKS
 
 
 def _is_trusted(ip: str) -> bool:
     """Return True if ip matches any trusted host or CIDR range."""
-    if not TRUSTED_HOSTS:
+    if not TRUSTED_HOSTS or not ip:
         return False
     try:
         if ip in TRUSTED_HOSTS:
             return True
     except TypeError:
         return False
+
     entries = frozenset(TRUSTED_HOSTS)
+    if entries != _CACHED_ENTRIES_KEY:
+        with _TRUSTED_STATE_LOCK:
+            if entries != _CACHED_ENTRIES_KEY:
+                _refresh_trusted_cache(entries)
+
+    # Fast check: If ip is in the exact IP set
+    if ip in _CACHED_EXACT_IPS:
+        return True
+
+    # If no CIDR subnets are configured, no need for expensive IP parsing
+    if not _CACHED_CIDR_NETWORKS:
+        return False
+
+    # Check small LRU cache for recent CIDR evaluation
+    cached = _IS_TRUSTED_LRU.get(ip)
+    if cached is not None:
+        return cached
+
     try:
         address = ipaddress.ip_address(ip)
     except (TypeError, ValueError):
         return False
-    return any(address in network for network in _trusted_networks(entries))
+
+    matched = any(address in network for network in _CACHED_CIDR_NETWORKS)
+    if len(_IS_TRUSTED_LRU) >= _IS_TRUSTED_LRU_MAX:
+        _IS_TRUSTED_LRU.pop(next(iter(_IS_TRUSTED_LRU)))
+    _IS_TRUSTED_LRU[ip] = matched
+    return matched
 
 
 _INTERNAL_NETWORKS = (
@@ -3803,23 +3839,33 @@ class SlowPortScanRule:
                 self._horiz.popitem(last=False)
 
             # Vertical history update (deduplicate per port, prune future drift)
-            vertical = [(t, p) for t, p in self._vert.get(vkey, [])
-                        if t <= now + 5.0 and 0 <= now - t <= self.window and p != dst_port]
-            vertical.append((now, dst_port))
-            vertical.sort(key=lambda x: x[0])
-            self._vert.pop(vkey, None)
-            self._vert[vkey] = vertical
-            self._vert.move_to_end(vkey)
+            hist = self._vert.get(vkey)
+            if hist is None:
+                vertical = [(now, dst_port)]
+                self._vert[vkey] = vertical
+            else:
+                cutoff = now - self.window
+                vertical = [e for e in hist if cutoff <= e[0] <= now + 5.0 and e[1] != dst_port]
+                vertical.append((now, dst_port))
+                if len(vertical) > 1 and vertical[-1][0] < vertical[-2][0]:
+                    vertical.sort(key=lambda x: x[0])
+                self._vert[vkey] = vertical
+                self._vert.move_to_end(vkey)
             distinct_ports = len(vertical)
 
             # Horizontal history update (deduplicate per host, prune future drift)
-            horizontal = [(t, ip) for t, ip in self._horiz.get(hkey, [])
-                          if t <= now + 5.0 and 0 <= now - t <= self.window and ip != dst_ip]
-            horizontal.append((now, dst_ip))
-            horizontal.sort(key=lambda x: x[0])
-            self._horiz.pop(hkey, None)
-            self._horiz[hkey] = horizontal
-            self._horiz.move_to_end(hkey)
+            h_hist = self._horiz.get(hkey)
+            if h_hist is None:
+                horizontal = [(now, dst_ip)]
+                self._horiz[hkey] = horizontal
+            else:
+                cutoff = now - self.window
+                horizontal = [e for e in h_hist if cutoff <= e[0] <= now + 5.0 and e[1] != dst_ip]
+                horizontal.append((now, dst_ip))
+                if len(horizontal) > 1 and horizontal[-1][0] < horizontal[-2][0]:
+                    horizontal.sort(key=lambda x: x[0])
+                self._horiz[hkey] = horizontal
+                self._horiz.move_to_end(hkey)
             distinct_hosts = len(horizontal)
 
             vert_fired  = distinct_ports >= self.threshold
@@ -6880,6 +6926,33 @@ class RuleEngine:
             ),
         ]
 
+        # Suricata-inspired protocol-aware candidate rule dispatch:
+        # Pre-group rules by required protocol to avoid checking irrelevant rules.
+        # Unknown or unclassified protocols fall back to evaluating all 23 rules.
+        self._rules_by_proto = {
+            "TCP": [r for r in self.rules if isinstance(r, (
+                BlocklistRule, TcpFlagAnomalyRule, PortScanRule, TcpStealthScanRule,
+                SynFloodRule, DistributedSynFloodRule, PayloadRule, DnsRule,
+                BruteForceRule, SlowPortScanRule, DataExfiltrationRule, TlsAnomalyRule,
+                CleartextHttpOnTlsPortRule, TcpZeroWindowRule, NonDnsTrafficOnDnsPortRule,
+                IpFragmentAnomalyRule, IrcC2BeaconingRule
+            ))],
+            "UDP": [r for r in self.rules if isinstance(r, (
+                BlocklistRule, UdpScanRule, UdpFloodRule, PayloadRule,
+                DnsRule, DataExfiltrationRule, NonDnsTrafficOnDnsPortRule,
+                IpFragmentAnomalyRule
+            ))],
+            "ICMP": [r for r in self.rules if isinstance(r, (
+                BlocklistRule, IcmpSweepRule, IcmpFloodRule, PayloadRule,
+                DataExfiltrationRule, IcmpTunnelRule, IpFragmentAnomalyRule
+            ))],
+            "ICMPV6": [r for r in self.rules if isinstance(r, (
+                BlocklistRule, IcmpSweepRule, IcmpFloodRule, PayloadRule,
+                DataExfiltrationRule, IcmpTunnelRule, IpFragmentAnomalyRule
+            ))],
+            "ARP": [r for r in self.rules if isinstance(r, (ArpSpoofRule,))],
+        }
+
         # Bounded alert queue + durable disk spool backup
         alert_q_max = getattr(cfg, "ALERT_QUEUE_MAXSIZE", 1000)
         self._alert_queue: queue.Queue = queue.Queue(maxsize=alert_q_max)
@@ -7041,60 +7114,76 @@ class RuleEngine:
                     self._alert_queue.task_done()
                     break
 
-                if conn is not None and self._spool.count() > 0:
-                    _drain_spool()
+                # Batch drain up to 50 pending alerts to minimize queue wait and disk sync churn
+                batch = [(sentinel, data)]
+                while len(batch) < 50:
+                    try:
+                        s, d = self._alert_queue.get_nowait()
+                        batch.append((s, d))
+                    except _queue.Empty:
+                        break
 
-                if conn is not None:
-                    # Attempt write with retry
-                    write_ok = False
-                    for attempt in range(2):
-                        try:
-                            self._write_alert(conn, data)
-                            self._stats["alert_writes"] += 1
-                            write_ok = True
-                            break
-                        except Exception as write_err:
-                            logger.warning(
-                                f"Alert write transient failure (attempt {attempt+1}/2): {write_err}"
-                            )
+                stop_encountered = False
+                for s, item_data in batch:
+                    if s == "stop":
+                        stop_encountered = True
+                        self._alert_queue.task_done()
+                        break
+
+                    if conn is not None and self._spool.count() > 0:
+                        _drain_spool()
+
+                    if conn is not None:
+                        write_ok = False
+                        for attempt in range(2):
                             try:
-                                conn.close()
-                            except Exception:
-                                pass
-                            conn = None
-                            if attempt == 0:
-                                if _try_connect():
-                                    continue
-                            break
+                                self._write_alert(conn, item_data)
+                                self._stats["alert_writes"] += 1
+                                write_ok = True
+                                break
+                            except Exception as write_err:
+                                logger.warning(
+                                    f"Alert write transient failure (attempt {attempt+1}/2): {write_err}"
+                                )
+                                try:
+                                    conn.close()
+                                except Exception:
+                                    pass
+                                conn = None
+                                if attempt == 0:
+                                    if _try_connect():
+                                        continue
+                                break
 
-                    if not write_ok:
-                        # Write failed even after retry/reconnect -> spool to disk
-                        spooled = self._spool.append(data)
+                        if not write_ok:
+                            spooled = self._spool.append(item_data)
+                            if spooled:
+                                self._stats["alerts_spooled"] = self._spool.count()
+                                logger.warning(
+                                    f"Alert write failed after retry — spooled to disk: rule={item_data.get('rule_name')}"
+                                )
+                            else:
+                                self._stats["alerts_dropped"] += 1
+                                logger.error(
+                                    f"Alert spool saturated/failed — alert dropped: rule={item_data.get('rule_name')} (drop count: {self._stats['alerts_dropped']})"
+                                )
+                    else:
+                        spooled = self._spool.append(item_data)
                         if spooled:
                             self._stats["alerts_spooled"] = self._spool.count()
                             logger.warning(
-                                f"Alert write failed after retry — spooled to disk: rule={data.get('rule_name')}"
+                                f"DB unavailable — alert spooled to disk: rule={item_data.get('rule_name')}"
                             )
                         else:
                             self._stats["alerts_dropped"] += 1
                             logger.error(
-                                f"Alert spool saturated/failed — alert dropped: rule={data.get('rule_name')} (drop count: {self._stats['alerts_dropped']})"
+                                f"DB unavailable & spool saturated — alert dropped: rule={item_data.get('rule_name')} (drop count: {self._stats['alerts_dropped']})"
                             )
-                else:
-                    # DB is currently disconnected -> buffer to durable spool
-                    spooled = self._spool.append(data)
-                    if spooled:
-                        self._stats["alerts_spooled"] = self._spool.count()
-                        logger.warning(
-                            f"DB unavailable — alert spooled to disk: rule={data.get('rule_name')}"
-                        )
-                    else:
-                        self._stats["alerts_dropped"] += 1
-                        logger.error(
-                            f"DB unavailable & spool saturated — alert dropped: rule={data.get('rule_name')} (drop count: {self._stats['alerts_dropped']})"
-                        )
 
-                self._alert_queue.task_done()
+                    self._alert_queue.task_done()
+
+                if stop_encountered:
+                    break
             except _queue.Empty:
                 if self._stop_event.is_set():
                     break
@@ -7249,8 +7338,18 @@ class RuleEngine:
                         self._seen_devices.pop(dev_key, None)
                         self._seen_devices[dev_key] = now_wall
 
-        # Run ALL rules — no early exit
-        for rule in self.rules:
+        # Determine protocol-aware candidate rules (fall back to ALL rules for safety)
+        rec_type = record.get("type")
+        if rec_type == "ARP":
+            target_rules = self._rules_by_proto.get("ARP", self.rules)
+        elif rec_type == "IP":
+            proto = record.get("protocol")
+            target_rules = self._rules_by_proto.get(proto, self.rules)
+        else:
+            target_rules = self.rules
+
+        # Run candidate rules — no early exit
+        for rule in target_rules:
             try:
                 alert = rule.check(record)
                 if alert:

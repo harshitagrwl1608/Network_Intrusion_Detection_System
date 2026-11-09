@@ -35,6 +35,8 @@ import logging
 import sys
 import os
 import hashlib
+import struct
+import socket
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -611,7 +613,380 @@ def _replay_text_log(log_path: str, rule_engine):
     return {"processed": processed, "total": processed + skipped}
 
 
-def replay_pcap(pcap_path: str, rule_engine):
+def _parse_dns_query(payload: bytes):
+    """
+    Fast binary extraction of (dns_query, dns_qtype, dns_id, trailing_payload)
+    from DNS header and first Question record.
+    """
+    if len(payload) < 12:
+        return None, None, None, payload
+    try:
+        dns_id, flags, qdcount = struct.unpack("!HHH", payload[:6])
+        qr = (flags >> 15) & 0x01
+        if qr != 0 or qdcount == 0:
+            return None, None, None, payload
+        parts = []
+        idx = 12
+        n = len(payload)
+        visited = 0
+        while idx < n and visited < 50:
+            l = payload[idx]
+            if l == 0:
+                idx += 1
+                break
+            if (l & 0xC0) == 0xC0:
+                if idx + 2 > n:
+                    break
+                ptr = ((l & 0x3F) << 8) | payload[idx + 1]
+                idx += 2
+                p_parts = []
+                p_idx = ptr
+                p_vis = 0
+                while p_idx < n and p_vis < 20:
+                    pl = payload[p_idx]
+                    if pl == 0:
+                        break
+                    p_idx += 1
+                    if p_idx + pl > n:
+                        break
+                    p_parts.append(payload[p_idx : p_idx + pl].decode("utf-8", errors="replace"))
+                    p_idx += pl
+                    p_vis += 1
+                if p_parts:
+                    parts.append(".".join(p_parts))
+                break
+            idx += 1
+            if idx + l > n:
+                break
+            parts.append(payload[idx : idx + l].decode("utf-8", errors="replace"))
+            idx += l
+            visited += 1
+
+        qname = (".".join(parts) + ".") if parts else None
+        qtype = None
+        if idx + 2 <= n:
+            qtype = struct.unpack("!H", payload[idx : idx + 2])[0]
+            idx += 2
+            if idx + 2 <= n:
+                idx += 2  # skip qclass
+        trailing = payload[idx:] if idx < n else b""
+        return qname, qtype, dns_id, trailing
+    except Exception:
+        return None, None, None, payload
+
+
+def _fast_extract(pkt_bytes: bytes, capture_ts: float | None = None, linktype: int = 1) -> dict | None:
+    """
+    High-speed binary packet extractor using struct unpacking.
+    Returns normalized record dict with 100% field parity with Scapy _extract(),
+    or None if the packet is non-IP/non-ARP or cannot be parsed.
+    """
+    now = time.time()
+    event_ts = float(capture_ts) if capture_ts is not None else now
+    rec = {
+        "event_timestamp": event_ts,
+        "processing_timestamp": now,
+        "timestamp": event_ts,
+    }
+    n = len(pkt_bytes)
+    offset = 0
+    src_mac = None
+    ethertype = None
+
+    if linktype == 1:  # LINKTYPE_ETHERNET
+        if n < 14:
+            return None
+        ethertype = struct.unpack("!H", pkt_bytes[12:14])[0]
+        offset = 14
+        if ethertype == 0x8100:  # 802.1Q VLAN
+            if n < 18:
+                return None
+            ethertype = struct.unpack("!H", pkt_bytes[16:18])[0]
+            offset = 18
+        src_mac = ":".join(f"{b:02x}" for b in pkt_bytes[6:12])
+    elif linktype in (12, 228):  # RAW / IPv4
+        ethertype = 0x0800
+        offset = 0
+    elif linktype == 229:  # IPv6
+        ethertype = 0x86dd
+        offset = 0
+    else:
+        return None
+
+    if ethertype == 0x0806:  # ARP
+        if n < offset + 28:
+            return None
+        hw_type, proto_type, hw_len, proto_len, opcode = struct.unpack("!HHBBH", pkt_bytes[offset : offset + 8])
+        if hw_len == 6 and proto_len == 4:
+            hwsrc = ":".join(f"{b:02x}" for b in pkt_bytes[offset + 8 : offset + 14])
+            psrc = socket.inet_ntoa(pkt_bytes[offset + 14 : offset + 18])
+            pdst = socket.inet_ntoa(pkt_bytes[offset + 24 : offset + 28])
+            rec.update({
+                "type": "ARP",
+                "src_ip": psrc,
+                "src_mac": hwsrc,
+                "dst_ip": pdst,
+                "dst_port": None,
+                "src_port": None,
+                "protocol": "ARP",
+                "syn_flag": False,
+                "initial_syn": False,
+                "icmp_type": None,
+                "icmp_code": None,
+                "ip_len": None,
+                "payload": b"",
+                "payload_len": 0,
+                "dns_query": None,
+            })
+            return rec
+        return None
+
+    if ethertype in (0x0800, 0x86dd):
+        is_ipv6 = (ethertype == 0x86dd)
+        ip_fragment_offset = 0
+        ip_more_fragments = False
+        ip_fragmented = False
+        ip_fragment_id = None
+        ip_fragment_data_len = 0
+        ip_fragment_data_digest = None
+
+        if not is_ipv6:
+            if n < offset + 20:
+                return None
+            b0 = pkt_bytes[offset]
+            if (b0 >> 4) != 4:
+                return None
+            ihl = (b0 & 0x0F) * 4
+            if ihl < 20 or n < offset + ihl:
+                return None
+            ip_len, ip_id, flags_frag, ttl, proto_num = struct.unpack("!HHHBB", pkt_bytes[offset + 2 : offset + 10])
+            src_ip = socket.inet_ntoa(pkt_bytes[offset + 12 : offset + 16])
+            dst_ip = socket.inet_ntoa(pkt_bytes[offset + 16 : offset + 20])
+            ip_fragment_offset = (flags_frag & 0x1FFF) * 8
+            ip_more_fragments = bool(flags_frag & 0x2000)
+            ip_fragmented = bool(ip_fragment_offset or ip_more_fragments)
+            ip_fragment_id = ip_id if ip_fragmented else None
+
+            frag_end = min(n, offset + ip_len) if ip_len else n
+            frag_data = pkt_bytes[offset + ihl : frag_end]
+            ip_fragment_data_len = len(frag_data) if ip_fragmented else 0
+            ip_fragment_data_digest = (
+                hashlib.blake2s(frag_data, digest_size=16).digest() if (ip_fragmented and frag_data) else None
+            )
+            to = offset + ihl
+        else:
+            if n < offset + 40:
+                return None
+            plen, next_hdr = struct.unpack("!HB", pkt_bytes[offset + 4 : offset + 7])
+            src_ip = socket.inet_ntop(socket.AF_INET6, pkt_bytes[offset + 8 : offset + 24])
+            dst_ip = socket.inet_ntop(socket.AF_INET6, pkt_bytes[offset + 24 : offset + 40])
+            ip_len = plen + 40
+            to = offset + 40
+            proto_num = next_hdr
+            if proto_num == 44:  # IPv6 Fragment
+                if n < to + 8:
+                    return None
+                nh, res, frag_off_m, frag_id = struct.unpack("!BBHI", pkt_bytes[to : to + 8])
+                proto_num = nh
+                ip_fragment_id = frag_id
+                ip_fragment_offset = (frag_off_m >> 3) * 8
+                ip_more_fragments = bool(frag_off_m & 1)
+                ip_fragmented = True
+                to += 8
+                frag_data = pkt_bytes[to : min(n, offset + ip_len)]
+                ip_fragment_data_len = len(frag_data)
+                ip_fragment_data_digest = (
+                    hashlib.blake2s(frag_data, digest_size=16).digest() if frag_data else None
+                )
+
+        proto_map = {6: "TCP", 17: "UDP", 1: "ICMP", 58: "ICMPV6"}
+        proto = proto_map.get(proto_num, str(proto_num))
+
+        dst_port = None
+        src_port = None
+        syn_flag = False
+        initial_syn = False
+        tcp_seq = None
+        tcp_ack = None
+        tcp_flags = None
+        tcp_window = None
+        tcp_payload_seq = None
+        payload = b""
+        tls_payload = b""
+        payload_len = 0
+        tcp_payload_digest = None
+        dns_query = None
+        dns_qtype = None
+        dns_id = None
+        icmp_type = None
+        icmp_code = None
+
+        if proto_num == 6 and ip_fragment_offset == 0:
+            if n >= to + 20:
+                src_port, dst_port, tcp_seq, tcp_ack, data_off_res, tcp_flags, tcp_window = struct.unpack(
+                    "!HHIIBBH", pkt_bytes[to : to + 16]
+                )
+                tcp_header_len = ((data_off_res >> 4) & 0x0F) * 4
+                if tcp_header_len >= 20 and n >= to + tcp_header_len:
+                    syn_flag = bool(tcp_flags & 0x02)
+                    initial_syn = bool(tcp_flags & 0x02) and not bool(tcp_flags & 0x10)
+                    tcp_payload_seq = ((tcp_seq + int(syn_flag)) & 0xFFFFFFFF) if tcp_seq is not None else None
+                    pay_start = to + tcp_header_len
+                    pay_end = min(n, offset + ip_len) if ip_len else n
+                    tcp_payload = pkt_bytes[pay_start:pay_end] if pay_end > pay_start else b""
+                    payload_len = len(tcp_payload)
+                    payload = tcp_payload[:_PAYLOAD_MAX_BYTES]
+                    if dst_port in _TLS_INSPECTION_PORTS:
+                        tls_payload = tcp_payload[:_TLS_INSPECTION_MAX_BYTES]
+                    if tcp_payload:
+                        tcp_payload_digest = hashlib.blake2s(tcp_payload, digest_size=16).digest()
+                    if (dst_port == 53 or src_port == 53) and len(tcp_payload) >= 12:
+                        qname, qtype, qid, _ = _parse_dns_query(tcp_payload)
+                        if not qname and len(tcp_payload) >= 14:
+                            qname, qtype, qid, _ = _parse_dns_query(tcp_payload[2:])
+                        if qname:
+                            dns_query = qname
+                            dns_qtype = qtype
+                            dns_id = qid
+        elif proto_num == 17 and ip_fragment_offset == 0:
+            if n >= to + 8:
+                src_port, dst_port, udp_len, udp_csum = struct.unpack("!HHHH", pkt_bytes[to : to + 8])
+                pay_start = to + 8
+                pay_end = min(n, to + udp_len) if udp_len >= 8 else n
+                udp_payload = pkt_bytes[pay_start:pay_end] if pay_end > pay_start else b""
+                payload_len = len(udp_payload)
+                if dst_port == 53 or src_port == 53:
+                    qname, qtype, qid, trailing = _parse_dns_query(udp_payload)
+                    if qname:
+                        dns_query = qname
+                        dns_qtype = qtype
+                        dns_id = qid
+                        payload = trailing[:_PAYLOAD_MAX_BYTES]
+                    else:
+                        payload = udp_payload[:_PAYLOAD_MAX_BYTES]
+                else:
+                    payload = udp_payload[:_PAYLOAD_MAX_BYTES]
+        elif proto_num in (1, 58):
+            if n >= to + 2:
+                icmp_type, icmp_code = struct.unpack("!BB", pkt_bytes[to : to + 2])
+                pay_start = to + 8
+                pay_end = min(n, offset + ip_len) if ip_len else n
+                icmp_payload = pkt_bytes[pay_start:pay_end] if pay_end > pay_start else b""
+                payload_len = len(icmp_payload)
+                payload = icmp_payload[:_PAYLOAD_MAX_BYTES]
+
+        if ip_fragment_offset > 0:
+            payload_len = len(frag_data)
+            payload = frag_data[:_PAYLOAD_MAX_BYTES]
+
+        record = {
+            "event_timestamp": event_ts,
+            "processing_timestamp": now,
+            "timestamp": event_ts,
+            "type": "IP",
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "src_mac": src_mac,
+            "dst_port": dst_port,
+            "src_port": src_port,
+            "protocol": proto,
+            "syn_flag": syn_flag,
+            "initial_syn": initial_syn,
+            "tcp_seq": tcp_seq,
+            "tcp_ack": tcp_ack,
+            "tcp_flags": tcp_flags,
+            "tcp_window": tcp_window,
+            "tcp_payload_seq": tcp_payload_seq,
+            "icmp_type": icmp_type,
+            "icmp_code": icmp_code,
+            "ip_len": ip_len,
+            "ip_fragmented": ip_fragmented,
+            "ip_fragment_id": ip_fragment_id,
+            "ip_fragment_offset": ip_fragment_offset,
+            "ip_more_fragments": ip_more_fragments,
+            "ip_fragment_data_len": ip_fragment_data_len,
+            "ip_fragment_data_digest": ip_fragment_data_digest,
+            "payload": payload,
+            "tls_payload": tls_payload,
+            "payload_len": payload_len,
+            "tcp_payload_digest": tcp_payload_digest,
+            "dns_query": dns_query,
+            "dns_qtype": dns_qtype,
+            "dns_id": dns_id,
+        }
+        return record
+
+    return None
+
+
+def _replay_fast_pcap(pcap_path: str, rule_engine) -> dict | None:
+    """
+    High-speed binary PCAP replay using struct unpacking.
+    Returns {"processed": int, "total": int} on success, or None to fall back to Scapy.
+    """
+    try:
+        with open(pcap_path, "rb") as f:
+            gh = f.read(24)
+            if len(gh) < 24:
+                return None
+            magic = gh[:4]
+            if magic in (b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"):
+                endian = ">"
+            elif magic in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"):
+                endian = "<"
+            else:
+                return None
+
+            is_nano = magic in (b"\xa1\xb2\x3c\x4d", b"\x4d\x3c\xb2\xa1")
+            network = struct.unpack(endian + "I", gh[20:24])[0]
+            if network not in (1, 12, 228, 229):
+                return None
+
+            hdr_fmt = endian + "IIII"
+            processed = 0
+            total = 0
+            logger.info(f"Replaying binary pcap via fast binary parser: {pcap_path}")
+
+            while True:
+                hdr_bytes = f.read(16)
+                if len(hdr_bytes) < 16:
+                    break
+                ts_sec, ts_usec, incl_len, orig_len = struct.unpack(hdr_fmt, hdr_bytes)
+                pkt_bytes = f.read(incl_len)
+                if len(pkt_bytes) < incl_len:
+                    break
+                total += 1
+                capture_ts = ts_sec + (ts_usec / 1e9 if is_nano else ts_usec / 1e6)
+                record = _fast_extract(pkt_bytes, capture_ts, linktype=network)
+                if record is not None and record.get("ip_fragmented") and SCAPY_AVAILABLE:
+                    try:
+                        pkt = Ether(pkt_bytes) if network == 1 else IP(pkt_bytes)
+                        scapy_rec = _extract(pkt, capture_ts=capture_ts)
+                        if scapy_rec:
+                            record = scapy_rec
+                    except Exception:
+                        pass
+                if record is not None:
+                    rule_engine.check(record)
+                    processed += 1
+                elif SCAPY_AVAILABLE:
+                    try:
+                        pkt = Ether(pkt_bytes) if network == 1 else IP(pkt_bytes)
+                        record = _extract(pkt, capture_ts=capture_ts)
+                        if record:
+                            rule_engine.check(record)
+                            processed += 1
+                    except Exception:
+                        pass
+
+            logger.info(f"Fast replay complete: {processed}/{total} packets processed")
+            return {"processed": processed, "total": total}
+    except Exception as exc:
+        logger.warning(f"Fast pcap reader exception ({exc}); falling back to Scapy")
+        return None
+
+
+def replay_pcap(pcap_path: str, rule_engine, use_fast_parser: bool | None = None):
     """
     Replay a saved .pcap or tcpdump text file through the rule engine.
     Automatically detects whether file is binary PCAP or ASCII tcpdump log.
@@ -633,22 +1008,34 @@ def replay_pcap(pcap_path: str, rule_engine):
         # File is ASCII text (e.g. created with `tcpdump > file.pcap` or `tcpdump > file.log`)
         return _replay_text_log(pcap_path, rule_engine)
 
+    # Determine fast parser usage
+    if use_fast_parser is None:
+        try:
+            import config as _cfg
+            use_fast = getattr(_cfg, "USE_FAST_PARSER", True)
+        except Exception:
+            use_fast = True
+        if os.environ.get("NETGUARD_FAST_PARSER", "").lower() in ("0", "false", "no"):
+            use_fast = False
+    else:
+        use_fast = use_fast_parser
+
+    if use_fast:
+        fast_res = _replay_fast_pcap(pcap_path, rule_engine)
+        if fast_res is not None:
+            return fast_res
+
     if not SCAPY_AVAILABLE:
         raise RuntimeError("Scapy is not installed")
 
     from scapy.utils import PcapReader
-    logger.info(f"Replaying binary pcap: {pcap_path}")
+    logger.info(f"Replaying binary pcap via Scapy: {pcap_path}")
     processed = 0
     total = 0
-    # PcapReader yields one packet at a time. rdpcap() materializes the entire
-    # capture in memory, which can require several GB for large real-world
-    # traces even when the PCAP itself is only tens of MB.
     reader = PcapReader(pcap_path)
     try:
         for pkt in reader:
             total += 1
-            # Pass pkt.time explicitly so that sliding-window rules use the
-            # original capture timestamps, making replay deterministic.
             try:
                 capture_ts = float(pkt.time)
             except Exception:
