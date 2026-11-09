@@ -197,6 +197,8 @@ class TestEvaluationPipeline(unittest.TestCase):
         labels = [
             {
                 "label_id": "lbl-1",
+                "provenance": "Synthetic Benchmark",
+                "granularity": "flow",
                 "expected_rule": "SYN_FLOOD",
                 "expected_family": "syn_flood",
                 "flow": {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"},
@@ -221,6 +223,8 @@ class TestEvaluationPipeline(unittest.TestCase):
         labels = [
             {
                 "label_id": "lbl-1",
+                "provenance": "Synthetic Benchmark",
+                "granularity": "flow",
                 "expected_rule": "DATA_EXFIL",
                 "flow": {"src_ip": "192.168.1.5", "dst_ip": "203.0.113.1", "src_port": 45000, "dst_port": 443, "protocol": "TCP"},
             }
@@ -241,6 +245,8 @@ class TestEvaluationPipeline(unittest.TestCase):
         labels = [
             {
                 "label_id": "lbl-1",
+                "provenance": "Synthetic Benchmark",
+                "granularity": "flow",
                 "expected_rule": "SYN_FLOOD",
                 "flow": {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"},
             }
@@ -322,6 +328,8 @@ class TestEvaluationPipeline(unittest.TestCase):
         labels = [
             {
                 "label_id": "lbl-invalid-no-rule",
+                "provenance": "Synthetic Benchmark",
+                "granularity": "flow",
                 "flow": {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"},
                 "time_window": {"start": 10.0, "end": 20.0},
             }
@@ -340,6 +348,8 @@ class TestEvaluationPipeline(unittest.TestCase):
         labels_inverted = [
             {
                 "label_id": "lbl-inverted-win",
+                "provenance": "Synthetic Benchmark",
+                "granularity": "flow",
                 "expected_rule": "SYN_FLOOD",
                 "time_window": {"start": 100.0, "end": 50.0},
             }
@@ -348,6 +358,8 @@ class TestEvaluationPipeline(unittest.TestCase):
         labels_non_numeric = [
             {
                 "label_id": "lbl-bad-ts",
+                "provenance": "Synthetic Benchmark",
+                "granularity": "flow",
                 "expected_rule": "SYN_FLOOD",
                 "time_window": {"start": "not_a_number", "end": 100.0},
             }
@@ -367,6 +379,8 @@ class TestEvaluationPipeline(unittest.TestCase):
         labels = [
             {
                 "label_id": "lbl-rev",
+                "provenance": "Synthetic Benchmark",
+                "granularity": "flow",
                 "expected_rule": "PORT_SCAN",
                 "flow": {"src_ip": "192.168.1.100", "dst_ip": "10.0.0.1", "src_port": 49152, "dst_port": 80, "protocol": "TCP"},
                 "time_window": {"start": 10.0, "end": 20.0},
@@ -475,6 +489,78 @@ class TestEvaluationPipeline(unittest.TestCase):
         self.assertIsNotNone(m_bad)
         downloaded = 500
         self.assertNotEqual(int(m_bad.group(1)), downloaded)
+
+    def test_evaluate_ground_truth_labels_rejects_rule_only_without_constraints(self):
+        labels = [
+            {
+                "label_id": "lbl-rule-only",
+                "provenance": "Synthetic Benchmark",
+                "granularity": "flow",
+                "expected_rule": "PORT_SCAN",
+            }
+        ]
+        alerts = [{"rule_name": "PORT_SCAN", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"}]
+        res = evaluate_ground_truth_labels(labels, alerts)
+        self.assertEqual(res["true_positives"], 0)
+        self.assertEqual(len(res["unassessed_labels"]), 1)
+        self.assertIn("Insufficient matching constraints", res["unassessed_labels"][0].get("rejection_reason"))
+
+    def test_evaluate_ground_truth_labels_rejects_incomplete_flow_tuple(self):
+        labels = [
+            {
+                "label_id": "lbl-bad-flow",
+                "provenance": "Synthetic Benchmark",
+                "granularity": "flow",
+                "expected_rule": "SYN_FLOOD",
+                "flow": {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000},
+            }
+        ]
+        alerts = [{"rule_name": "SYN_FLOOD", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"}]
+        res = evaluate_ground_truth_labels(labels, alerts)
+        self.assertEqual(res["true_positives"], 0)
+        self.assertEqual(len(res["unassessed_labels"]), 1)
+        self.assertIn("Incomplete flow tuple", res["unassessed_labels"][0].get("rejection_reason"))
+
+    def test_evaluate_ground_truth_labels_rejects_missing_provenance(self):
+        labels = [
+            {
+                "label_id": "lbl-no-prov",
+                "granularity": "flow",
+                "expected_rule": "SYN_FLOOD",
+                "flow": {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"},
+            }
+        ]
+        alerts = [{"rule_name": "SYN_FLOOD", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"}]
+        res = evaluate_ground_truth_labels(labels, alerts)
+        self.assertEqual(res["true_positives"], 0)
+        self.assertEqual(len(res["unassessed_labels"]), 1)
+        self.assertIn("Missing label provenance", res["unassessed_labels"][0].get("rejection_reason"))
+
+    def test_evaluate_ground_truth_labels_rejects_unsupported_granularity(self):
+        labels = [
+            {
+                "label_id": "lbl-bad-gran",
+                "provenance": "Synthetic Benchmark",
+                "granularity": "unsupported_level",
+                "expected_rule": "SYN_FLOOD",
+                "flow": {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"},
+            }
+        ]
+        alerts = [{"rule_name": "SYN_FLOOD", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 80, "protocol": "TCP"}]
+        res = evaluate_ground_truth_labels(labels, alerts)
+        self.assertEqual(res["true_positives"], 0)
+        self.assertEqual(len(res["unassessed_labels"]), 1)
+        self.assertIn("Missing or unsupported label granularity", res["unassessed_labels"][0].get("rejection_reason"))
+
+    def test_cache_key_includes_all_seven_source_files(self):
+        import evaluation.pipeline as p_module
+        expected_files = {
+            "rules.py", "config.py", "sniffer.py", "replay.py", "pipeline.py", "db.py", "compare.py"
+        }
+        tracked_basenames = {os.path.basename(p) for p in p_module._CACHE_SOURCE_FILES}
+        self.assertTrue(expected_files.issubset(tracked_basenames), f"Expected all 7 files, got {tracked_basenames}")
+        for path in p_module._CACHE_SOURCE_FILES:
+            self.assertTrue(os.path.isfile(path), f"Engine source file {path} must exist on disk")
 
 
 if __name__ == "__main__":

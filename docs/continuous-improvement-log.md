@@ -715,3 +715,42 @@ Across 15 substantive engineering cycles, the NetGuard IDS repository was system
        - Preserved strict path traversal defenses rejecting access outside allowed roots (e.g. `/etc/passwd`, `/etc/shadow`).
        - Added `test_pcap_mcp_server_external_dataset_access` in `ids_project/tests/test_workbench.py` (26 passed).
 - **Test Suite Status**: **704 passed** across 30 test modules (0 failures, 0 skipped, 0 disabled).
+
+---
+
+## 2-Hour Autonomous Integrity Sprint (2026-11-08 — 2026-11-09)
+**Holdout Security, Ground-Truth Reliability & Detection-State Correctness**
+
+- **Sprint Goal**: Address post-sprint findings in holdout validation pipeline, ground-truth label matching, evaluation cache fingerprinting, IP fragmentation duplicate handling, and IRC C2 connection tracking without adding redundant rules.
+- **Rules Verified**: 23 canonical detection rules (`ALL_RULE_CLASSES`). Zero dummy or unmaintainable rules.
+- **Key Enhancements**:
+  1. **P0 — Independent Holdout Pipeline Hardening & Quarantine Security (`holdout_pipeline.py`)**:
+     - **Candidate ID Allowlisting**: Enforced strict regex `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` rejecting path traversal (`..`, `/`, `\`), null bytes (`\x00`), and whitespace.
+     - **Boundary Containment**: Enforced `check_quarantine_path_containment` ensuring all candidate files remain within the authorized quarantine root.
+     - **Quarantine Permissions & Structural Integrity**: `verify_holdout_quarantine` strictly requires read-only permissions (`0o444`), magic bytes, structural integrity validation via `capinfos` or `tshark`, and exact 64-char SHA-256 match.
+     - **Exclusive Creation & Overwrite Prevention**: Uses exclusive file creation (`os.O_CREAT | os.O_EXCL | os.O_WRONLY`) to prevent overwriting existing quarantine PCAPs or metadata manifests.
+     - **Development Corpus Collision Rejection**: Automatically hashes and checks known development captures (`data/` and `/verified/`), rejecting duplicate re-registration as unseen holdouts.
+     - **Observation vs Ground-Truth Separation**: Separated descriptive capture-level target-rule firing from validated ground-truth evaluation, sealing reports with `tamper_evident: True` and permissions `0o444`.
+  2. **P1 — Structured Ground-Truth Matcher Hardening (`pipeline.py`)**:
+     - Required structured metadata with explicit `provenance` and supported `granularity` (`packet`, `flow`, `event`, `scenario`, `time-window`).
+     - Rejected rule-only labels lacking independent flow, event, or time-window constraints.
+     - Enforced complete 5-tuple specification for flow labels (`src_ip`, `dst_ip`, `src_port`, `dst_port`, `protocol`).
+     - Validated timestamp windows, rejecting inverted intervals (`start > end`), non-numeric timestamps, or malformed alert timestamps.
+     - Preserved bijective matching and categorized unassessed alerts under partial coverage.
+  3. **P1 — Evaluation Cache Key Hardening (`pipeline.py`)**:
+     - Bumped evaluator version to `_EVALUATOR_VERSION = "1.4.0"`.
+     - Expanded cache key fingerprinting across all 7 core engine source files (`rules.py`, `config.py`, `sniffer.py`, `replay.py`, `pipeline.py`, `db.py`, `compare.py`), effective configurations, rule versions, blocklist, label files/inline labels, and metadata, failing closed if any hash cannot be computed.
+  4. **P1 — IP Fragmentation Anomaly Correctness (`IpFragmentAnomalyRule` v1.2)**:
+     - Duplicate fragment suppression: exact identical retransmissions (same offset, len, digest) do NOT append to tracked list, do NOT trigger alerts, and do NOT consume range capacity.
+     - Preserved `CONFLICTING_FRAGMENT_DUPLICATE` anomaly detection on conflicting digests.
+     - Fixed global capacity eviction via `_evict_oldest_flow(preserve_key=flow_key)` ensuring the current active flow is never an untracked ghost object, maintaining strict invariant `_total_ranges == sum(len(f["fragments"]))`.
+  5. **P1 — IRC C2 Beaconing Hardening (`IrcC2BeaconingRule` v1.2)**:
+     - Implemented multi-entry sliding table of recent SYN tuples (`recent_syns: OrderedDict[(src_port, seq) -> ts]`, 64 entries, 60s expiration) for interleaved connection deduplication across threads and ports.
+     - Implemented context-aware regex word boundary matching `_BOTNET_INDICATORS_RE` protecting benign vocabulary (`robot`, `bottleneck`, `botany`, `bother`, `bottle`, `bottom`) from false C2 classification.
+     - Cleanly separated `IRC_PROTOCOL_OBSERVED` (heuristic, medium severity) from `LIKELY_IRC_C2` (confirmed, high severity).
+  6. **P2 — Acquisition Budget & Resumption Safeguards (`pipeline.py`)**:
+     - Added `/dev/sdb1` mount verification before directory creation in `load_cumulative_budget`.
+     - Reconciled existing `.part` files on startup.
+     - Closed connection, cleared partial file, and reissued fresh HTTP request from byte 0 when resumed server response has invalid `Content-Range`.
+- **Regression Test Suite**: **721 passed** across 30 test modules in 137s (0 failures, 0 skipped, 0 disabled).
+- **Synthetic Ground-Truth Evaluation**: **42/42 TP, 0 FN, 0 FP (100.0% Precision, 100.0% Recall, 100.0% F1)**.

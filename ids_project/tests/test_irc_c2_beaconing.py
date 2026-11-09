@@ -459,3 +459,102 @@ class TestScapyNormalizerAndIntegerFlags:
         # Invalid timestamp
         assert rule.check({"protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "1.2.3.4", "dst_port": 6667, "timestamp": -50.0}) is None
         assert rule.check({"protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "1.2.3.4", "dst_port": 6667, "timestamp": float("nan")}) is None
+
+    def test_interleaved_syn_retransmissions_deduplicated(self):
+        """Interleaved connection attempts with retransmissions across multiple ports are properly deduplicated."""
+        rule = _make_irc_rule(threshold=3, window=300)
+        # Conn 1: port 50001, seq 11111 at t=1000.0
+        rec1 = {
+            "type": "IP", "protocol": "TCP", "src_ip": "10.0.0.5", "dst_ip": "185.244.25.235",
+            "src_port": 50001, "dst_port": 6667, "tcp_flags": 0x02, "tcp_seq": 11111, "timestamp": 1000.0
+        }
+        assert rule.check(rec1) is None
+
+        # Conn 2 (interleaved): port 50002, seq 22222 at t=1001.0
+        rec2 = {
+            "type": "IP", "protocol": "TCP", "src_ip": "10.0.0.5", "dst_ip": "185.244.25.235",
+            "src_port": 50002, "dst_port": 6667, "tcp_flags": 0x02, "tcp_seq": 22222, "timestamp": 1001.0
+        }
+        assert rule.check(rec2) is None
+
+        # Retransmission of Conn 1 (interleaved past Conn 2!): port 50001, seq 11111 at t=1002.0
+        rec1_retrans = dict(rec1, timestamp=1002.0)
+        assert rule.check(rec1_retrans) is None, "Interleaved Conn 1 retransmission must be recognized and suppressed"
+
+        # Retransmission of Conn 2: port 50002, seq 22222 at t=1003.0
+        rec2_retrans = dict(rec2, timestamp=1003.0)
+        assert rule.check(rec2_retrans) is None, "Interleaved Conn 2 retransmission must be recognized and suppressed"
+
+        # Conn 3: port 50003, seq 33333 at t=1004.0 -> reaches threshold=3!
+        rec3 = {
+            "type": "IP", "protocol": "TCP", "src_ip": "10.0.0.5", "dst_ip": "185.244.25.235",
+            "src_port": 50003, "dst_port": 6667, "tcp_flags": 0x02, "tcp_seq": 33333, "timestamp": 1004.0
+        }
+        result = rule.check(rec3)
+        assert result is not None
+        assert result["evidence"]["classification"] == "IRC_PORT_BEACONING"
+        assert result["evidence"]["connection_count"] == 3
+        assert result["evidence"]["retransmissions_suppressed"] == 2
+
+    def test_benign_bot_substrings_not_classified_as_c2(self):
+        """Benign words containing 'bot' substrings (robot, bottleneck, botany, bother, bottle) are not elevated to LIKELY_IRC_C2."""
+        rule = _make_irc_rule()
+        benign_messages = [
+            b"PRIVMSG #general :I am fascinated by botany.\r\n",
+            b"PRIVMSG #general :The robot arm malfunctioned.\r\n",
+            b"PRIVMSG #general :We hit a network bottleneck today.\r\n",
+            b"PRIVMSG #general :Please pass the water bottle.\r\n",
+            b"PRIVMSG #general :Do not bother with the bottom drawer.\r\n",
+            b"NICK botanist_alice\r\n",
+        ]
+        for msg in benign_messages:
+            pkt = _tcp_pkt(dport=6667, flags="ACK", payload=msg)
+            res = rule.check(pkt)
+            assert res is not None
+            assert res["evidence"]["classification"] == "IRC_PROTOCOL_SIGNATURE"
+            assert res["evidence"]["activity_assessment"] == "IRC_PROTOCOL_OBSERVED"
+            assert res["severity"] == "medium"
+            assert res["confidence"] == "heuristic"
+            # Clear cooldown for the next message in loop
+            rule._cooldown_map.clear()
+
+    def test_botnet_indicators_classified_as_likely_c2(self):
+        """Genuine botnet tokens and command indicators trigger confirmed high-severity LIKELY_IRC_C2."""
+        rule = _make_irc_rule()
+        c2_messages = [
+            b"JOIN #botnet\r\n",
+            b"PRIVMSG #c2 :!ddos 10.0.0.1 80\r\n",
+            b"PRIVMSG #channel :flood 192.168.1.1 53\r\n",
+            b"PRIVMSG #channel :infect target\r\n",
+            b"NICK bot_1234\r\n",
+            b"NICK ircbot\r\n",
+            b"PING :mirai.botnet.c2\r\n",
+        ]
+        for msg in c2_messages:
+            pkt = _tcp_pkt(dport=6667, flags="ACK", payload=msg)
+            res = rule.check(pkt)
+            assert res is not None
+            assert res["evidence"]["classification"] == "IRC_PROTOCOL_SIGNATURE"
+            assert res["evidence"]["activity_assessment"] == "LIKELY_IRC_C2"
+            assert res["severity"] == "high"
+            assert res["confidence"] == "confirmed"
+            rule._cooldown_map.clear()
+
+    def test_recent_syns_table_bounded_and_pruned(self):
+        """recent_syns table is capped at 64 entries and pruned after 60s."""
+        rule = _make_irc_rule(threshold=100)
+        # Send 80 distinct SYNs from distinct ports
+        for i in range(80):
+            rec = {
+                "type": "IP", "protocol": "TCP", "src_ip": "10.0.0.5", "dst_ip": "185.244.25.235",
+                "src_port": 40000 + i, "dst_port": 6667, "tcp_flags": 0x02, "tcp_seq": i * 10,
+                "timestamp": 1000.0 + i * 0.1
+            }
+            rule.check(rec)
+        entry = rule._connections["10.0.0.5"][("185.244.25.235", 6667)]
+        assert len(entry["recent_syns"]) <= 64
+
+        # Prune at t=1100 (well past 60s expiration)
+        rule.prune_stale(1100.0)
+        # State should be pruned
+        assert len(entry["recent_syns"]) == 0

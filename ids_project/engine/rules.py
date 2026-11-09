@@ -5869,7 +5869,7 @@ class IpFragmentAnomalyRule:
     - Stale state pruning: reassembly timeout (default 30.0s) and cooldown (default 60.0s).
     """
     name = "IP_FRAGMENT_ANOMALY"
-    rule_version = "1.1"
+    rule_version = "1.2"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
     MAX_FRAGMENTS_PER_DATAGRAM = 64
@@ -5914,13 +5914,23 @@ class IpFragmentAnomalyRule:
                 if self._seen[k] < seen_cutoff or self._seen[k] > now:
                     del self._seen[k]
 
-    def _evict_oldest_flow(self):
+    def _evict_oldest_flow(self, preserve_key=None):
         """Remove the oldest tracked datagram flow and update range count."""
-        if self._flows:
-            _, entry = self._flows.popitem(last=False)
-            self._total_ranges -= len(entry.get("fragments", []))
-            if self._total_ranges < 0:
-                self._total_ranges = 0
+        if not self._flows:
+            return
+        target_k = None
+        if preserve_key is not None and len(self._flows) > 1:
+            for k in self._flows:
+                if k != preserve_key:
+                    target_k = k
+                    break
+        if target_k is None:
+            target_k = next(iter(self._flows))
+
+        entry = self._flows.pop(target_k)
+        self._total_ranges -= len(entry.get("fragments", []))
+        if self._total_ranges < 0:
+            self._total_ranges = sum(len(e.get("fragments", [])) for e in self._flows.values())
 
     def check(self, record: dict) -> dict | None:
         if not self.enabled:
@@ -6014,6 +6024,7 @@ class IpFragmentAnomalyRule:
                     flow_entry = None
                     self._flows.pop(flow_key, None)
 
+            is_identical_retransmission = False
             if not anomaly_type and data_len > 0 and flow_entry is not None:
                 for item in flow_entry["fragments"]:
                     prev_start, prev_end = item[0], item[1]
@@ -6030,8 +6041,11 @@ class IpFragmentAnomalyRule:
                                 "— reassembly evasion / cache poisoning attempt"
                             )
                             break
-                        # Otherwise exact identical retransmission
-                        continue
+                        else:
+                            # Exact identical retransmission: do not alert or consume capacity
+                            is_identical_retransmission = True
+                            break
+
                     ov_start = max(offset, prev_start)
                     ov_end = min(cur_end, prev_end)
                     if ov_start < ov_end:
@@ -6047,14 +6061,22 @@ class IpFragmentAnomalyRule:
                         )
                         break
 
-            if data_len > 0:
-                # Enforce total ranges bound across all flows
-                while self._total_ranges >= self.MAX_TOTAL_FRAGMENT_RANGES:
-                    self._evict_oldest_flow()
-
+            if is_identical_retransmission:
+                # Benign duplicate: do NOT append, do NOT consume capacity, update last_seen
+                flow_entry["last_seen"] = now
+                self._flows.move_to_end(flow_key)
+            elif data_len > 0:
                 frag_tuple = (offset, cur_end, frag_digest)
+                if flow_key in self._flows:
+                    self._flows.move_to_end(flow_key)
+
+                # Enforce total ranges bound across all flows
+                while self._total_ranges >= self.MAX_TOTAL_FRAGMENT_RANGES and self._flows:
+                    self._evict_oldest_flow(preserve_key=flow_key if flow_key in self._flows else None)
+
+                flow_entry = self._flows.get(flow_key)
                 if flow_entry is None:
-                    while len(self._flows) >= self.MAX_TRACKED_FLOWS:
+                    while len(self._flows) >= self.MAX_TRACKED_FLOWS and self._flows:
                         self._evict_oldest_flow()
                     self._flows[flow_key] = {"fragments": [frag_tuple], "last_seen": now}
                     self._total_ranges += 1
@@ -6068,6 +6090,9 @@ class IpFragmentAnomalyRule:
                     self._total_ranges += 1
                     flow_entry["last_seen"] = now
                     self._flows.move_to_end(flow_key)
+
+                if self._total_ranges < 0:
+                    self._total_ranges = sum(len(e.get("fragments", [])) for e in self._flows.values())
 
             if not anomaly_type:
                 return None
@@ -6287,11 +6312,17 @@ class IrcC2BeaconingRule:
     - Full two-level LRU eviction and stale-state pruning.
     """
     name = "IRC_C2_BEACONING"
-    rule_version = "1.1"
+    rule_version = "1.2"
 
     IRC_PORTS: frozenset[int] = frozenset({194, 6660, 6661, 6662, 6663, 6664, 6665, 6666, 6667, 6668, 6669, 6697})
     _IRC_VERBS: tuple[bytes, ...] = (b"PING ", b"PONG ", b"NICK ", b"USER ", b"JOIN ", b"PRIVMSG ", b"PART ", b"QUIT ", b"MODE ")
     _BOTNET_INDICATORS: tuple[bytes, ...] = (b"bot", b"mirai", b"#botnet", b"ddos", b"flood", b"attack", b"infect", b"scan")
+    _BOTNET_INDICATORS_RE: re.Pattern = re.compile(
+        rb"(?i)(?:\b(?:mirai|ddos|flood|attack|infect|scan)\b|"
+        rb"#(?:[a-z0-9_-]*bot[a-z0-9_-]*|c2|ddos)\b|"
+        rb"(?<![a-zA-Z])(?:bot|bots|botnet|botnets|ircbot)(?![a-zA-Z])|"
+        rb"(?:mirai|botnet|c2)\.[a-z0-9_.-]+)"
+    )
 
     IRC_BEACONING_THRESHOLD: int = 5
     IRC_BEACONING_WINDOW: int = 300
@@ -6325,6 +6356,7 @@ class IrcC2BeaconingRule:
     def prune_stale(self, now: float) -> None:
         cutoff = now - (self.window + self.cooldown)
         cooldown_cutoff = now - self.cooldown
+        syn_cutoff = now - 60.0
         with self._lock:
             for src in list(self._connections):
                 src_dests = self._connections[src]
@@ -6333,6 +6365,13 @@ class IrcC2BeaconingRule:
                     ws = entry.get("window_start", now)
                     if ws < cutoff or ws > now:
                         del src_dests[dst_key]
+                    else:
+                        recent_syns = entry.get("recent_syns")
+                        if recent_syns:
+                            for syn_k in list(recent_syns):
+                                syn_ts = recent_syns[syn_k]
+                                if syn_ts < syn_cutoff or syn_ts > now:
+                                    del recent_syns[syn_k]
                 if not src_dests:
                     del self._connections[src]
             for key in list(self._cooldown_map):
@@ -6437,7 +6476,7 @@ class IrcC2BeaconingRule:
         irc_verb = self._check_payload_signature(payload_raw) if payload_raw else None
         if irc_verb:
             payload_lower = payload_raw.lower()
-            is_c2_indicator = any(ind in payload_lower for ind in self._BOTNET_INDICATORS)
+            is_c2_indicator = bool(self._BOTNET_INDICATORS_RE.search(payload_lower))
             if is_c2_indicator:
                 activity_assessment = "LIKELY_IRC_C2"
                 severity = "high"
@@ -6511,6 +6550,7 @@ class IrcC2BeaconingRule:
                 src_dests[dst_key] = {
                     "count": 0,
                     "window_start": now_t,
+                    "recent_syns": OrderedDict(),
                     "last_src_port": None,
                     "last_seq": None,
                     "last_syn_ts": 0.0,
@@ -6521,23 +6561,36 @@ class IrcC2BeaconingRule:
                 src_dests.move_to_end(dst_key)
 
             entry = src_dests[dst_key]
+            recent_syns = entry.setdefault("recent_syns", OrderedDict())
+
+            # Prune expired SYN tuples (> 60s old or future clock drift)
+            syn_cutoff = now_t - 60.0
+            for syn_k in list(recent_syns):
+                syn_ts = recent_syns[syn_k]
+                if syn_ts < syn_cutoff or syn_ts > now_t:
+                    del recent_syns[syn_k]
 
             # Check if this is an identical SYN retransmission
             # In TCP, retransmissions of an unacknowledged SYN keep the same ephemeral
             # source port and sequence number.
+            # Using a multi-entry sliding table handles interleaved connections across threads/ports.
             is_retransmission = False
-            last_src_port = entry.get("last_src_port")
-            last_seq = entry.get("last_seq")
-            last_syn_ts = entry.get("last_syn_ts", 0.0)
+            syn_key = (src_port_i, tcp_seq_i) if (src_port_i is not None and tcp_seq_i is not None) else None
 
-            if src_port_i is not None and last_src_port == src_port_i:
-                if tcp_seq_i is not None and last_seq == tcp_seq_i:
-                    is_retransmission = True
+            if syn_key is not None and syn_key in recent_syns:
+                is_retransmission = True
 
             if is_retransmission:
                 entry["retransmissions"] = entry.get("retransmissions", 0) + 1
                 entry["last_syn_ts"] = now_t
+                recent_syns[syn_key] = now_t
+                recent_syns.move_to_end(syn_key)
                 return None
+
+            if syn_key is not None:
+                while len(recent_syns) >= 64:
+                    recent_syns.popitem(last=False)
+                recent_syns[syn_key] = now_t
 
             entry["last_src_port"] = src_port_i
             entry["last_seq"] = tcp_seq_i

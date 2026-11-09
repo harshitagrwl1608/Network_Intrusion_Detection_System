@@ -153,18 +153,8 @@ def check_disk_safety(require_mount: bool = True) -> bool:
         return False
 
 
-def load_cumulative_budget() -> dict:
+def load_cumulative_budget(require_mount: bool = True) -> dict:
     """Load persistent cumulative acquisition budget from disk."""
-    os.makedirs(COORDINATION_DIR, exist_ok=True)
-    if os.path.isfile(CUMULATIVE_BUDGET_FILE):
-        try:
-            with open(CUMULATIVE_BUDGET_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict) and "cumulative_downloaded_bytes" in data:
-                    return data
-        except Exception as exc:
-            logger.warning(f"Could not read cumulative budget file: {exc}")
-
     initial_budget = {
         "cumulative_downloaded_bytes": 0,
         "cumulative_download_time_s": 0.0,
@@ -173,6 +163,30 @@ def load_cumulative_budget() -> dict:
         "max_allocation_bytes": int(MAX_ALLOCATION_GIB * (1024 ** 3)),
         "last_updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    # Verify disk safety and expected backing device BEFORE creating directories
+    if not check_disk_safety(require_mount=require_mount):
+        logger.warning("Disk safety check failed — returning in-memory budget without directory creation.")
+        return initial_budget
+
+    os.makedirs(COORDINATION_DIR, exist_ok=True)
+    if os.path.isfile(CUMULATIVE_BUDGET_FILE):
+        try:
+            with open(CUMULATIVE_BUDGET_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "cumulative_downloaded_bytes" in data:
+                    # Reconcile existing .part files in INCOMING_DIR on startup
+                    if os.path.isdir(INCOMING_DIR):
+                        part_bytes = sum(
+                            os.path.getsize(os.path.join(INCOMING_DIR, fn))
+                            for fn in os.listdir(INCOMING_DIR)
+                            if fn.endswith(".part") and os.path.isfile(os.path.join(INCOMING_DIR, fn))
+                        )
+                        if part_bytes > data["cumulative_downloaded_bytes"]:
+                            data["cumulative_downloaded_bytes"] = part_bytes
+                    return data
+        except Exception as exc:
+            logger.warning(f"Could not read cumulative budget file: {exc}")
+
     try:
         with open(CUMULATIVE_BUDGET_FILE, "w", encoding="utf-8") as f:
             json.dump(initial_budget, f, indent=2)
@@ -181,55 +195,82 @@ def load_cumulative_budget() -> dict:
     return initial_budget
 
 
-def update_cumulative_budget(newly_downloaded_bytes: int, elapsed_time_s: float) -> dict:
+def update_cumulative_budget(newly_downloaded_bytes: int, elapsed_time_s: float, require_mount: bool = True) -> dict:
     """Atomically update persistent cumulative budget on disk."""
-    budget = load_cumulative_budget()
+    budget = load_cumulative_budget(require_mount=require_mount)
     budget["cumulative_downloaded_bytes"] += newly_downloaded_bytes
     budget["cumulative_download_time_s"] += elapsed_time_s
     budget["last_updated_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    tmp_path = CUMULATIVE_BUDGET_FILE + ".tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(budget, f, indent=2)
-        os.replace(tmp_path, CUMULATIVE_BUDGET_FILE)
-    except Exception as exc:
-        logger.error(f"Failed to update cumulative budget: {exc}")
+    if check_disk_safety(require_mount=require_mount):
+        tmp_path = CUMULATIVE_BUDGET_FILE + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(budget, f, indent=2)
+            os.replace(tmp_path, CUMULATIVE_BUDGET_FILE)
+        except Exception as exc:
+            logger.error(f"Failed to update cumulative budget: {exc}")
     return budget
 
 
 # Evaluator version — bump when evaluation logic changes to invalidate cached results.
-_EVALUATOR_VERSION = "1.3.0"
+_EVALUATOR_VERSION = "1.4.0"
+
+_CACHE_SOURCE_FILES = [
+    os.path.join(IDS_PROJECT_DIR, "engine", "rules.py"),
+    os.path.join(IDS_PROJECT_DIR, "config.py"),
+    os.path.join(IDS_PROJECT_DIR, "capture", "sniffer.py"),
+    os.path.join(IDS_PROJECT_DIR, "evaluation", "replay.py"),
+    os.path.join(IDS_PROJECT_DIR, "evaluation", "pipeline.py"),
+    os.path.join(IDS_PROJECT_DIR, "storage", "db.py"),
+    os.path.join(IDS_PROJECT_DIR, "evaluation", "compare.py"),
+]
 
 
 def compute_eval_cache_key(pcap_path: str, candidate: dict, labels_path: str = None) -> str:
     """
     Compute a stable full SHA-256 cache fingerprint for an evaluation result.
-    Invalidates on changes to PCAP bytes, evaluator version, engine rules code,
-    registered rule versions, detection config, target rules, labels, or blocklist.
+    Fail-closed: Invalidation guaranteed on any change to PCAP bytes, evaluator version,
+    all detection engine and pipeline source files, registered rule versions,
+    detection configurations, target rules, labels, or blocklist.
+    Raises RuntimeError if required components cannot be fingerprinted.
     """
     h = hashlib.sha256()
+
+    # 1. PCAP content hash
+    if not os.path.isfile(pcap_path):
+        raise RuntimeError(f"compute_eval_cache_key: PCAP file does not exist: {pcap_path}")
     try:
         with open(pcap_path, "rb") as f:
             while chunk := f.read(128 * 1024):
                 h.update(chunk)
     except OSError as exc:
-        logger.warning(f"compute_eval_cache_key: could not hash {pcap_path}: {exc}")
-        h.update(pcap_path.encode())
+        raise RuntimeError(f"compute_eval_cache_key: could not hash PCAP {pcap_path}: {exc}")
+
+    # 2. Evaluator version
     h.update(_EVALUATOR_VERSION.encode())
-    rules_src_path = os.path.join(IDS_PROJECT_DIR, "engine", "rules.py")
-    if os.path.isfile(rules_src_path):
+
+    # 3. Full SHA-256 digests of all detection and evaluation source modules
+    for src_file in sorted(_CACHE_SOURCE_FILES):
+        rel_name = os.path.basename(src_file)
+        if not os.path.isfile(src_file):
+            raise RuntimeError(f"compute_eval_cache_key: required source module missing: {src_file}")
         try:
-            with open(rules_src_path, "rb") as rf:
-                h.update(hashlib.sha256(rf.read()).digest())
-        except OSError:
-            pass
+            with open(src_file, "rb") as sf:
+                file_digest = hashlib.sha256(sf.read()).digest()
+                h.update(f"{rel_name}:".encode() + file_digest)
+        except OSError as exc:
+            raise RuntimeError(f"compute_eval_cache_key: could not hash source module {src_file}: {exc}")
+
+    # 4. Registered rule names and versions
     try:
         from engine.rules import ALL_RULE_CLASSES
         r_versions = {rc.name: rc.rule_version for rc in ALL_RULE_CLASSES}
         h.update(json.dumps(r_versions, sort_keys=True).encode())
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(f"compute_eval_cache_key: could not read ALL_RULE_CLASSES: {exc}")
+
+    # 5. Effective detection configurations
     try:
         import config
         settings_to_hash = (
@@ -243,31 +284,45 @@ def compute_eval_cache_key(pcap_path: str, candidate: dict, labels_path: str = N
             "DATA_EXFIL_BYTE_THRESHOLD", "CLEAR_HTTP_TLS_MIN_REQUESTS",
             "TCP_ZERO_WINDOW_THRESHOLD", "NON_DNS_ON_DNS_PORT_COOLDOWN_S",
             "ICMP_TUNNEL_ENTROPY_THRESHOLD", "IP_FRAGMENT_ANOMALY_COOLDOWN_S",
-            "IRC_BEACONING_THRESHOLD", "IRC_BEACONING_WINDOW",
+            "IRC_BEACONING_THRESHOLD", "IRC_BEACONING_WINDOW", "IRC_ALERT_COOLDOWN_S",
         )
         cfg_vals = {s: str(getattr(config, s, "")) for s in settings_to_hash}
         h.update(json.dumps(cfg_vals, sort_keys=True).encode())
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(f"compute_eval_cache_key: could not extract config values: {exc}")
+
+    # 6. Target rules
     rules_str = json.dumps(sorted(candidate.get("target_rules", [])), separators=(",", ":"))
     h.update(rules_str.encode())
+
+    # 7. Labels file or inline candidate labels
     res_labels = labels_path or candidate.get("labels_path") or candidate.get("labels_file")
     if res_labels and os.path.isfile(res_labels):
         try:
             with open(res_labels, "rb") as lf:
                 h.update(hashlib.sha256(lf.read()).digest())
-        except OSError:
-            pass
+        except OSError as exc:
+            raise RuntimeError(f"compute_eval_cache_key: could not hash labels file {res_labels}: {exc}")
+    elif candidate.get("labels") or candidate.get("ground_truth_labels"):
+        inline_lbls = candidate.get("labels") or candidate.get("ground_truth_labels")
+        h.update(json.dumps(inline_lbls, sort_keys=True).encode())
+
+    # 8. Label coverage and granularity metadata
     if "label_coverage" in candidate:
-        h.update(str(candidate["label_coverage"]).encode())
+        h.update(f"cov:{candidate['label_coverage']}".encode())
+    if "label_granularity" in candidate:
+        h.update(f"gran:{candidate['label_granularity']}".encode())
+
+    # 9. Blocklist file actually used
     blocklist_path = os.path.join(DATA_DIR, "blocklist.txt")
     if os.path.isfile(blocklist_path):
         try:
             with open(blocklist_path, "rb") as bf:
                 h.update(hashlib.sha256(bf.read()).digest())
-        except OSError:
-            pass
+        except OSError as exc:
+            raise RuntimeError(f"compute_eval_cache_key: could not hash blocklist: {exc}")
     return h.hexdigest()
+
 
 
 def validate_pcap_deep(pcap_path: str) -> tuple[bool, str]:
@@ -513,21 +568,26 @@ def canonicalize_flow(src_ip: str, dst_ip: str, src_port: int | None, dst_port: 
     return (d_ip, s_ip, dp, sp, p)
 
 
+VALID_LABEL_GRANULARITIES = frozenset({"packet", "flow", "event", "scenario", "time-window"})
+
+
 def evaluate_ground_truth_labels(
     labels: list[dict],
     alerts: list[dict],
-    label_coverage: str = "complete",
+    label_coverage: str = "partial",
     timestamp_tolerance_s: float = 5.0
 ) -> dict:
     """Rigorous flow- and window-level ground-truth matching.
 
     Requirements satisfied:
     - Structured dataset label metadata with provenance and granularity.
-    - Bidirectional flow canonicalization.
-    - Event timestamps matched to valid label windows.
+    - Rejects rule-only labels without independent flow, event or time-window evidence.
+    - Rejects incomplete flow tuples (must specify complete 5-tuple: src_ip, dst_ip, src_port, dst_port, protocol).
+    - Event timestamps matched to valid label windows; malformed alert timestamps rejected.
     - Bijective matching: prevents one event from inflating TP counts.
-    - Unmatched alerts counted as FP ONLY when label_coverage == 'complete'.
-      Otherwise classified as UNASSESSED / UNKNOWN alerts.
+    - Unmatched alerts counted as FP ONLY when label_coverage is verified complete/exhaustive.
+      Otherwise classified as UNASSESSED alerts.
+    - Labels missing provenance, granularity, or required fields classified as unassessed_labels.
     - Returns structured metrics dictionary.
     """
     from evaluation.compare import _semantic_family
@@ -535,44 +595,103 @@ def evaluate_ground_truth_labels(
     matched_alert_indices: set[int] = set()
     matched_labels: list[dict] = []
     unmatched_labels: list[dict] = []
+    unassessed_labels: list[dict] = []
 
     for lbl in labels:
-        expected_family = lbl.get("expected_family", "").strip().lower()
-        expected_rule = lbl.get("expected_rule", "").strip()
-        flow = lbl.get("flow", {})
-        lbl_flow_key = None
-        if flow.get("src_ip") and flow.get("dst_ip"):
-            lbl_flow_key = canonicalize_flow(
-                flow.get("src_ip"), flow.get("dst_ip"),
-                flow.get("src_port"), flow.get("dst_port"),
-                flow.get("protocol", "")
-            )
-
-        window = lbl.get("time_window", {})
-        win_start = window.get("start")
-        win_end = window.get("end")
-
-        # Require explicit matching evidence (must specify expected_rule or expected_family)
-        if not expected_family and not expected_rule:
-            unmatched_labels.append(dict(lbl, rejection_reason="Missing expected_rule or expected_family"))
+        # 1. Check label provenance
+        provenance = lbl.get("provenance") or lbl.get("publisher") or lbl.get("source")
+        if not provenance or not str(provenance).strip():
+            reason = "Missing label provenance metadata"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
             continue
 
-        # Validate timestamp window if present
-        if win_start is not None and win_end is not None:
-            try:
-                if float(win_start) > float(win_end):
-                    unmatched_labels.append(dict(lbl, rejection_reason="Invalid time_window: start > end"))
-                    continue
-            except (ValueError, TypeError):
-                unmatched_labels.append(dict(lbl, rejection_reason="Malformed time_window timestamps"))
+        # 2. Check label granularity
+        granularity = str(lbl.get("granularity", "")).strip().lower()
+        if not granularity or granularity not in VALID_LABEL_GRANULARITIES:
+            reason = "Missing or unsupported label granularity"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        # 3. Check rule or family expectation
+        expected_family = lbl.get("expected_family", "").strip().lower()
+        expected_rule = lbl.get("expected_rule", "").strip()
+        if not expected_family and not expected_rule:
+            reason = "Missing expected_rule or expected_family"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        # 4. Check for independent event evidence (flow, time_window, or event_id)
+        flow = lbl.get("flow")
+        window = lbl.get("time_window")
+        event_id = lbl.get("event_id") if "event_id" in lbl else lbl.get("packet_index")
+
+        has_flow = bool(flow and isinstance(flow, dict))
+        has_window = bool(window and isinstance(window, dict) and (window.get("start") is not None or window.get("end") is not None))
+        has_event = bool(event_id is not None)
+
+        if not has_flow and not has_window and not has_event:
+            reason = "Insufficient matching constraints: rule-only label without flow, event or time-window"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        # 5. Validate flow tuple completeness if flow specified
+        lbl_flow_key = None
+        if has_flow:
+            src_ip = flow.get("src_ip")
+            dst_ip = flow.get("dst_ip")
+            src_port = flow.get("src_port")
+            dst_port = flow.get("dst_port")
+            proto = flow.get("protocol")
+
+            # Require complete 5-tuple
+            if not src_ip or not dst_ip or src_port is None or dst_port is None or not proto:
+                reason = "Incomplete flow tuple (must specify src_ip, dst_ip, src_port, dst_port, protocol)"
+                unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                unmatched_labels.append(dict(lbl, rejection_reason=reason))
                 continue
 
+            lbl_flow_key = canonicalize_flow(src_ip, dst_ip, src_port, dst_port, proto)
+
+        # 6. Validate time window timestamps if present
+        win_start = window.get("start") if has_window else None
+        win_end = window.get("end") if has_window else None
+        if win_start is not None and win_end is not None:
+            try:
+                f_start = float(win_start)
+                f_end = float(win_end)
+                if f_start > f_end:
+                    reason = "Invalid time_window: start > end"
+                    unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                    unmatched_labels.append(dict(lbl, rejection_reason=reason))
+                    continue
+            except (ValueError, TypeError):
+                reason = "Malformed time_window timestamps"
+                unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                unmatched_labels.append(dict(lbl, rejection_reason=reason))
+                continue
+        elif (win_start is not None and win_end is None) or (win_start is None and win_end is not None):
+            try:
+                if win_start is not None:
+                    float(win_start)
+                if win_end is not None:
+                    float(win_end)
+            except (ValueError, TypeError):
+                reason = "Malformed time_window timestamps"
+                unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                unmatched_labels.append(dict(lbl, rejection_reason=reason))
+                continue
+
+        # 7. Search for matching alert (bijective 1-to-1)
         found = False
         for idx, alert in enumerate(alerts):
             if idx in matched_alert_indices:
                 continue
 
-            # 1. Family / Rule matching
+            # A. Rule/Family match
             alert_family = _semantic_family(alert)
             rule_ok = False
             if expected_family and alert_family == expected_family:
@@ -583,29 +702,34 @@ def evaluate_ground_truth_labels(
             if not rule_ok:
                 continue
 
-            # 2. Flow matching (bidirectional)
+            # B. Flow match (bidirectional)
             if lbl_flow_key:
-                alert_flow_key = canonicalize_flow(
-                    alert.get("src_ip", ""), alert.get("dst_ip", ""),
-                    alert.get("src_port"), alert.get("dst_port"),
-                    alert.get("protocol", "")
-                )
+                a_src = alert.get("src_ip", "")
+                a_dst = alert.get("dst_ip", "")
+                a_sport = alert.get("src_port")
+                a_dport = alert.get("dst_port")
+                a_proto = alert.get("protocol", "")
+                if not a_src or not a_dst or a_sport is None or a_dport is None or not a_proto:
+                    continue
+                alert_flow_key = canonicalize_flow(a_src, a_dst, a_sport, a_dport, a_proto)
                 if alert_flow_key != lbl_flow_key:
                     continue
 
-            # 3. Timestamp window matching
-            alert_ts = alert.get("timestamp")
-            if alert_ts is not None and (win_start is not None or win_end is not None):
+            # C. Time window match
+            if has_window:
+                alert_ts = alert.get("timestamp")
+                if alert_ts is None:
+                    continue
                 try:
                     ts_val = float(alert_ts)
-                    if win_start is not None and ts_val < (float(win_start) - timestamp_tolerance_s):
-                        continue
-                    if win_end is not None and ts_val > (float(win_end) + timestamp_tolerance_s):
-                        continue
                 except (ValueError, TypeError):
-                    pass
+                    continue  # Reject malformed alert timestamp
+                if win_start is not None and ts_val < (float(win_start) - timestamp_tolerance_s):
+                    continue
+                if win_end is not None and ts_val > (float(win_end) + timestamp_tolerance_s):
+                    continue
 
-            # Match established!
+            # Match found!
             matched_alert_indices.add(idx)
             matched_labels.append({"label": lbl, "alert": alert})
             found = True
@@ -618,13 +742,13 @@ def evaluate_ground_truth_labels(
     tp = len(matched_labels)
     fn = len(unmatched_labels)
 
-    is_exhaustive = (label_coverage.lower() in ("complete", "exhaustive"))
+    is_exhaustive = (str(label_coverage).lower() in ("complete", "exhaustive"))
     if is_exhaustive:
         fp = len(extra_alerts)
-        unassessed = 0
+        unassessed_alerts = 0
     else:
         fp = 0
-        unassessed = len(extra_alerts)
+        unassessed_alerts = len(extra_alerts)
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else (1.0 if tp > 0 else 0.0)
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -637,7 +761,8 @@ def evaluate_ground_truth_labels(
         "true_positives": tp,
         "false_negatives": fn,
         "false_positives": fp,
-        "unassessed_alerts": unassessed,
+        "unassessed_alerts": unassessed_alerts,
+        "unassessed_labels": unassessed_labels,
         "precision": precision if is_exhaustive else None,
         "recall": recall,
         "f1": f1 if is_exhaustive else None,
@@ -963,12 +1088,21 @@ class PipelineCoordinator:
                             # Format: bytes <start>-<end>/<total>
                             range_match = re.match(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", content_range.strip()) if content_range else None
                             if not range_match or int(range_match.group(1)) != downloaded:
-                                logger.warning(f"[{cid}] Content-Range invalid or mismatched ({content_range}); restarting from 0.")
+                                logger.warning(f"[{cid}] Content-Range invalid or mismatched ({content_range}); closing and reissuing fresh request from byte 0.")
+                                resp.close()
                                 downloaded = 0
+                                try:
+                                    if os.path.exists(incoming_part):
+                                        os.remove(incoming_part)
+                                except Exception:
+                                    pass
+                                fresh_req = urllib.request.Request(url, headers={"User-Agent": "NetGuard-IDS-Evaluation/1.0"})
+                                resp = urllib.request.urlopen(fresh_req, timeout=30)
                                 write_mode = "wb"
                             else:
                                 write_mode = "ab"
                         else:
+                            # Server returned HTTP 200 or other non-206 status: full body from byte 0
                             logger.info(f"[{cid}] Server returned HTTP {status_code} (not 206 Partial Content); restarting from byte 0.")
                             downloaded = 0
                             write_mode = "wb"

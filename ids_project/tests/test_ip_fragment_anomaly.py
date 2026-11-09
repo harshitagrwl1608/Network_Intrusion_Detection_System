@@ -365,6 +365,119 @@ class TestIpFragmentAnomalyRule(unittest.TestCase):
         self.assertLessEqual(self.rule._total_ranges, self.rule.MAX_TOTAL_FRAGMENT_RANGES)
         self.assertLessEqual(len(self.rule._flows), self.rule.MAX_TRACKED_FLOWS)
 
+    def test_identical_retransmission_suppressed_and_does_not_consume_ranges(self):
+        """Identical fragment retransmission (same offset, length, payload) is suppressed without consuming extra range capacity."""
+        pkt = {
+            "type": "IP",
+            "protocol": "UDP",
+            "src_ip": "10.0.0.1",
+            "dst_ip": "10.0.0.2",
+            "ip_fragment_id": 5555,
+            "ip_fragment_offset": 0,
+            "ip_more_fragments": True,
+            "ip_fragmented": True,
+            "ip_fragment_data_len": 50,
+            "payload": b"A" * 50,
+            "timestamp": 5000.0,
+        }
+        res1 = self.rule.check(pkt)
+        self.assertIsNone(res1)
+        flow_key = ("10.0.0.1", "10.0.0.2", "UDP", 5555)
+        initial_ranges = len(self.rule._flows[flow_key]["fragments"])
+        initial_total = self.rule._total_ranges
+
+        # Retransmit identical packet multiple times
+        for ts in [5000.1, 5000.2, 5000.5]:
+            retrans_pkt = dict(pkt, timestamp=ts)
+            res = self.rule.check(retrans_pkt)
+            self.assertIsNone(res, "Benign identical fragment retransmission must not trigger an alert")
+            self.assertEqual(len(self.rule._flows[flow_key]["fragments"]), initial_ranges, "Identical retransmission must not append to tracked ranges")
+            self.assertEqual(self.rule._total_ranges, initial_total, "Identical retransmission must not increment _total_ranges")
+
+    def test_conflicting_fragment_duplicate_triggers_anomaly(self):
+        """Duplicate fragment with same offset and length but differing payload triggers CONFLICTING_FRAGMENT_DUPLICATE."""
+        pkt1 = {
+            "type": "IP",
+            "protocol": "UDP",
+            "src_ip": "10.0.0.1",
+            "dst_ip": "10.0.0.2",
+            "ip_fragment_id": 6666,
+            "ip_fragment_offset": 100,
+            "ip_more_fragments": True,
+            "ip_fragmented": True,
+            "ip_fragment_data_len": 40,
+            "payload": b"ORIGINAL_PAYLOAD_DATA_123456789012345678",
+            "timestamp": 6000.0,
+        }
+        self.assertIsNone(self.rule.check(pkt1))
+
+        # Conflicting duplicate: same offset and length, but different payload content
+        pkt2 = {
+            "type": "IP",
+            "protocol": "UDP",
+            "src_ip": "10.0.0.1",
+            "dst_ip": "10.0.0.2",
+            "ip_fragment_id": 6666,
+            "ip_fragment_offset": 100,
+            "ip_more_fragments": True,
+            "ip_fragmented": True,
+            "ip_fragment_data_len": 40,
+            "payload": b"ATTACKER_OVERWRITE_DIFFERING_DIGEST_XYZ!",
+            "timestamp": 6000.01,
+        }
+        alert = self.rule.check(pkt2)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["anomaly_type"], "CONFLICTING_FRAGMENT_DUPLICATE")
+        self.assertEqual(alert["severity"], "high")
+
+    def test_evict_oldest_flow_preserves_current_flow_and_maintains_invariant(self):
+        """Global eviction preserves the current active flow and guarantees _total_ranges == sum(len(f['fragments']))."""
+        rule = IpFragmentAnomalyRule()
+        rule.MAX_TRACKED_FLOWS = 5
+        rule.MAX_TOTAL_FRAGMENT_RANGES = 15
+        # Create 5 distinct flows, each with 3 fragments (15 total ranges = capacity reached)
+        for f_idx in range(5):
+            for frag_idx in range(3):
+                pkt = {
+                    "type": "IP",
+                    "protocol": "TCP",
+                    "src_ip": f"10.0.0.{f_idx + 1}",
+                    "dst_ip": "10.2.2.2",
+                    "ip_fragment_id": 100 + f_idx,
+                    "ip_fragment_offset": frag_idx * 100,
+                    "ip_more_fragments": True,
+                    "ip_fragmented": True,
+                    "ip_fragment_data_len": 100,
+                    "timestamp": 7000.0 + f_idx + frag_idx * 0.01,
+                }
+                rule.check(pkt)
+
+        self.assertEqual(rule._total_ranges, 15)
+        self.assertEqual(len(rule._flows), 5)
+
+        # Now send a fragment for flow 0 (which was the oldest flow)
+        flow0_key = ("10.0.0.1", "10.2.2.2", "TCP", 100)
+        pkt_flow0 = {
+            "type": "IP",
+            "protocol": "TCP",
+            "src_ip": "10.0.0.1",
+            "dst_ip": "10.2.2.2",
+            "ip_fragment_id": 100,
+            "ip_fragment_offset": 300,
+            "ip_more_fragments": False,
+            "ip_fragmented": True,
+            "ip_fragment_data_len": 100,
+            "timestamp": 7010.0,
+        }
+        rule.check(pkt_flow0)
+
+        # Verify flow0 is still tracked (was not evicted while being processed!)
+        self.assertIn(flow0_key, rule._flows)
+        # Verify strict invariant: _total_ranges equals sum of fragments in all tracked flows
+        actual_sum = sum(len(f["fragments"]) for f in rule._flows.values())
+        self.assertEqual(rule._total_ranges, actual_sum)
+        self.assertLessEqual(rule._total_ranges, rule.MAX_TOTAL_FRAGMENT_RANGES)
+
 
 if __name__ == "__main__":
     unittest.main()

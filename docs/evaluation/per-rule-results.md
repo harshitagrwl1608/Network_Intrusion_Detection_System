@@ -30,7 +30,7 @@ This report presents per-rule detection accuracy, false positive analysis, and o
 - **Recall:** 100.0%
 - **F1 Score:** 100.0%
 
-### 2.2 Independent Real-World Captures Corpus (18 Verified PCAPs across 4 Publishers)
+### 2.2 Independent Real-World Captures Corpus (18 Verified PCAPs across 6 Publishers)
 
 | Capture ID | Publisher | Traffic Class | Packets / Size | Alerts Raised | Dominant Rules | Detection Verdict |
 |---|---|---|---|---|---|---|
@@ -133,8 +133,8 @@ In the November 8 autonomous engineering sprint, all 23 detection rules were pro
 19. `TcpZeroWindowRule` (v1.10)
 20. `NonDnsOnDnsPortRule` (v1.1)
 21. `IcmpTunnelRule` (v1.1)
-22. `IpFragmentAnomalyRule` (v1.1) — **Hardened**: Datagram/flow caps, digest conflict comparison for duplicates.
-23. `IrcC2BeaconingRule` (v1.1) — **Hardened**: Integer flag bitmasks, SYN retransmission deduplication, two-level LRU bounds, distinct confidence/severity.
+22. `IpFragmentAnomalyRule` (v1.2) — **Hardened**: Datagram/flow caps, global capacity bounds with active flow preservation, exact duplicate fragment suppression, and conflicting payload digest detection.
+23. `IrcC2BeaconingRule` (v1.2) — **Hardened**: Integer flag bitmasks, multi-entry sliding table of recent SYN tuples (`recent_syns: OrderedDict`, 64 entries, 60s expiration) for interleaved connection deduplication, context-aware regex word boundary matching protecting benign vocabulary (`robot`, `bottleneck`, `botany`, `bother`, `bottle`, `bottom`) from false C2 classification, two-level LRU bounds, distinct confidence/severity.
 
 ### 5.2 Synthetic Benchmark Corpus Expansion (42 Scenarios)
 - **Labelled Scenarios:** 42 (expanded from 38 with S39 `NON_DNS_TRAFFIC_ON_DNS_PORT`, S40 `ICMP_TUNNEL`, S41 `IP_FRAGMENT_ANOMALY`, and S42 `IRC_C2_BEACONING`).
@@ -158,9 +158,15 @@ In the November 8 autonomous engineering sprint, all 23 detection rules were pro
 | `oisf_tls_sni_anomaly` | Curated Research Fixture | Standard TLS Handshake | 25 | 0 | None | **Zero False Alarms**: Clean TLS SNI validation. |
 
 ### 5.4 Unit & Integration Test Coverage
-- **Total Tests Passing:** **694 passed** across 29 test modules in 106s.
+- **Total Tests Passing:** **721 passed** across 30 test modules in 137s.
 - **Coverage:** Zero skipped, zero failures, zero disabled tests.
   - **Adversarial Evasion Stress Testing (`test_adversarial_evasion_stress.py`):** Multi-threaded ingestion under continuous GC, asymmetric routing pure-ACK suppression, DGA case randomization entropy stability, subthreshold ICMP chunking suppression, and Ping of Death overflow detection.
   - **Cryptographic Dataset Hash Verification (`test_dataset_hash_verify.py`):** Automated streaming SHA-256 verification of all 18 PCAP captures on `/dev/sdb1`, exact cross-referencing with `.meta.json` manifests, `.sha256` checksum files, and `dataset-registry.md`, plus path-traversal prevention and MCP tool verification.
   - **Forensic Alert Evidence Schema Audit (`test_alert_evidence_schema.py`):** Verified that all 23 canonical detection rules emit rich, non-empty, strictly JSON-serializable `evidence` dictionaries, correctly serialized to `evidence_json` with unique `idempotency_key` generation and database round-tripping.
   - **Zeek & Suricata Dual Cross-Engine Telemetry Corroboration (`test_compare.py`):** Added native Zeek TSV (`#fields`) and JSON stream loaders, connection state corroboration (`S0` unacknowledged SYNs, `SF` normal, `REJ` rejected probes), byte-volume egress correlation, and verified live parsing against authentic 23,145-row CTU IoT-23 Zeek connection logs. Hardened `compare.py` to seamlessly execute simultaneous dual corroboration (`--zeek` and `--eve` together) on JSON evaluation outputs and isolated SQLite databases with verified 100% flow-level agreement on botnet C2 activity.
+  - **Holdout Pipeline & Security Guarantees (`test_holdout_pipeline.py`):** 14 unit and integration tests verifying candidate ID allowlisting, boundary containment, quarantine permission enforcement (`0o444`), structural validation via capinfos/tshark, dev corpus hash collision rejection, and tamper-evident audit report sealing.
+
+### 5.5 Independent Holdout Quarantine & Evaluation Status
+- **Pre-Registered Candidates (`docs/evaluation/holdout-registry.json`):** 3 candidate datasets targeting independent third-party publishers (CIC-Bell-DNS-2021, MAWI WIDE Transpacific, Stratosphere CTU Mirai Capture 48-1).
+- **Physical Acquisition Status:** **Pending Acquisition** in `/run/media/harshitgarg/Data1/NetGuard-datasets/holdout_quarantine`.
+- **Holdout Accuracy Claims:** **0 holdout evaluations claimed.** Strict scientific governance forbids reporting holdout metrics before physical acquisition, quarantine validation, and single-pass blind execution.
