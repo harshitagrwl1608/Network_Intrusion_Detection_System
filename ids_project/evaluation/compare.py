@@ -369,11 +369,19 @@ def _endpoint_correlations(netguard: list[dict], suricata: list[dict]) -> list[d
 def match_alerts_agreement(netguard: list[dict], suricata: list[dict]) -> dict:
     """
     Bijective matching: each Suricata event can match at most one NetGuard alert.
+    Delineates:
+      - Exact 5-tuple event matches (Δt <= 5s, same src, dst, port, protocol).
+      - Semantic scan-family matches (host-pair scope, rule-specific window).
+      - Endpoint-family overlaps (family matches between endpoints, timestamps not aligned).
+      - NetGuard-only alerts.
+      - Suricata-only alerts.
     Returns structured agreement/disagreement lists — NOT TP/FP/FN in the
     ground-truth sense.
     """
     matched_suricata: set = set()
-    both: list = []          # matched in both engines
+    exact_5tuple_matches: list = []
+    semantic_scan_matches: list = []
+    both: list = []          # all matched (exact + semantic scan)
     netguard_only: list = [] # NetGuard fired, Suricata did not (on same event)
     suricata_only: list = [] # Suricata fired, NetGuard did not (on same event)
 
@@ -384,8 +392,19 @@ def match_alerts_agreement(netguard: list[dict], suricata: list[dict]) -> dict:
                 continue
             if _events_match(ng, sur):
                 matched_suricata.add(i)
-                both.append((ng, sur))
                 found = True
+                family_a = _scan_family(ng)
+                family_b = _scan_family(sur)
+                is_scan = (family_a is not None and family_a == family_b)
+                port_a = _norm_port(ng.get("dst_port"))
+                port_b = _norm_port(sur.get("dst_port"))
+                time_diff = abs((ng.get("timestamp") or 0) - (sur.get("timestamp") or 0))
+
+                if is_scan and (port_a != port_b or time_diff > TIMESTAMP_TOLERANCE):
+                    semantic_scan_matches.append((ng, sur))
+                else:
+                    exact_5tuple_matches.append((ng, sur))
+                both.append((ng, sur))
                 break
         if not found:
             netguard_only.append(ng)
@@ -396,6 +415,8 @@ def match_alerts_agreement(netguard: list[dict], suricata: list[dict]) -> dict:
 
     return {
         "both": both,
+        "exact_5tuple_matches": exact_5tuple_matches,
+        "semantic_scan_matches": semantic_scan_matches,
         "netguard_only": netguard_only,
         "suricata_only": suricata_only,
         "endpoint_correlations": _endpoint_correlations(netguard, suricata),
@@ -404,12 +425,15 @@ def match_alerts_agreement(netguard: list[dict], suricata: list[dict]) -> dict:
 
 def print_agreement_report(results: dict):
     both          = len(results["both"])
+    exact         = len(results.get("exact_5tuple_matches", []))
+    scan_matches  = len(results.get("semantic_scan_matches", []))
     ng_only       = len(results["netguard_only"])
     sur_only      = len(results["suricata_only"])
     total_ng      = both + ng_only
     total_sur     = both + sur_only
 
-    agreement_pct = both / max(total_ng, total_sur, 1) * 100
+    exact_pct     = exact / max(total_ng, total_sur, 1) * 100
+    overall_pct   = both / max(total_ng, total_sur, 1) * 100
 
     print("\n" + "=" * 65)
     print("  ENGINE AGREEMENT REPORT  (NetGuard vs Suricata)")
@@ -417,12 +441,15 @@ def print_agreement_report(results: dict):
     print("  'NetGuard-only' events are NOT automatically false positives.")
     print("  'Suricata-only' events are NOT automatically missed attacks.")
     print("=" * 65)
-    print(f"  NetGuard total alerts:       {total_ng:4d}")
-    print(f"  Suricata total alerts:       {total_sur:4d}")
-    print(f"  Matched by both engines:     {both:4d}")
-    print(f"  NetGuard-only:               {ng_only:4d}")
-    print(f"  Suricata-only:               {sur_only:4d}")
-    print(f"  Agreement rate:              {agreement_pct:.1f}%")
+    print(f"  NetGuard total alerts:          {total_ng:4d}")
+    print(f"  Suricata total alerts:          {total_sur:4d}")
+    print(f"  Exact 5-tuple event matches:    {exact:4d}")
+    print(f"  Semantic scan-family matches:   {scan_matches:4d}")
+    print(f"  Matched by both engines:        {both:4d}")
+    print(f"  NetGuard-only:                  {ng_only:4d}")
+    print(f"  Suricata-only:                  {sur_only:4d}")
+    print(f"  Exact 5-tuple agreement rate:   {exact_pct:.1f}%")
+    print(f"  Overall agreement rate:         {overall_pct:.1f}%")
     print("-" * 65)
     print("  Match key: exact events Δt≤5s; recognized TCP scan families use host pair and rule window")
     print("  Endpoint correlations ignore time and do not affect agreement rate.")
@@ -490,12 +517,15 @@ def load_zeek_connections(conn_path: str, max_records: int | None = None) -> lis
                         resp_bytes = int(obj.get("resp_bytes") or 0) if str(obj.get("resp_bytes") or "").isdigit() else 0
                         orig_pkts = int(obj.get("orig_pkts") or 0) if str(obj.get("orig_pkts") or "").isdigit() else 0
                         label = str(obj.get("label") or "").strip()
+                        uid = str(obj.get("uid") or "").strip()
+                        if not uid:
+                            uid = f"{src_ip}:{src_port}->{dst_ip}:{dst_port}/{proto}@{ts}"
                         records.append({
                             "timestamp": ts, "src_ip": src_ip, "dst_ip": dst_ip,
                             "src_port": src_port, "dst_port": dst_port, "protocol": proto,
                             "service": service, "conn_state": state, "history": history,
                             "orig_bytes": orig_bytes, "resp_bytes": resp_bytes,
-                            "orig_pkts": orig_pkts, "label": label,
+                            "orig_pkts": orig_pkts, "label": label, "uid": uid,
                         })
                 except Exception:
                     continue
@@ -547,13 +577,16 @@ def load_zeek_connections(conn_path: str, max_records: int | None = None) -> lis
             resp_bytes = _to_int(row.get("resp_bytes"))
             orig_pkts = _to_int(row.get("orig_pkts"))
             label = _clean_val(row.get("label"))
+            uid = _clean_val(row.get("uid"))
+            if not uid:
+                uid = f"{src_ip}:{src_port}->{dst_ip}:{dst_port}/{proto}@{ts}"
 
             records.append({
                 "timestamp": ts, "src_ip": src_ip, "dst_ip": dst_ip,
                 "src_port": src_port, "dst_port": dst_port, "protocol": proto,
                 "service": service, "conn_state": state, "history": history,
                 "orig_bytes": orig_bytes, "resp_bytes": resp_bytes,
-                "orig_pkts": orig_pkts, "label": label,
+                "orig_pkts": orig_pkts, "label": label, "uid": uid,
             })
             if max_records and len(records) >= max_records:
                 break
@@ -562,114 +595,339 @@ def load_zeek_connections(conn_path: str, max_records: int | None = None) -> lis
     return records
 
 
+def _flow_uid(f: dict) -> str:
+    """Return explicit uid or generate deterministic fallback connection key."""
+    uid = f.get("uid")
+    if uid:
+        return str(uid)
+    return f"{f.get('src_ip')}:{f.get('src_port')}->{f.get('dst_ip')}:{f.get('dst_port')}/{f.get('protocol')}@{f.get('timestamp')}"
+
+
 def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict], tolerance: float = 30.0) -> dict:
     """
     Corroborates NetGuard alerts against Zeek connection flow state and telemetry.
-    Differentiates scan, flood, and exfil behaviors based on conn_state and byte volumes.
-    """
-    corroborated = []
-    unmatched = []
+    Implements a strict 5-tier classification:
+      1. RULE_SEMANTICALLY_CORROBORATED: Zeek state matches rule attack semantics
+         (e.g., S0/REJ for scans, high volume for data exfiltration, confirmed IRC beaconing).
+      2. FLOW_OBSERVED_ONLY: Zeek recorded traffic matching endpoints, port/protocol,
+         and time window, but without rule-specific attack evidence.
+      3. ENDPOINT_PAIR_ONLY: Zeek recorded traffic between the endpoints, but outside
+         the requested time window or on different ports/protocols.
+      4. UNMATCHED: No corresponding Zeek connection activity between the endpoints.
+      5. UNASSESSED: Alert rule has no meaningful Zeek conn.log representation (e.g., L2 ARP).
 
-    # Index Zeek connections by (src_ip, dst_ip) for fast lookups
-    zeek_by_pair = {}
+    Enforces:
+      - 4-tuple indexing by (src_ip, dst_ip, dst_port, protocol) where destination port is meaningful.
+      - Transport protocol matching.
+      - Strict time window filtering (no fallback to unfiltered list).
+      - Mapped flow tracking (prevents flow reuse across unrelated alerts, aggregates multi-flow scans).
+    """
+    semantically_corroborated = []
+    flow_observed_only = []
+    endpoint_pair_only = []
+    unmatched = []
+    unassessed = []
+
+    # Rules that aggregate probes across multiple ports or sources
+    AGGREGATED_SCAN_RULES = {
+        "PORT_SCAN", "SLOW_PORT_SCAN", "TCP_STEALTH_SCAN",
+        "SYN_FLOOD", "DISTRIBUTED_SYN_FLOOD", "ICMP_SWEEP", "ICMP_FLOOD", "UDP_FLOOD"
+    }
+
+    # Rules operating outside Zeek conn.log telemetry boundary (e.g. Layer 2 ARP)
+    UNASSESSED_RULES = {"ARP_SPOOF"}
+
+    # Index Zeek connections
+    zeek_by_pair: dict[tuple[str, str], list[dict]] = {}
     for z in zeek_conns:
-        pair = (z["src_ip"], z["dst_ip"])
-        zeek_by_pair.setdefault(pair, []).append(z)
+        p = (z["src_ip"], z["dst_ip"])
+        zeek_by_pair.setdefault(p, []).append(z)
+
+    used_flow_uids: set[str] = set()
 
     for alert in netguard_alerts:
         src = _norm_ip(alert.get("src_ip"))
         dst = _norm_ip(alert.get("dst_ip"))
         rule = str(alert.get("rule_name") or "")
         proto = str(alert.get("protocol") or "").strip().upper()
+        alert_dport = _norm_port(alert.get("dst_port"))
         alert_ts = float(alert.get("timestamp") or 0.0)
 
-        matching_flows = zeek_by_pair.get((src, dst), [])
-        if not matching_flows:
-            # Try reverse pair (e.g. for server response or bidirectional alerts)
-            matching_flows = zeek_by_pair.get((dst, src), [])
-
-        # Filter by time tolerance if timestamp present
-        if alert_ts > 0.0:
-            window_flows = [
-                f for f in matching_flows
-                if abs(f["timestamp"] - alert_ts) <= tolerance or f["timestamp"] == 0.0
-            ]
-            if window_flows:
-                matching_flows = window_flows
-
-        if not matching_flows:
-            unmatched.append({"alert": alert, "reason": "NO_MATCHING_FLOW"})
+        # 1. Tier: UNASSESSED
+        if rule in UNASSESSED_RULES:
+            entry = {
+                "alert": alert,
+                "tier": "UNASSESSED",
+                "corroboration_type": "UNASSESSED_TELEMETRY_GAP",
+                "evidence": f"Rule {rule} operates on protocol layers not captured in Zeek conn.log (e.g. Layer 2 ARP)",
+            }
+            unassessed.append(entry)
             continue
 
-        # Evaluate semantic corroboration based on rule category
+        # Look up all flows between these endpoints in either direction
+        fwd_flows = zeek_by_pair.get((src, dst), [])
+        rev_flows = zeek_by_pair.get((dst, src), [])
+        any_pair_flows = fwd_flows + rev_flows
+
+        # 2. Tier: UNMATCHED (no flows between endpoints at all)
+        if not any_pair_flows:
+            unmatched.append({
+                "alert": alert,
+                "tier": "UNMATCHED",
+                "reason": "NO_MATCHING_FLOW",
+                "evidence": f"Zeek recorded zero connection events between {src} and {dst}",
+            })
+            continue
+
+        # Filter by transport protocol if specified in alert
+        if proto:
+            matching_proto = [
+                f for f in any_pair_flows
+                if not f.get("protocol") or f["protocol"].upper() == proto
+            ]
+        else:
+            matching_proto = any_pair_flows
+
+        # Filter by port if not an aggregated scan rule
+        if rule in AGGREGATED_SCAN_RULES:
+            matching_port = matching_proto
+        else:
+            if alert_dport is not None and alert_dport != 0 and proto != "ICMP":
+                matching_port = [
+                    f for f in matching_proto
+                    if f.get("dst_port") == alert_dport or f.get("src_port") == alert_dport
+                ]
+            else:
+                matching_port = matching_proto
+
+        # Filter by timestamp window (strictly, no fallback)
+        if alert_ts > 0.0:
+            win = max(tolerance, 120.0) if rule == "SLOW_PORT_SCAN" else tolerance
+            matching_window = [
+                f for f in matching_port
+                if f["timestamp"] == 0.0 or abs(f["timestamp"] - alert_ts) <= win
+            ]
+        else:
+            matching_window = matching_port
+
+        # 3. Tier: ENDPOINT_PAIR_ONLY
+        # If no flows survived port/protocol/time filtering, but endpoint traffic exists
+        if not matching_window:
+            endpoint_pair_only.append({
+                "alert": alert,
+                "tier": "ENDPOINT_PAIR_ONLY",
+                "reason": "ENDPOINT_PAIR_ONLY",
+                "evidence": (
+                    f"Zeek observed {len(any_pair_flows)} flow(s) between endpoints, "
+                    f"but none matched port={alert_dport}, proto={proto or 'ANY'}, or Δt<={tolerance}s"
+                ),
+            })
+            continue
+
+        # Check flow reuse
+        if rule in AGGREGATED_SCAN_RULES:
+            unclaimed = [f for f in matching_window if _flow_uid(f) not in used_flow_uids]
+            if not unclaimed:
+                unmatched.append({
+                    "alert": alert,
+                    "tier": "UNMATCHED",
+                    "reason": "ALL_FLOWS_ALREADY_CLAIMED",
+                    "evidence": "All candidate flows were already claimed by earlier NetGuard alerts",
+                })
+                continue
+            active_flows = unclaimed
+        else:
+            unclaimed = [f for f in matching_window if _flow_uid(f) not in used_flow_uids]
+            if not unclaimed:
+                unmatched.append({
+                    "alert": alert,
+                    "tier": "UNMATCHED",
+                    "reason": "FLOW_ALREADY_CLAIMED",
+                    "evidence": "Candidate flow was already claimed by an earlier NetGuard alert",
+                })
+                continue
+            active_flows = unclaimed
+
+        # Evaluate Semantic Corroboration vs Flow Observed Only
         corroboration_type = None
         evidence_notes = []
+        claimed_uids = []
 
-        # Check for scanning / flood corroboration (unanswered SYNs: S0, or rejected: REJ)
-        scan_rules = ("PORT_SCAN", "SLOW_PORT_SCAN", "TCP_STEALTH_SCAN", "SYN_FLOOD", "DISTRIBUTED_SYN_FLOOD")
-        if rule in scan_rules:
-            s0_flows = [f for f in matching_flows if f["conn_state"] == "S0" or f["history"] == "S"]
+        if rule in ("PORT_SCAN", "SLOW_PORT_SCAN", "TCP_STEALTH_SCAN", "SYN_FLOOD", "DISTRIBUTED_SYN_FLOOD"):
+            s0_flows = [f for f in active_flows if f["conn_state"] == "S0" or f["history"] == "S"]
+            rej_flows = [f for f in active_flows if f["conn_state"] in ("REJ", "RSTOS0", "RSTR")]
             if s0_flows:
                 corroboration_type = "UNANSWERED_SYN_SCAN"
-                evidence_notes.append(f"{len(s0_flows)} Zeek flow(s) in S0 state (unacknowledged SYNs)")
-            elif any(f["conn_state"] in ("REJ", "RSTOS0") for f in matching_flows):
+                ports = {f["dst_port"] for f in s0_flows if f.get("dst_port")}
+                evidence_notes.append(f"{len(s0_flows)} Zeek flow(s) in S0 state (unacknowledged SYNs) across {len(ports)} probe port(s)")
+                claimed_uids = [_flow_uid(f) for f in s0_flows]
+            elif rej_flows:
                 corroboration_type = "REJECTED_CONNECTION_PROBE"
-                evidence_notes.append("Zeek recorded rejected connection attempts")
+                evidence_notes.append(f"{len(rej_flows)} Zeek connection(s) rejected/reset by target host")
+                claimed_uids = [_flow_uid(f) for f in rej_flows]
+            else:
+                corroboration_type = "ESTABLISHED_FLOW_WITHOUT_SCAN_STATE"
+                evidence_notes.append(f"Zeek observed {len(active_flows)} established connection(s) without scan indicators")
+                claimed_uids = [_flow_uid(active_flows[0])]
 
-        # Check for Data Exfiltration corroboration
         elif rule == "DATA_EXFIL":
-            high_vol_flows = [f for f in matching_flows if f["orig_bytes"] >= 50000 or f["orig_pkts"] >= 50]
-            if high_vol_flows:
+            high_vol = [f for f in active_flows if f["orig_bytes"] >= 50000 or f["orig_pkts"] >= 50]
+            if high_vol:
                 corroboration_type = "HIGH_VOLUME_EGRESS"
-                max_bytes = max(f["orig_bytes"] for f in high_vol_flows)
+                max_bytes = max(f["orig_bytes"] for f in high_vol)
                 evidence_notes.append(f"Zeek recorded outbound flow with {max_bytes} bytes")
+                claimed_uids = [_flow_uid(high_vol[0])]
+            else:
+                corroboration_type = "LOW_VOLUME_FLOW"
+                max_bytes = max(f["orig_bytes"] for f in active_flows)
+                evidence_notes.append(f"Zeek recorded flow with normal/low byte volume ({max_bytes} bytes)")
+                claimed_uids = [_flow_uid(active_flows[0])]
 
-        # Check for Botnet / C2 corroboration
         elif rule == "IRC_C2_BEACONING":
-            irc_flows = [f for f in matching_flows if f["dst_port"] in (194, 6660, 6661, 6662, 6663, 6664, 6665, 6666, 6667, 6668, 6669, 6697)]
+            irc_ports = (194, 6660, 6661, 6662, 6663, 6664, 6665, 6666, 6667, 6668, 6669, 6697)
+            irc_flows = [
+                f for f in active_flows
+                if f.get("dst_port") in irc_ports or f.get("service") == "irc"
+            ]
             if irc_flows:
-                corroboration_type = "IRC_SESSION_CONFIRMED"
-                evidence_notes.append(f"Zeek confirmed {len(irc_flows)} connection(s) to IRC service ports")
+                suspicious = [f for f in irc_flows if f["conn_state"] in ("S0", "RSTOS0", "REJ", "RSTO")]
+                if len(irc_flows) >= 2 or suspicious:
+                    corroboration_type = "IRC_SESSION_CONFIRMED"
+                    evidence_notes.append(f"Zeek confirmed {len(irc_flows)} connection(s) to IRC service ports with C2/beaconing pattern")
+                    claimed_uids = [_flow_uid(f) for f in irc_flows]
+                else:
+                    corroboration_type = "IRC_FLOW_WITHOUT_C2_BEACONING"
+                    evidence_notes.append("Zeek recorded a single standard IRC connection without anomalous C2 beaconing evidence")
+                    claimed_uids = [_flow_uid(irc_flows[0])]
+            else:
+                corroboration_type = "NON_IRC_PORT_FLOW"
+                evidence_notes.append("Zeek observed flow between endpoints, but not on recognized IRC ports")
+                claimed_uids = [_flow_uid(active_flows[0])]
 
-        # Generic flow corroboration (traffic was confirmed by Zeek)
+        elif rule == "CLEAR_HTTP_ON_TLS_PORT":
+            http_flows = [f for f in active_flows if f.get("service") == "http"]
+            if http_flows:
+                corroboration_type = "CLEARTEXT_HTTP_ON_TLS_PORT_CONFIRMED"
+                evidence_notes.append("Zeek confirmed HTTP cleartext protocol on TLS port")
+                claimed_uids = [_flow_uid(http_flows[0])]
+            else:
+                corroboration_type = "FLOW_OBSERVED"
+                evidence_notes.append("Zeek observed flow on port 443 without explicit HTTP protocol classification")
+                claimed_uids = [_flow_uid(active_flows[0])]
+
+        elif rule == "BRUTE_FORCE":
+            failed = [f for f in active_flows if f["conn_state"] in ("REJ", "RSTO", "RSTR", "S0")]
+            if len(active_flows) >= 3 or failed:
+                corroboration_type = "MULTIPLE_FAILED_AUTH_ATTEMPTS"
+                evidence_notes.append(f"Zeek recorded {len(active_flows)} connection attempt(s) ({len(failed)} rejected/reset)")
+                claimed_uids = [_flow_uid(f) for f in active_flows]
+            else:
+                corroboration_type = "FLOW_OBSERVED"
+                evidence_notes.append("Zeek observed connection without multiple failed attempt pattern")
+                claimed_uids = [_flow_uid(active_flows[0])]
+
+        elif rule == "TCP_ZERO_WINDOW":
+            zw = [f for f in active_flows if "W0" in f.get("history", "") or f.get("conn_state") in ("RSTP", "RSTO")]
+            if zw:
+                corroboration_type = "TCP_ZERO_WINDOW_CONFIRMED"
+                evidence_notes.append("Zeek recorded zero-window advertisement or connection reset")
+                claimed_uids = [_flow_uid(zw[0])]
+            else:
+                corroboration_type = "FLOW_OBSERVED"
+                evidence_notes.append("Zeek observed TCP connection without zero-window state")
+                claimed_uids = [_flow_uid(active_flows[0])]
+
+        # Default generic flow observation
         if not corroboration_type:
             corroboration_type = "FLOW_OBSERVED"
-            evidence_notes.append(f"Zeek observed {len(matching_flows)} flow(s) between endpoints")
+            evidence_notes.append(f"Zeek observed {len(active_flows)} flow(s) between endpoints matching port and protocol")
+            claimed_uids = [_flow_uid(active_flows[0])]
 
-        corroborated.append({
+        # Mark claimed uids
+        for u in claimed_uids:
+            used_flow_uids.add(u)
+
+        # Classify into tier
+        is_semantic = corroboration_type in (
+            "UNANSWERED_SYN_SCAN",
+            "REJECTED_CONNECTION_PROBE",
+            "HIGH_VOLUME_EGRESS",
+            "IRC_SESSION_CONFIRMED",
+            "CLEARTEXT_HTTP_ON_TLS_PORT_CONFIRMED",
+            "MULTIPLE_FAILED_AUTH_ATTEMPTS",
+            "TCP_ZERO_WINDOW_CONFIRMED",
+        )
+
+        entry = {
             "alert": alert,
+            "tier": "RULE_SEMANTICALLY_CORROBORATED" if is_semantic else "FLOW_OBSERVED_ONLY",
             "corroboration_type": corroboration_type,
-            "flow_count": len(matching_flows),
+            "flow_count": len(active_flows),
             "evidence": "; ".join(evidence_notes),
-            "sample_flow": matching_flows[0],
-        })
+            "sample_flow": active_flows[0],
+            "probe_flow_count": len(claimed_uids) if rule in AGGREGATED_SCAN_RULES else 1,
+        }
+
+        if is_semantic:
+            semantically_corroborated.append(entry)
+        else:
+            flow_observed_only.append(entry)
+
+    total = len(netguard_alerts)
+    sem_rate = len(semantically_corroborated) / max(total, 1)
+    flow_presence_rate = (len(semantically_corroborated) + len(flow_observed_only)) / max(total, 1)
 
     return {
-        "total_alerts": len(netguard_alerts),
-        "corroborated": corroborated,
+        "total_alerts": total,
+        "semantically_corroborated": semantically_corroborated,
+        "flow_observed_only": flow_observed_only,
+        "endpoint_pair_only": endpoint_pair_only,
         "unmatched": unmatched,
-        "corroboration_rate": len(corroborated) / max(len(netguard_alerts), 1),
+        "unassessed": unassessed,
+        # Backward compatibility aliases
+        "corroborated": semantically_corroborated,
+        "corroboration_rate": sem_rate,
+        "semantic_corroboration_rate": sem_rate,
+        "flow_presence_rate": flow_presence_rate,
     }
 
 
 def print_zeek_corroboration_report(results: dict):
     total = results["total_alerts"]
-    corroborated = len(results["corroborated"])
-    unmatched = len(results["unmatched"])
-    rate = results["corroboration_rate"] * 100
+    sem_corr = len(results.get("semantically_corroborated", results.get("corroborated", [])))
+    flow_only = len(results.get("flow_observed_only", []))
+    ep_only = len(results.get("endpoint_pair_only", []))
+    unmatched = len(results.get("unmatched", []))
+    unassessed = len(results.get("unassessed", []))
+
+    sem_rate = results.get("semantic_corroboration_rate", sem_corr / max(total, 1)) * 100
+    flow_rate = results.get("flow_presence_rate", (sem_corr + flow_only) / max(total, 1)) * 100
 
     print("\n" + "=" * 65)
     print("  ZEEK CROSS-ENGINE TELEMETRY CORROBORATION REPORT")
     print("  NOTE: Zeek logs independent flow telemetry for corroboration.")
+    print("  Delineates rule semantic corroboration from generic flow presence.")
     print("=" * 65)
-    print(f"  NetGuard total alerts:       {total:4d}")
-    print(f"  Corroborated by Zeek:        {corroborated:4d}")
-    print(f"  Unmatched:                   {unmatched:4d}")
-    print(f"  Corroboration rate:          {rate:.1f}%")
+    print(f"  NetGuard total alerts:              {total:4d}")
+    print(f"  Corroborated by Zeek:               {sem_corr:4d} ({sem_rate:.1f}%)")
+    print(f"  - Rule Semantically Corroborated:   {sem_corr:4d} ({sem_rate:.1f}%)")
+    print(f"  - Flow Observed Only (no attack):   {flow_only:4d} (presence {flow_rate:.1f}%)")
+    print(f"  Endpoint Pair Only (time/port gap): {ep_only:4d}")
+    print(f"  Unmatched:                          {unmatched:4d}")
+    print(f"  Unassessed (telemetry boundary):    {unassessed:4d}")
     print("-" * 65)
-    if results["corroborated"]:
-        print("  Sample Corroborated Findings:")
-        for item in results["corroborated"][:8]:
+    print("  CRITICAL: Generic flow presence is NOT semantic attack corroboration.")
+    if sem_corr:
+        print("  Sample Semantically Corroborated Findings:")
+        for item in results.get("semantically_corroborated", results.get("corroborated", []))[:6]:
+            a = item["alert"]
+            print(
+                f"    [{a.get('rule_name')}] {a.get('src_ip')} → {a.get('dst_ip')} "
+                f"({item['corroboration_type']}): {item['evidence']}"
+            )
+    if flow_only:
+        print("  Sample Flow Observed Only Findings (non-attack background):")
+        for item in results.get("flow_observed_only", [])[:4]:
             a = item["alert"]
             print(
                 f"    [{a.get('rule_name')}] {a.get('src_ip')} → {a.get('dst_ip')} "

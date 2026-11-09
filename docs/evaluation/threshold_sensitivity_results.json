@@ -1,0 +1,229 @@
+{
+  "metadata": {
+    "study_title": "NetGuard IDS Numeric Rule Threshold Sensitivity Study",
+    "evaluated_rules": [
+      "SYN_FLOOD",
+      "PORT_SCAN",
+      "SLOW_PORT_SCAN",
+      "UDP_FLOOD"
+    ],
+    "perturbations_tested": [
+      "-33%",
+      "-20%",
+      "-10%",
+      "baseline",
+      "+10%",
+      "+20%",
+      "+33%"
+    ],
+    "data_source": "Calibration scenario PCAPs",
+    "timestamp_utc": "2026-11-09T08:11:34Z",
+    "scope_notes": "Evaluates parameter margin of safety on numeric sliding-window rules. Non-numeric rules (DPI, L2 invariants, blocklists) are exempt from numeric perturbation."
+  },
+  "rules": {
+    "PORT_SCAN": [
+      {
+        "threshold": 10,
+        "perturbation": "-33%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 12,
+        "perturbation": "-20%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 14,
+        "perturbation": "-7%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 15,
+        "perturbation": "+0%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 17,
+        "perturbation": "+13%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 18,
+        "perturbation": "+20%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 20,
+        "perturbation": "+33%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      }
+    ],
+    "SLOW_PORT_SCAN": [
+      {
+        "threshold": 20,
+        "perturbation": "-33%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 24,
+        "perturbation": "-20%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 27,
+        "perturbation": "-10%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 30,
+        "perturbation": "+0%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 33,
+        "perturbation": "+10%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 36,
+        "perturbation": "+20%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 40,
+        "perturbation": "+33%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      }
+    ],
+    "SYN_FLOOD": [
+      {
+        "threshold": 67,
+        "perturbation": "-33%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 80,
+        "perturbation": "-20%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 90,
+        "perturbation": "-10%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 100,
+        "perturbation": "+0%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 110,
+        "perturbation": "+10%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 120,
+        "perturbation": "+20%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 133,
+        "perturbation": "+33%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      }
+    ],
+    "UDP_FLOOD": [
+      {
+        "threshold": 33,
+        "perturbation": "-34%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 40,
+        "perturbation": "-20%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 45,
+        "perturbation": "-10%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 50,
+        "perturbation": "+0%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 55,
+        "perturbation": "+10%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 60,
+        "perturbation": "+20%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 1,
+        "status": "STABLE"
+      },
+      {
+        "threshold": 67,
+        "perturbation": "+34%",
+        "benign_alerts_fp": 0,
+        "attack_alerts_tp": 0,
+        "status": "DETECTION_DROPPED"
+      }
+    ]
+  }
+}

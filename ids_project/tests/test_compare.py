@@ -589,6 +589,216 @@ class TestComparisonMatching(unittest.TestCase):
                     os.remove(p)
 
 
+    def test_zeek_same_ip_wrong_port(self):
+        """Zeek traffic on wrong port between same endpoints must be classified as ENDPOINT_PAIR_ONLY."""
+        alerts = [{
+            "rule_name": "DATA_EXFIL",
+            "src_ip": "10.0.0.5",
+            "dst_ip": "198.51.100.99",
+            "dst_port": 443,
+            "protocol": "TCP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [{
+            "timestamp": 100.0,
+            "src_ip": "10.0.0.5",
+            "dst_ip": "198.51.100.99",
+            "dst_port": 80,
+            "protocol": "TCP",
+            "conn_state": "SF",
+            "orig_bytes": 100000,
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 0)
+        self.assertEqual(len(res["endpoint_pair_only"]), 1)
+        self.assertEqual(res["endpoint_pair_only"][0]["tier"], "ENDPOINT_PAIR_ONLY")
+
+    def test_zeek_same_ip_wrong_protocol(self):
+        """Zeek traffic with mismatched protocol must be classified as ENDPOINT_PAIR_ONLY."""
+        alerts = [{
+            "rule_name": "DATA_EXFIL",
+            "src_ip": "10.0.0.5",
+            "dst_ip": "198.51.100.99",
+            "dst_port": 53,
+            "protocol": "TCP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [{
+            "timestamp": 100.0,
+            "src_ip": "10.0.0.5",
+            "dst_ip": "198.51.100.99",
+            "dst_port": 53,
+            "protocol": "UDP",
+            "conn_state": "SF",
+            "orig_bytes": 100000,
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 0)
+        self.assertEqual(len(res["endpoint_pair_only"]), 1)
+        self.assertEqual(res["endpoint_pair_only"][0]["tier"], "ENDPOINT_PAIR_ONLY")
+
+    def test_zeek_same_ip_outside_time_window(self):
+        """Zeek traffic outside time window must not fall back to matching; classified as ENDPOINT_PAIR_ONLY."""
+        alerts = [{
+            "rule_name": "DATA_EXFIL",
+            "src_ip": "10.0.0.5",
+            "dst_ip": "198.51.100.99",
+            "dst_port": 443,
+            "protocol": "TCP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [{
+            "timestamp": 150.0,  # 50s later, well outside tolerance=10s
+            "src_ip": "10.0.0.5",
+            "dst_ip": "198.51.100.99",
+            "dst_port": 443,
+            "protocol": "TCP",
+            "conn_state": "SF",
+            "orig_bytes": 100000,
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 0)
+        self.assertEqual(len(res["endpoint_pair_only"]), 1)
+
+    def test_zeek_flow_reuse_prevented_across_unrelated_alerts(self):
+        """A single Zeek flow cannot be claimed by multiple unrelated NetGuard alerts."""
+        alerts = [
+            {
+                "rule_name": "DATA_EXFIL",
+                "src_ip": "10.0.0.5",
+                "dst_ip": "198.51.100.99",
+                "dst_port": 443,
+                "protocol": "TCP",
+                "timestamp": 100.0,
+            },
+            {
+                "rule_name": "CLEAR_HTTP_ON_TLS_PORT",
+                "src_ip": "10.0.0.5",
+                "dst_ip": "198.51.100.99",
+                "dst_port": 443,
+                "protocol": "TCP",
+                "timestamp": 100.0,
+            },
+        ]
+        zeek_conns = [{
+            "uid": "single_flow_1",
+            "timestamp": 100.0,
+            "src_ip": "10.0.0.5",
+            "dst_ip": "198.51.100.99",
+            "dst_port": 443,
+            "protocol": "TCP",
+            "conn_state": "SF",
+            "service": "http",
+            "orig_bytes": 100000,
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 1)
+        self.assertEqual(len(res["unmatched"]), 1)
+        self.assertEqual(res["unmatched"][0]["reason"], "FLOW_ALREADY_CLAIMED")
+
+    def test_zeek_ordinary_connection_falls_to_flow_observed_only(self):
+        """Ordinary established connection without scan attack indicators is FLOW_OBSERVED_ONLY."""
+        alerts = [{
+            "rule_name": "PORT_SCAN",
+            "src_ip": "192.168.1.10",
+            "dst_ip": "192.168.1.20",
+            "dst_port": 80,
+            "protocol": "TCP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [{
+            "timestamp": 100.0,
+            "src_ip": "192.168.1.10",
+            "dst_ip": "192.168.1.20",
+            "dst_port": 80,
+            "protocol": "TCP",
+            "conn_state": "SF",
+            "history": "ShADadfF",
+            "orig_bytes": 500,
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 0)
+        self.assertEqual(len(res["flow_observed_only"]), 1)
+        self.assertEqual(res["flow_observed_only"][0]["tier"], "FLOW_OBSERVED_ONLY")
+        self.assertEqual(res["flow_observed_only"][0]["corroboration_type"], "ESTABLISHED_FLOW_WITHOUT_SCAN_STATE")
+
+    def test_zeek_irc_connection_without_malicious_c2_evidence(self):
+        """Single standard IRC connection without periodic beaconing is FLOW_OBSERVED_ONLY."""
+        alerts = [{
+            "rule_name": "IRC_C2_BEACONING",
+            "src_ip": "192.168.1.10",
+            "dst_ip": "198.51.100.5",
+            "dst_port": 6667,
+            "protocol": "TCP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [{
+            "timestamp": 100.0,
+            "src_ip": "192.168.1.10",
+            "dst_ip": "198.51.100.5",
+            "dst_port": 6667,
+            "protocol": "TCP",
+            "service": "irc",
+            "conn_state": "SF",
+            "history": "ShADadFf",
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 0)
+        self.assertEqual(len(res["flow_observed_only"]), 1)
+        self.assertEqual(res["flow_observed_only"][0]["corroboration_type"], "IRC_FLOW_WITHOUT_C2_BEACONING")
+
+    def test_zeek_legitimate_multi_flow_scan_corroboration(self):
+        """Aggregated scanning alerts match multi-flow probes and report probe count."""
+        alerts = [{
+            "rule_name": "PORT_SCAN",
+            "src_ip": "192.168.1.10",
+            "dst_ip": "192.168.1.20",
+            "dst_port": 80,
+            "protocol": "TCP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [
+            {"uid": f"scan_{p}", "timestamp": 100.0 + (p * 0.1), "src_ip": "192.168.1.10", "dst_ip": "192.168.1.20", "dst_port": p, "protocol": "TCP", "conn_state": "S0", "history": "S"}
+            for p in (21, 22, 23, 25, 80)
+        ]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 1)
+        self.assertEqual(res["semantically_corroborated"][0]["probe_flow_count"], 5)
+        self.assertEqual(res["semantically_corroborated"][0]["corroboration_type"], "UNANSWERED_SYN_SCAN")
+
+    def test_zeek_unmatched_and_unassessed_classification(self):
+        """ARP_SPOOF must be UNASSESSED, and zero-traffic host pairs must be UNMATCHED."""
+        alerts = [
+            {"rule_name": "ARP_SPOOF", "src_ip": "192.168.1.1", "dst_ip": "192.168.1.2"},
+            {"rule_name": "BRUTE_FORCE", "src_ip": "192.0.2.1", "dst_ip": "198.51.100.1", "dst_port": 22, "protocol": "TCP", "timestamp": 10.0},
+        ]
+        zeek_conns = [
+            {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "dst_port": 80, "protocol": "TCP", "conn_state": "SF", "timestamp": 10.0}
+        ]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["unassessed"]), 1)
+        self.assertEqual(res["unassessed"][0]["tier"], "UNASSESSED")
+        self.assertEqual(len(res["unmatched"]), 1)
+        self.assertEqual(res["unmatched"][0]["tier"], "UNMATCHED")
+
+    def test_suricata_agreement_breakdown_exact_vs_scan(self):
+        """Suricata agreement report clearly separates exact 5-tuple from semantic scan matches."""
+        netguard = [
+            {"rule_name": "DATA_EXFIL", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "dst_port": 443, "protocol": "TCP", "timestamp": 100.0},
+            {"rule_name": "PORT_SCAN", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "dst_port": 80, "protocol": "TCP", "timestamp": 100.0},
+        ]
+        suricata = [
+            # Exact 5-tuple match on port 443
+            {"signature": "Custom Exfil", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "dst_port": 443, "protocol": "TCP", "timestamp": 101.0},
+            # Scan match across different port (80 vs 8080)
+            {"signature": "LOCAL TCP SYN scan-like burst >=15 packets/10s", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "dst_port": 8080, "protocol": "TCP", "timestamp": 102.0},
+        ]
+        res = match_alerts_agreement(netguard, suricata)
+        self.assertEqual(len(res["both"]), 2)
+        self.assertEqual(len(res["exact_5tuple_matches"]), 1)
+        self.assertEqual(len(res["semantic_scan_matches"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 

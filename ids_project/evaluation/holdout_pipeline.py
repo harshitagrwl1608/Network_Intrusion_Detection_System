@@ -54,6 +54,8 @@ if not logger.handlers:
 HDD_BASE = "/run/media/harshitgarg/Data1/NetGuard-datasets"
 DEFAULT_MOUNT_POINT = "/run/media/harshitgarg/Data1"
 DEFAULT_EXPECTED_DEVICE = "/dev/sdb1"
+DEFAULT_EXPECTED_UUID = "99a513c9-4aaa-4660-b7dc-2d2616449df9"
+DEFAULT_EXPECTED_LABEL = "Data"
 DEFAULT_HOLDOUT_QUARANTINE_DIR = os.path.join(HDD_BASE, "holdout_quarantine")
 DEFAULT_HOLDOUT_REPORTS_DIR = os.path.join(HDD_BASE, "holdout_reports")
 DEFAULT_REGISTRY_PATH = os.path.join(_IDS_ROOT, "docs", "evaluation", "holdout-registry.json")
@@ -126,19 +128,34 @@ def check_quarantine_path_containment(target_path: str, quarantine_root: str) ->
 
 def verify_external_mount(
     expected_mount: str = DEFAULT_MOUNT_POINT,
-    expected_device: str = DEFAULT_EXPECTED_DEVICE,
+    expected_device: str | None = None,
+    expected_uuid: str = DEFAULT_EXPECTED_UUID,
+    expected_label: str = DEFAULT_EXPECTED_LABEL,
     require_mount: bool = True
 ) -> bool:
     """
     Verify external drive mount at expected path before permitting quarantine/report operations.
     Enforces:
       - Exact match on expected_mount (/run/media/harshitgarg/Data1), rejecting parent or prefix mounts.
-      - Exact match on expected_device (/dev/sdb1) or verified alias resolving to that device.
-      - Explicitly rejects /dev/sda1 and other unverified devices.
+      - Backing device validation: matches expected_device explicitly when passed, or verified persistent
+        UUID (99a513c9-4aaa-4660-b7dc-2d2616449df9) / Label (Data) via /dev/disk/by-uuid and /dev/disk/by-label.
+      - Explicitly rejects root/system filesystem partitions and unverified devices.
       - Never treats mere directory existence as proof of mount.
     """
     if not require_mount:
         return True
+
+    # Identify root partition device to explicitly prevent ever accepting system root
+    root_dev = None
+    try:
+        with open("/proc/mounts", "r") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[1] == "/":
+                    root_dev = os.path.realpath(parts[0]) if os.path.exists(parts[0]) else parts[0]
+                    break
+    except Exception:
+        pass
 
     found_mount = False
     try:
@@ -149,15 +166,42 @@ def verify_external_mount(
                     dev, mp = parts[0], parts[1]
                     if mp == expected_mount:
                         found_mount = True
-                        # Check backing device match
                         dev_real = os.path.realpath(dev) if os.path.exists(dev) else dev
-                        expected_real = os.path.realpath(expected_device) if os.path.exists(expected_device) else expected_device
-                        if dev == expected_device or dev_real == expected_real:
-                            return True
+
+                        # Root partition can never be accepted as external storage
+                        if root_dev and dev_real == root_dev:
+                            logger.error(
+                                f"Mount check FAILED: {expected_mount} resolved to root partition "
+                                f"'{dev_real}'. Operations blocked."
+                            )
+                            return False
+
+                        if expected_device is not None:
+                            # Explicit device specified (e.g. in targeted unit test)
+                            expected_real = os.path.realpath(expected_device) if os.path.exists(expected_device) else expected_device
+                            if dev == expected_device or dev_real == expected_real:
+                                return True
+                            else:
+                                logger.error(
+                                    f"Mount check FAILED: {expected_mount} is mounted on unexpected backing device "
+                                    f"'{dev}' (expected '{expected_device}'). Operations blocked."
+                                )
+                                return False
                         else:
+                            # Check persistent UUID / label or default backing device
+                            uuid_path = f"/dev/disk/by-uuid/{expected_uuid}"
+                            label_path = f"/dev/disk/by-label/{expected_label}"
+                            if os.path.exists(uuid_path) and os.path.realpath(uuid_path) == dev_real:
+                                return True
+                            if os.path.exists(label_path) and os.path.realpath(label_path) == dev_real:
+                                return True
+                            expected_real = os.path.realpath(DEFAULT_EXPECTED_DEVICE) if os.path.exists(DEFAULT_EXPECTED_DEVICE) else DEFAULT_EXPECTED_DEVICE
+                            if dev == DEFAULT_EXPECTED_DEVICE or dev_real == expected_real:
+                                return True
+
                             logger.error(
                                 f"Mount check FAILED: {expected_mount} is mounted on unexpected backing device "
-                                f"'{dev}' (expected '{expected_device}'). Operations blocked."
+                                f"'{dev}' (expected persistent UUID '{expected_uuid}' or label '{expected_label}'). Operations blocked."
                             )
                             return False
     except Exception as exc:

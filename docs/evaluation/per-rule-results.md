@@ -36,22 +36,22 @@ This report presents per-rule detection accuracy, false positive analysis, and o
 |---|---|---|---|---|---|---|
 | `ws_dns_remoteshell` | Wireshark Foundation | Port 53 Covert Shell | 131 / 25.0 KB | 2 | `NON_DNS_TRAFFIC_ON_DNS_PORT` (2) | **True Positive (Evasion Detected)**: Caught Windows command shell on port 53 |
 | `ws_teardrop` | Wireshark Foundation | IP Fragmentation Exploit | 17 / 1.8 KB | 1 | `IP_FRAGMENT_ANOMALY` (1) | **True Positive (Exploit Detected)**: Caught overlapping fragment offset 24-28 (Teardrop crash attack) |
-| `m_rau5_icmp_tunnel` | Mock Research Capture | Covert ICMP Tunnel | 15 / 1.9 KB | 2 | `ICMP_TUNNEL` (1), `DNS_ANOMALY` (1) | **True Positive (Exfil Detected)**: Base64 data exfiltration in ICMP Echo |
+| `m_rau5_icmp_tunnel` | Mock Demonstration Capture (Lab Generated) | Covert ICMP Tunnel | 15 / 1.9 KB | 2 | `ICMP_TUNNEL` (1), `DNS_ANOMALY` (1) | **Mock Demonstration Only**: Lab-generated demonstration capture; explicitly excluded from independent validation corpus |
 | `foxit_log4shell` | Fox-IT Research | Log4Shell CVE-2021-44228 | 403 / 56.3 KB | 1 | `PAYLOAD_HIT` (1) | **True Positive (Exploit Detected)**: Caught `${jndi:ldap://...}` payload |
 | `ws_nmap_stealth_scan` | Wireshark Foundation | Nmap Stealth Recon | 2,052 / 157.9 KB | 3 | `PORT_SCAN` (1), `SLOW_PORT_SCAN` (1), `TCP_FLAG_ANOMALY` (1) | **True Positive (Recon Detected)**: Vertical SYN scan and illegal SYN+FIN flags |
 | `oisf_syn_flood` | OISF Suricata | Volumetric SYN Flood | 200 / 14.0 KB | 1 | `SYN_FLOOD` (1) | **True Positive (DoS Detected)**: 100 SYN packets in 10s burst |
-| `nozomi_triton_exec` | Nozomi Networks | TRITON ICS Safety Malware | 999 / 174.1 KB | 5 | `PAYLOAD_HIT` (5) | **True Positive (ICS Malware Detected)**: Malicious TriStation command payloads |
-| `iot23_malware_34_1` | Stratosphere CTU | Mirai Botnet Attack & C2 | 233,865 / 126.3 MB | 386 | `IRC_C2_BEACONING` (379), `DATA_EXFIL` (2), `UDP_FLOOD` (2), `SYN_FLOOD` (3) | **True Positive (Multi-Vector C2 & DoS)**: Mirai IRC registration/beaconing + DoS floods |
-| `iot23_malware_3_1` | Stratosphere CTU | Muhstik Botnet Attack | 155,595 / 57.9 MB | 6,949 | `PORT_SCAN` (6,399), `SLOW_PORT_SCAN` (473), `BRUTE_FORCE` (77) | **High Recall True Positives**: Mass horizontal scanning & SSH brute force |
+| `nozomi_triton_exec` | Nozomi Networks | TRITON ICS Safety Malware | 896 / 174.1 KB | 5 | `PAYLOAD_HIT` (5) | **True Positive (ICS Malware Detected)**: Malicious TriStation command payloads (pcapng format, verified via capinfos) |
+| `iot23_malware_34_1` | Stratosphere CTU | Mirai Botnet Attack & C2 | 233,865 / 126.3 MB | 386 | `IRC_C2_BEACONING` (379), `DATA_EXFIL` (2), `UDP_FLOOD` (2), `SYN_FLOOD` (3) | **True Positive (Multi-Vector C2 & DoS)**: Mirai IRC registration/beaconing + DoS floods (379 session-cooldown bounded alerts vs 2,450 Suricata message-level alerts) |
+| `iot23_malware_3_1` | Stratosphere CTU | Muhstik Botnet Attack | 496,959 / 57.9 MB | 6,949 | `PORT_SCAN` (6,399), `SLOW_PORT_SCAN` (473), `BRUTE_FORCE` (77) | **High Recall True Positives**: Mass horizontal scanning & SSH brute force (exact 496,959 packets verified via capinfos) |
 | `ws_http_browsing` | Wireshark Foundation | Standard Web Browsing | 43 / 25.8 KB | 0 | None | **Zero False Alarms** (100% Benign HTTP Specificity) |
 | `ws_skype_irc` | Wireshark Foundation | Desktop IRC & Skype | 2,263 / 420.9 KB | 0 | None | **Zero False Alarms** (Hardened IRC C2 rule suppresses legitimate chat traffic) |
 | `oisf_modbus` | OISF Suricata | Industrial Modbus SCADA | 99 / 8.7 KB | 0 | None | **Zero False Alarms** (Benign industrial control protocol traffic) |
-| `iot23_honeypot_4_1` | Stratosphere CTU | Real Somfy Smart Doorlock | 21,664 / 4.4 MB | 0 | None | **Zero False Alarms** (100% Benign IoT Specificity across 21k pkts) |
+| `iot23_honeypot_4_1` | Stratosphere CTU | Real Somfy Smart Doorlock | 21,664 / 4.4 MB | 0 | None | **Zero False Alarms** (100% Benign IoT Specificity across 21,664 pkts) |
 | `ws_arp_storm` | Wireshark Foundation | Cable Modem Broadcast | 622 / 47.3 KB | 0 | None | **True Negative** for `ARP_SPOOF` (no IP-MAC conflict in broadcast flood) |
 | `foxit_quantum_insert`| Fox-IT Research | Man-on-the-Side Injection | 9 / 1.8 KB | 0 | None | Unassessed reference capture (clear HTTP port 80 injection) |
 | `oisf_tls_sni_anomaly`| OISF Suricata | Standard TLS Handshake | 25 / 4.0 KB | 0 | None | Clean TLS SNI validation baseline |
 | `iot23_malware_8_1` | Stratosphere CTU | Hakai Botnet Low-Rate | 23,623 / 2.1 MB | 0 | None | Unassessed reference capture (1 probe / ~60s below 10s/120s scan threshold) |
-| `iot23_malware_20_1` | Stratosphere CTU | Torii Botnet C2 & Recon | 50,156 / 3.9 MB | 0 | None | Multi-stage modular botnet replayed cleanly without error |
+| `iot23_malware_20_1` | Stratosphere CTU | Torii Botnet C2 & Recon | 50,156 / 4.06 MB | 0 | None | Multi-stage modular botnet replayed cleanly without error |
 
 ---
 
@@ -172,3 +172,23 @@ In the November 8 autonomous engineering sprint, all 23 detection rules were pro
 - **Pre-Registered Candidates (`docs/evaluation/holdout-registry.json`):** 3 candidate datasets targeting independent third-party publishers (CIC-Bell-DNS-2021, MAWI WIDE Transpacific, Stratosphere CTU Mirai Capture 48-1).
 - **Physical Acquisition Status:** **Pending Acquisition** in `/run/media/harshitgarg/Data1/NetGuard-datasets/holdout_quarantine`.
 - **Holdout Accuracy Claims:** **0 holdout evaluations claimed.** Strict scientific governance forbids reporting holdout metrics before physical acquisition, quarantine validation, and single-pass blind execution.
+
+### 5.6 Reproducible Numeric Threshold Sensitivity Study
+To evaluate the stability of NetGuard's stateful heuristics, an empirical perturbation study was conducted using `ids_project/evaluation/threshold_sensitivity_study.py`.
+
+#### Methodological Scope & Transparency
+- **Target Rules:** Evaluated the 4 core sliding-window rate rules: `PORT_SCAN`, `SLOW_PORT_SCAN`, `SYN_FLOOD`, and `UDP_FLOOD`.
+- **Perturbation Levels:** Tested 7 discrete perturbation tiers: -33%, -20%, -10%, baseline (1.0x), +10%, +20%, and +33%.
+- **Non-Numeric Rules:** Non-numeric rules (DPI signature regexes, L2 ARP invariants, blocklists, TLS extension parsers) have no numeric rate threshold to perturb and operate deterministically on exact pattern matches.
+- **Empirical Purpose:** This study evaluates parameter tolerance and safety margins on calibration scenario data. It is explicitly NOT a blind holdout proof of universal generalisation.
+
+#### Empirical Results Matrix
+
+| Detection Rule | Baseline Threshold | Evaluated Range | Perturbation Span | True Positives (Attack) | False Positives (Benign) | Stability Assessment |
+|---|---|---|---|---|---|---|
+| `PORT_SCAN` | 15 ports / 10s | 10 to 20 ports | -33% to +33% | 1 / 1 (100%) across all tiers | 0 across all tiers | **STABLE**: Detection intact across full ±33% span with 0 benign false alarms |
+| `SLOW_PORT_SCAN` | 30 ports / 120s | 20 to 40 ports | -33% to +33% | 1 / 1 (100%) across all tiers | 0 across all tiers | **STABLE**: Detection intact across full ±33% span with 0 benign false alarms |
+| `SYN_FLOOD` | 100 pkts / 10s | 67 to 133 pkts | -33% to +33% | 1 / 1 (100%) across all tiers | 0 across all tiers | **STABLE**: Detection intact across full ±33% span with 0 benign false alarms |
+| `UDP_FLOOD` | 50 pkts / 5s | 33 to 67 pkts | -34% to +34% | 1 / 1 up to 60 pkts (+20%); 0 at 67 pkts (+34%) | 0 across all tiers | **PARAMETER-BOUNDED**: Calibration scenario S32 generates 60 UDP packets. As expected, raising threshold to 67 (+34%) drops detection, confirming realistic parameter bounds rather than artificial over-tolerance. |
+
+Raw structured results are archived in `docs/evaluation/threshold_sensitivity_results.json` and reproducible on demand via `python3 ids_project/evaluation/threshold_sensitivity_study.py`.

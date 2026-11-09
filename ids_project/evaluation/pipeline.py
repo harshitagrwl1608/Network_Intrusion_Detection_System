@@ -66,6 +66,8 @@ MAX_ALLOCATION_GIB = 450.0
 MAX_DOWNLOAD_TIME_SECONDS = 90 * 60  # 90 minutes
 EXPECTED_MOUNT_POINT = "/run/media/harshitgarg/Data1"
 EXPECTED_BACKING_DEVICE = "/dev/sdb1"
+EXPECTED_DEVICE_UUID = "99a513c9-4aaa-4660-b7dc-2d2616449df9"
+EXPECTED_DEVICE_LABEL = "Data"
 
 # PCAP Magic Numbers
 PCAP_MAGIC_LE = b"\xd4\xc3\xb2\xa1"
@@ -92,8 +94,19 @@ def check_disk_safety(require_mount: bool = True) -> bool:
         logger.error(f"HDD dataset directory does not exist: {HDD_DATASETS_DIR}")
         return False
 
-    # --- Mount verification: /dev/sdb1 must be mounted at EXPECTED_MOUNT_POINT ---
+    # --- Mount verification: backing device must match EXPECTED_BACKING_DEVICE or persistent UUID/Label ---
     if require_mount:
+        root_dev = None
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[1] == "/":
+                        root_dev = os.path.realpath(parts[0]) if os.path.exists(parts[0]) else parts[0]
+                        break
+        except Exception:
+            pass
+
         try:
             mount_ok = False
             with open("/proc/mounts", "r") as f:
@@ -101,13 +114,33 @@ def check_disk_safety(require_mount: bool = True) -> bool:
                     parts = line.strip().split()
                     if len(parts) >= 2 and parts[1] == EXPECTED_MOUNT_POINT:
                         dev = parts[0]
-                        if dev == EXPECTED_BACKING_DEVICE or os.path.realpath(dev) == os.path.realpath(EXPECTED_BACKING_DEVICE):
+                        dev_real = os.path.realpath(dev) if os.path.exists(dev) else dev
+
+                        if root_dev and dev_real == root_dev:
+                            logger.error(
+                                f"Mount check FAILED: {EXPECTED_MOUNT_POINT} resolved to root partition "
+                                f"'{dev_real}'. Writes blocked."
+                            )
+                            return False
+
+                        uuid_target = f"/dev/disk/by-uuid/{EXPECTED_DEVICE_UUID}"
+                        label_target = f"/dev/disk/by-label/{EXPECTED_DEVICE_LABEL}"
+                        exp_real = os.path.realpath(EXPECTED_BACKING_DEVICE) if os.path.exists(EXPECTED_BACKING_DEVICE) else EXPECTED_BACKING_DEVICE
+
+                        is_valid = (
+                            dev == EXPECTED_BACKING_DEVICE
+                            or dev_real == exp_real
+                            or (os.path.exists(uuid_target) and os.path.realpath(uuid_target) == dev_real)
+                            or (os.path.exists(label_target) and os.path.realpath(label_target) == dev_real)
+                        )
+
+                        if is_valid:
                             mount_ok = True
                             break
                         else:
                             logger.error(
                                 f"Mount check FAILED: {EXPECTED_MOUNT_POINT} is mounted on unexpected backing device "
-                                f"'{dev}' (expected '{EXPECTED_BACKING_DEVICE}'). Writes blocked."
+                                f"'{dev}' (expected '{EXPECTED_BACKING_DEVICE}' or UUID '{EXPECTED_DEVICE_UUID}'). Writes blocked."
                             )
                             return False
             if not mount_ok:
