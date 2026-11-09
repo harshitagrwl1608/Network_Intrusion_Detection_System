@@ -163,6 +163,9 @@ class PcapParser:
         self.is_nanosecond = False
         self.snaplen = 0
         self.linktype = 0
+        self.packet_records_read = 0
+        self.runt_frames = 0
+        self.truncated_records = 0
 
     def open(self):
         self.file = open(self.filepath, "rb")
@@ -217,18 +220,33 @@ class PcapParser:
 
         while True:
             pkt_hdr = self.file.read(16)
-            if len(pkt_hdr) < 16:
+            if not pkt_hdr:
                 break
+            if len(pkt_hdr) != 16:
+                self.truncated_records += 1
+                raise ValueError(
+                    f"Truncated PCAP packet header after record {pkt_idx}: {len(pkt_hdr)} bytes"
+                )
             pkt_idx += 1
+            self.packet_records_read = pkt_idx
             sec, usec, caplen, origlen = struct.unpack(f"{endian_fmt}IIII", pkt_hdr)
+            if self.snaplen and caplen > self.snaplen:
+                self.truncated_records += 1
+                raise ValueError(
+                    f"PCAP record {pkt_idx} caplen {caplen} exceeds snaplen {self.snaplen}"
+                )
             pkt_bytes = self.file.read(caplen)
-            if len(pkt_bytes) < caplen:
-                break
+            if len(pkt_bytes) != caplen:
+                self.truncated_records += 1
+                raise ValueError(
+                    f"Truncated PCAP packet data at record {pkt_idx}: expected {caplen}, got {len(pkt_bytes)}"
+                )
 
             ts = sec + (usec / time_divisor)
 
             # Runt frame check: Ethernet header requires at least 14 bytes
             if caplen < 14:
+                self.runt_frames += 1
                 continue
 
             ethertype = struct.unpack(">H", pkt_bytes[12:14])[0]
@@ -670,9 +688,12 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
                     ])
                     total_exported_packets += 1
 
+    pcap_packets_read = parser.packet_records_read
+    runt_frames = parser.runt_frames
     pkt_export_file.close()
     t_pcap = time.time() - t0
-    print(f"  Processed {pcap_packets_read:,} PCAP packets in {t_pcap:.2f}s")
+    print(f"  Processed {pcap_packets_read:,} PCAP packet records in {t_pcap:.2f}s "
+          f"(runt frames skipped: {runt_frames:,})")
     print(f"  Total Valid Initial SYNs in PCAP: {valid_initial_syns_seen:,}")
     print(f"  Streamed {total_exported_packets:,} Packet Attribution Rows (Uncapped)")
 
@@ -1044,7 +1065,8 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             "publisher_scan_flows": total_scan_flows,
         },
         "pcap_parsing": {
-            "packets_read": pcap_packets_read,
+            "packet_records_read": pcap_packets_read,
+            "runt_frames_skipped": runt_frames,
             "valid_initial_syn_packets": valid_initial_syns_seen,
             "total_exported_attribution_packets": total_exported_packets,
         },
@@ -1059,6 +1081,10 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             "tier_e_no_association": tier_e,
             "strict_precision_pct": strict_precision_pct,
             "scan_rule_precision_pct": scan_rule_precision_pct,
+            "metric_semantics": {
+                "strict_precision_pct": "Tier-A share of all emitted alert rows; not conventional precision because Tier B and Tier D are not established false positives.",
+                "scan_rule_precision_pct": "Tier-A share of scan-rule alert rows; not conventional precision because Tier B is malicious-associated but incompletely corroborated.",
+            },
             "unassessed_rate_pct": unassessed_rate_pct,
         },
         "retransmission_investigation": {
@@ -1106,8 +1132,8 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
 
     print("\n" + "=" * 80)
     print("  NETGUARD IDS FORENSIC AUDIT V3.1 COMPLETED SUCCESSFULLY")
-    print(f"  Strict Tier-A Fraction : {strict_precision_pct}% ({tier_a:,} / {total_emitted:,})")
-    print(f"  Scan Rule Tier-A Fraction: {scan_rule_precision_pct}% ({tier_a:,} / {len(scan_alerts):,})")
+    print(f"  Tier-A Share of All Alerts : {strict_precision_pct}% ({tier_a:,} / {total_emitted:,})")
+    print(f"  Tier-A Share of Scan Alerts: {scan_rule_precision_pct}% ({tier_a:,} / {len(scan_alerts):,})")
     print(f"  Unassessed ARP Rate    : {unassessed_rate_pct}% ({tier_d:,} / {total_emitted:,})")
     print("  Official Audit Verdict : PROVISIONAL — corrected code requires a fresh full-data run")
     print("=" * 80)
@@ -1212,11 +1238,13 @@ Only cases meeting the full distinct-target corroboration threshold qualify for 
     with open(os.path.join(docs_dir, "06_metric_recalculation.md"), "w", encoding="utf-8") as f:
         f.write(f"""# 6. Metric Recalculation & Reconciliation
 
-## Strict Formulas and Audited Values
+## Strict Confirmation Fractions (Not Conventional Precision)
 
-$$\\text{{Strict Alert Precision}} = \\frac{{{a['tier_a_confirmed_tp']}}}{{{a['total_alerts']}}} = \\mathbf{{{a['strict_precision_pct']:.2f}\\%}}$$
+$\\text{{Tier-A Share of All Alerts}} = \\frac{{{a['tier_a_confirmed_tp']}}}{{{a['total_alerts']}}} = \\mathbf{{{a['strict_precision_pct']:.2f}\\%}}$
 
-$$\\text{{Transport Scanning Rule Precision}} = \\frac{{{a['tier_a_confirmed_tp']}}}{{{a['scan_alerts']}}} = \\mathbf{{{a['scan_rule_precision_pct']:.2f}\\%}}$$
+$\\text{{Tier-A Share of Scan Alerts}} = \\frac{{{a['tier_a_confirmed_tp']}}}{{{a['scan_alerts']}}} = \\mathbf{{{a['scan_rule_precision_pct']:.2f}\\%}}$
+
+These are strict confirmation fractions, not conventional precision estimates: Tier B is malicious-associated but incompletely corroborated, and Tier D is unassessed rather than confirmed false positive.
 
 $$\\text{{Unassessed Alert Rate (ARP)}} = \\frac{{{a['tier_d_unassessed']}}}{{{a['total_alerts']}}} = \\mathbf{{{a['unassessed_rate_pct']:.2f}\\%}}$$
 """)
@@ -1254,8 +1282,8 @@ $$\\text{{Unassessed Alert Rate (ARP)}} = \\frac{{{a['tier_d_unassessed']}}}{{{a
 ## Official Verdict: SUPPORTED WITH LIMITATIONS
 
 NetGuard's core behavioral scanning detection engine against real-world Mirai botnet activity is **substantiated**:
-- **Strict Alert Precision**: **{a['strict_precision_pct']:.2f}%** ({a['tier_a_confirmed_tp']:,} / {a['total_alerts']:,})
-- **Scan-Rule Tier-A Fraction**: **{a['scan_rule_precision_pct']:.2f}%** ({a['tier_a_confirmed_tp']:,} / {a['scan_alerts']:,})
+- **Tier-A Share of All Alerts**: **{a['strict_precision_pct']:.2f}%** ({a['tier_a_confirmed_tp']:,} / {a['total_alerts']:,})
+- **Scan-Rule Tier-A Share**: **{a['scan_rule_precision_pct']:.2f}%** ({a['tier_a_confirmed_tp']:,} / {a['scan_alerts']:,})
 - Per-flow recall and campaign coverage are **not established** by cooldown overlap statistics.
 
 ### Established Limitations
