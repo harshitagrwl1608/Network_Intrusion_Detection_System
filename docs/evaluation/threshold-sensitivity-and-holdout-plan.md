@@ -153,3 +153,29 @@ flowchart LR
    - Execute `ids_project/evaluation/pipeline.py` against the quarantined holdout captures in a single automated pass.
    - Record raw outputs, true positives, false negatives, and false alarms verbatim.
    - Forbid iterative threshold tuning or post-hoc rule adjustments against the holdout set. Any necessary fixes must be classified as post-evaluation findings for future development cycles.
+
+---
+
+## 9. Empirical Threshold Sensitivity Findings & Parameter Stability
+
+In Phase 4 and the Final Integrity Sprint, an empirical sensitivity sweep ($\pm 33\%$) was conducted on the numeric sliding-window detection rules using the calibration scenarios. The goal was to establish the stability margins of production thresholds and identify any razor-thin boundaries where minor traffic perturbations could cause detection failure or false alarm bursts.
+
+Detailed JSON data is recorded in [`docs/evaluation/threshold_sensitivity_results.json`](./threshold_sensitivity_results.json).
+
+### 9.1 Summary of Evaluated Sliding-Window Rules
+
+| Rule Identifier | Baseline Threshold | Perturbation Range Tested | Stable Margin ($\Delta \text{Threshold}$) | Observed Detection Status | Benign False Alarms |
+|---|---|---|---|---|---|
+| `PORT_SCAN` | 15 SYN pkts / 10s | 10 to 20 pkts ($-33\%$ to $+33\%$) | $[-33\%, +33\%]$ | **STABLE** (TP=1, FN=0) | 0 FP across all steps |
+| `SLOW_PORT_SCAN` | 30 SYN pkts / 120s | 20 to 40 pkts ($-33\%$ to $+33\%$) | $[-33\%, +33\%]$ | **STABLE** (TP=1, FN=0) | 0 FP across all steps |
+| `SYN_FLOOD` | 100 SYN pkts / 10s | 67 to 133 pkts ($-33\%$ to $+33\%$) | $[-33\%, +33\%]$ | **STABLE** (TP=1, FN=0) | 0 FP across all steps |
+| `UDP_FLOOD` | 50 UDP pkts / 5s | 33 to 67 pkts ($-34\%$ to $+34\%$) | $[-34\%, +20\%]$ | **SELECTIVELY STABLE** (TP=1 up to +20%; drops at +34%) | 0 FP across all steps |
+
+### 9.2 Key Findings & Recommendations
+
+1. **High Margin of Safety on Scan and SYN Rules:**
+   - `PORT_SCAN`, `SLOW_PORT_SCAN`, and `SYN_FLOOD` maintain 100% detection and 0% false positives across the entire $\pm 33\%$ perturbation corridor. This demonstrates that their detection boundaries are well-separated from benign baseline traffic and not fragile to minor threshold shifts.
+2. **Selective Boundary on Volumetric UDP Floods:**
+   - In `UDP_FLOOD`, raising the threshold from 50 to 67 packets (+34%) caused the attack detection to drop on the calibration burst scenario. The production baseline of 50 packets per 5 seconds provides a $\sim 20\%$ safety buffer while preventing false alarms on non-attack UDP flows.
+3. **Formal Threshold Governance Invariant:**
+   - Detection thresholds must not be altered without re-running the automated sensitivity sweep to verify that both detection recall and benign suppression remain intact.
