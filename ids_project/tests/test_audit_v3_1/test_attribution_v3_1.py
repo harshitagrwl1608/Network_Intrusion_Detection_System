@@ -85,8 +85,10 @@ def test_04_runt_frame_and_truncated_packet_handling(tmp_path):
 
     with PcapParser(str(pcap_runt)) as p:
         packets = list(p.iter_packets())
-        # The runt frame was processed safely and yielded nothing or skipped
+        # The runt packet record is counted, but does not become a decoded frame.
         assert len(packets) == 0
+        assert p.packet_records_read == 1
+        assert p.runt_frames == 1
 
 
 def test_05_vlan_8021q_encapsulation_parsing(tmp_path):
@@ -500,3 +502,14 @@ def test_30_ambiguous_target_cannot_be_silently_counted_as_correlated():
         unmatched_targets_count=0, ambiguous_targets_count=1
     )
     assert key == "TIER_B_MALICIOUS_ASSOCIATED"
+
+
+def test_31_truncated_pcap_record_is_not_silently_treated_as_eof(tmp_path):
+    """A partial per-packet header must fail closed instead of silently losing a record."""
+    pcap = tmp_path / "truncated.pcap"
+    global_header = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
+    pcap.write_bytes(global_header + b"partial")
+    with PcapParser(str(pcap)) as parser:
+        with pytest.raises(ValueError, match="Truncated PCAP packet header"):
+            list(parser.iter_packets())
+        assert parser.truncated_records == 1
