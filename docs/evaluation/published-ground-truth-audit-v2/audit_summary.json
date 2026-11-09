@@ -1,20 +1,27 @@
 {
-  "audit_name": "NetGuard IDS Forensic Ground-Truth Audit V2",
-  "audit_date_utc": "2026-11-09T14:45:47Z",
+  "audit_name": "NetGuard IDS Forensic Ground-Truth Audit V2 — Corrected Summary",
+  "audit_date_utc": "2026-11-09",
+  "status": "PARTIALLY_SUPPORTED_ACCURACY_CLAIMS_UNVERIFIED",
+  "correction_document": "docs/evaluation/published-ground-truth-audit-v2/13_correction_and_submission_readiness.md",
+  "final_verdict_document": "docs/evaluation/published-ground-truth-audit-v2/11_final_independent_audit_verdict.md",
   "target_dataset": {
     "name": "CTU-IoT-Malware-Capture-48-1",
     "pcap_file": "2019-02-28-19-15-13-192.168.1.200.pcap",
-    "pcap_sha256": "ac2e41f0d5b2479ce5e1779fbaa6d6b73a6151050d86f04f80a872759034865c",
-    "pcap_packets": 13565553,
+    "pcap_sha256_status": "CONFLICTING_REPORTED_VALUES_REQUIRES_LOCAL_REHASH",
+    "pcap_sha256_candidates": [
+      "ac2e41f0d5b2479ce5e1779fbaa6d6b73a6151050d86f04f80a872759034865c",
+      "ac2e41f022a8435d8e7c10b7f8e363628e9d9e4a317e08922e9e68c92a926ba6"
+    ],
+    "packet_count_reported": 13565553,
     "zeek_labeled_file": "2019-02-28-19-15-13-192.168.1.200-zeek-conn-log.labeled",
-    "zeek_labeled_sha256": "9f69946243df93c199876c0783cb4b5fb188e6d2325c593858f2db8fb5fa847f",
-    "zeek_total_flows": 3394338,
-    "zeek_scan_flows": 3386119,
-    "generic_labels": {
+    "zeek_labeled_sha256_reported": "9f69946243df93c199876c0783cb4b5fb188e6d2325c593858f2db8fb5fa847f",
+    "zeek_total_flows_reported": 3394338,
+    "zeek_scan_flows_reported": 3386119,
+    "generic_labels_reported": {
       "Malicious": 3390604,
       "Benign": 3734
     },
-    "detailed_labels": {
+    "detailed_labels_reported": {
       "C&C-HeartBeat-FileDownload": 11,
       "PartOfAHorizontalPortScan": 3386119,
       "Attack": 2752,
@@ -23,80 +30,80 @@
       "C&C-PartOfAHorizontalPortScan": 888
     }
   },
-  "engine_state": {
-    "head_commit": "59520d48f704b3a89be3c0c5dc819b33d992264d",
-    "parent_engine_commit": "f7e816a5f0dc41e3f1db458001899b145abfbca4",
-    "engine_fingerprint": "86c41a7839fcaae6660190615a2da8681f6a60283377817542d720c324de22d7",
-    "reported_eval_fingerprint": "86c41a7839fcaae6660190615a2da8681f6a60283377817542d720c324de22d7",
-    "is_engine_frozen": true,
-    "config_port_scan_threshold": 15,
-    "config_slow_scan_threshold": 30,
-    "effective_port_scan_alert_burst": 30
-  },
-  "database_audit": {
-    "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/netguard_eval_48_1.db",
-    "sha256": "6bb5376835c5b25ba721e80fa2547c6cbadb56f38710a8d28650dc8ec6cff042",
-    "integrity": "ok",
-    "total_alerts": 4027,
+  "raw_alert_inventory": {
+    "total_alert_rows_reported": 4027,
     "alerts_by_rule": {
       "PORT_SCAN": 3473,
       "SLOW_PORT_SCAN": 292,
       "ARP_SPOOF": 262
     },
-    "database_reuse_identified": true,
-    "performance_metrics_provenance": "Measured in initial replay; reused via bypass in subsequent validation pass"
+    "scan_rule_alerts_reported": 3765,
+    "note": "Raw inventory counts only. Scan-rule alert records are consistent with the capture's Mirai TCP/23 scan pattern, but individual alert-to-publisher-flow attribution is not independently demonstrated by the current audit script."
   },
   "audited_alert_classification": {
-    "tier_a_confirmed_true_positive": 3765,
-    "tier_b_malicious_associated": 0,
-    "tier_c_false_positive": 262,
-    "tier_d_unassessed": 0,
-    "tier_e_unmatched": 0,
-    "strict_alert_precision_pct": 93.49,
-    "alert_false_discovery_rate_pct": 6.51,
-    "transport_scan_rule_precision_pct": 100.0
+    "status": "NOT_ESTABLISHED",
+    "tier_a_confirmed_true_positive": null,
+    "tier_b_malicious_associated": null,
+    "tier_c_confirmed_false_positive": null,
+    "tier_d_unassessed": null,
+    "tier_e_unmatched": null,
+    "strict_alert_precision_pct": null,
+    "alert_false_discovery_fraction_pct": null,
+    "transport_scan_rule_precision_pct": null,
+    "reason": "Current Tier A logic checks fields stored on the alert row and does not join each alert to contributing Zeek UIDs and packet evidence. Do not use the old 3765/4027 calculation as verified precision."
   },
   "arp_audit": {
-    "total_arp_alerts": 262,
-    "layer2_arp_packets": 6252,
-    "actual_gateway_mac": "78:8a:20:43:93:d5",
-    "actual_device_mac": "b8:27:eb:e1:1a:08",
-    "synthetic_mac_in_config": "00:11:22:33:44:01",
-    "cause_of_arp_alerts": "Pre-existing initial state contamination in data/arp_table.json",
-    "verdict": "Confirmed False Positive / Initial State Contamination Artifact"
+    "arp_alert_rows_reported": 262,
+    "arp_packets_reported": 6252,
+    "observed_gateway_mac_reported": "78:8a:20:43:93:d5",
+    "observed_device_mac_reported": "b8:27:eb:e1:1a:08",
+    "synthetic_mac_in_tracked_example": "00:11:22:33:44:01",
+    "capture_finding": "No conflicting MAC claim was reported in the inspected capture ARP frames; the 262 alerts are unsupported by observed Layer-2 evidence on this capture.",
+    "historical_runtime_state_cause": "LIKELY_BUT_NOT_PROVEN",
+    "runtime_arp_table_hash_at_replay_start": null
   },
-  "flow_coverage_audit": {
-    "total_publisher_scan_flows": 3386119,
-    "strict_trigger_window_flows": 65243,
-    "strict_trigger_window_coverage_pct": 1.93,
-    "campaign_cooldown_window_flows": 3386119,
-    "campaign_cooldown_window_coverage_pct": 100.0,
-    "interpretation": "NetGuard aggregates 3.39M flows into 3,765 incident bursts; 1.93% of flows directly triggered alerts, while 100.0% of flows occurred during active campaign-alert suppression episodes."
+  "flow_temporal_analysis": {
+    "publisher_scan_flow_count_reported": 3386119,
+    "strict_trigger_window_flow_start_overlap": 65243,
+    "strict_trigger_window_overlap_pct": 1.93,
+    "cooldown_extended_temporal_overlap": 3386119,
+    "cooldown_extended_temporal_overlap_pct": 100,
+    "interpretation": "The 1.93% and 100% values are temporal overlap statistics over Zeek flow-start timestamps. Cooldown-extended overlap is NOT recall, flow detection coverage, or proof that every flow was individually detected.",
+    "flow_level_recall": null
+  },
+  "historical_execution": {
+    "engine_commit_reported": "f7e816a5f0dc41e3f1db458001899b145abfbca4",
+    "evaluation_commit": "59520d48f704b3a89be3c0c5dc819b33d992264d",
+    "core_committed_detection_files_identical_between_cited_trees": true,
+    "historical_local_working_tree_clean": null,
+    "effective_environment_overrides_reconstructed": false,
+    "runner_allowed_dirty_tree": true,
+    "runtime_seconds_reported": 2711.11,
+    "throughput_pps_reported": 5003.7,
+    "peak_rss_mb_reported": 116.44,
+    "performance_metrics_status": "REPORTED_FROM_INITIAL_REPLAY_AND_REUSED_ON_DATABASE_BYPASS; NOT_REPRODUCED_BY_AUDIT_V2"
   },
   "suricata_audit": {
-    "total_alerts": 85,
-    "top_signatures": {
-      "SURICATA STREAM Packet with invalid ack": 23,
-      "SURICATA STREAM SHUTDOWN RST invalid ack": 23,
-      "ET INFO Executable and linking format (ELF) file download Over HTTP": 11,
-      "ET HUNTING Possible ELF executable sent when remote host claims to send a Text File": 11,
-      "SURICATA TCPv4 invalid checksum": 6,
-      "SURICATA STREAM excessive retransmissions": 3,
-      "ET DROP Spamhaus DROP Listed Traffic Inbound group 36": 2,
-      "SURICATA HTTP unable to match response to request": 2,
-      "SURICATA STREAM 3way handshake SYNACK with wrong ack": 2,
-      "ET DROP Spamhaus DROP Listed Traffic Inbound group 37": 1
-    },
-    "byte_parity_verified": true,
-    "horizontal_scan_detection": 0,
-    "http_dropper_detection": 22
+    "version_reported": "8.0.7",
+    "eve_alert_rows_recounted": 85,
+    "eve_sha256_verified_by_audit_script": false,
+    "exact_input_pcap_identity_enforced": false,
+    "full_execution_manifest_verified": false,
+    "signature_ruleset_checksum_verified": false,
+    "status": "RECOUNTED_FROM_AVAILABLE_EVE; FULL_RUN_PROVENANCE_NOT_ESTABLISHED"
   },
-  "forensic_exports": {
-    "per_alert_attribution_csv": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v2_exports/per_alert_attribution.csv",
-    "per_alert_attribution_sha256": "0ee5cdc730c9195d29bad42b22f0ad93723db81b9b64f34c8a18877c4ac32223",
-    "per_flow_scan_coverage_csv": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v2_exports/per_flow_scan_coverage.csv",
-    "per_flow_scan_coverage_sha256": "6918d12ded2364c6e30cc14bb7715001abd505ada3ffe3a14358610e34c3c294",
-    "arp_packet_audit_csv": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v2_exports/arp_packet_audit.csv",
-    "arp_packet_audit_sha256": "459318476b8fba3f6564d5bf6cab19bb486edd39f92549b91e5bfa116654db52"
-  }
+  "tests_and_ci": {
+    "audit_commit_ci_checks": [],
+    "audit_specific_automated_tests_added": false,
+    "readme_test_count_stale_or_unreconciled": true,
+    "full_current_suite_verified_by_this_audit": false
+  },
+  "previous_claims_withdrawn": [
+    "93.49% verified strict alert precision",
+    "99.88% combined malicious precision",
+    "0.12% conventional false-positive rate",
+    "100% scan-flow recall or detection coverage",
+    "100% transport-scan precision"
+  ],
+  "submission_status": "NOT_READY_TO_SUBMIT_AS_AN_ACCURACY_VALIDATION; MAY_BE_PRESENTED_AS_A_REAL_CAPTURE_CASE_STUDY_WITH_UNVERIFIED_EVENT_LEVEL_METRICS"
 }
