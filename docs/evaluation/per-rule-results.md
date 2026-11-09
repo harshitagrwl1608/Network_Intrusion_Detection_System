@@ -55,7 +55,7 @@ This report presents per-rule detection accuracy, false positive analysis, and o
 
 ---
 
-## 3. Comprehensive Per-Rule Detection Breakdown (21 Rules)
+## 3. Comprehensive Per-Rule Detection Breakdown (23 Rules)
 
 | # | Rule Name | Rule Version | Targeted Attack | Synthetic TP / FN | Real-World Alerts Fired | Real-World Status & Operational Findings |
 |---|---|---|---|---|---|---|
@@ -78,8 +78,10 @@ This report presents per-rule detection accuracy, false positive analysis, and o
 | 17 | `CLEAR_HTTP_ON_TLS_PORT` | v1.11 | Plaintext HTTP on 443 | 1 / 0 | 0 | Zero FP across real-world captures. |
 | 18 | `TLS_ANOMALY` | v1.13 | Literal IP / Tunnel in SNI | 1 / 0 | 0 | Zero FP on benign IoT and desktop TLS handshakes. |
 | 19 | `TCP_ZERO_WINDOW` | v1.10 | Sockstress / Backpressure | 1 / 0 | 0 | Multi-flow requirement effectively suppressed single-flow congestion FP. |
-| 20 | `NON_DNS_TRAFFIC_ON_DNS_PORT` | v1.0 | Port 53 Protocol Evasion | 1 / 0 | 2 (`ws_dns_remoteshell`) | **New Rule Admission**: Caught interactive shell on port 53 missed by DPI. |
-| 21 | `ICMP_TUNNEL` | v1.0 | ICMP Echo Request/Reply Tunnels | 1 / 0 | 0 | **New Rule Admission**: Evaluates oversized payload, entropy, and shell signatures. |
+| 20 | `NON_DNS_TRAFFIC_ON_DNS_PORT` | v1.1 | Port 53 Protocol Evasion | 1 / 0 | 2 (`ws_dns_remoteshell`) | Caught interactive shell on port 53 missed by DPI. |
+| 21 | `ICMP_TUNNEL` | v1.1 | ICMP Echo Request/Reply Tunnels | 1 / 0 | 0 | Evaluates oversized payload, entropy, and shell signatures. |
+| 22 | `IP_FRAGMENT_ANOMALY` | v1.3 | Teardrop & Overlap Crash Attacks | 1 / 0 | 1 (`ws_teardrop`) | Caught overlapping fragment offset 24-28; input hardened against malformed lengths. |
+| 23 | `IRC_C2_BEACONING` | v1.3 | Botnet C2 Beaconing & Commands | 1 / 0 | 379 (`iot23_malware_34_1`) | Confirmed C2 requires botnet identity + commands; suppressed non-C2 chat. |
 
 ---
 
@@ -133,8 +135,8 @@ In the November 8 autonomous engineering sprint, all 23 detection rules were pro
 19. `TcpZeroWindowRule` (v1.10)
 20. `NonDnsOnDnsPortRule` (v1.1)
 21. `IcmpTunnelRule` (v1.1)
-22. `IpFragmentAnomalyRule` (v1.2) — **Hardened**: Datagram/flow caps, global capacity bounds with active flow preservation, exact duplicate fragment suppression, and conflicting payload digest detection.
-23. `IrcC2BeaconingRule` (v1.2) — **Hardened**: Integer flag bitmasks, multi-entry sliding table of recent SYN tuples (`recent_syns: OrderedDict`, 64 entries, 60s expiration) for interleaved connection deduplication, context-aware regex word boundary matching protecting benign vocabulary (`robot`, `bottleneck`, `botany`, `bother`, `bottle`, `bottom`) from false C2 classification, two-level LRU bounds, distinct confidence/severity.
+22. `IpFragmentAnomalyRule` (v1.3) — **Hardened**: Datagram/flow caps, global capacity bounds with active flow preservation, exact duplicate fragment suppression, robust length input parsing, and conflicting payload digest detection.
+23. `IrcC2BeaconingRule` (v1.3) — **Hardened**: Integer flag bitmasks, multi-entry sliding table of recent SYN tuples (`recent_syns: OrderedDict`, 64 entries, 60s expiration) for interleaved connection deduplication, context-aware regex word boundary matching protecting benign vocabulary, dual corroboration required for confirmed C2 classification, two-level LRU bounds, bounded timestamps memory ($O(1)$ $\le 128$ floats).
 
 ### 5.2 Synthetic Benchmark Corpus Expansion (42 Scenarios)
 - **Labelled Scenarios:** 42 (expanded from 38 with S39 `NON_DNS_TRAFFIC_ON_DNS_PORT`, S40 `ICMP_TUNNEL`, S41 `IP_FRAGMENT_ANOMALY`, and S42 `IRC_C2_BEACONING`).
@@ -158,7 +160,7 @@ In the November 8 autonomous engineering sprint, all 23 detection rules were pro
 | `oisf_tls_sni_anomaly` | Curated Research Fixture | Standard TLS Handshake | 25 | 0 | None | **Zero False Alarms**: Clean TLS SNI validation. |
 
 ### 5.4 Unit & Integration Test Coverage
-- **Total Tests Passing:** **721 passed** across 30 test modules in 137s.
+- **Total Tests Passing:** **738 passed**, 630 subtests passed across 30 test modules in 122.42s.
 - **Coverage:** Zero skipped, zero failures, zero disabled tests.
   - **Adversarial Evasion Stress Testing (`test_adversarial_evasion_stress.py`):** Multi-threaded ingestion under continuous GC, asymmetric routing pure-ACK suppression, DGA case randomization entropy stability, subthreshold ICMP chunking suppression, and Ping of Death overflow detection.
   - **Cryptographic Dataset Hash Verification (`test_dataset_hash_verify.py`):** Automated streaming SHA-256 verification of all 18 PCAP captures on `/dev/sdb1`, exact cross-referencing with `.meta.json` manifests, `.sha256` checksum files, and `dataset-registry.md`, plus path-traversal prevention and MCP tool verification.
