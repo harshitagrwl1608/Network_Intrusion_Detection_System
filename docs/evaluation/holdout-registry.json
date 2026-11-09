@@ -34,13 +34,18 @@
     },
     {
       "candidate_id": "stratosphere_ctu_mirai_botnet_48_1",
-      "name": "Stratosphere CTU IoT-23 Malware Capture 48-1 (Unseen Mirai Variant)",
+      "name": "Stratosphere CTU IoT-23 Malware Capture 48-1 (Mirai Botnet on Raspberry Pi)",
       "publisher": "Stratosphere IPS / CTU University",
-      "source_url": "https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset/IndividualScenarios/CTU-IoT-Malware-Capture-48-1/",
+      "source_url": "https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset-v2/CTU-IoT-Malware-Capture-48-1/",
       "expected_attack_family": "Mirai Telnet Brute Force & SYN Flooding",
-      "target_rules": ["PORT_SCAN", "SYN_FLOOD", "BRUTE_FORCE"],
-      "ground_truth_source": "CTU University Verified Malware Execution",
-      "quarantine_status": "PENDING_ACQUISITION"
+      "target_rules": ["PORT_SCAN", "SLOW_PORT_SCAN", "SYN_FLOOD", "BRUTE_FORCE"],
+      "ground_truth_source": "CTU University Official Labeled Zeek Flows (NetflowLabeler)",
+      "quarantine_status": "EVALUATED_PUBLISHED_GROUND_TRUTH",
+      "pcap_path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/2019-02-28-19-15-13-192.168.1.200.pcap",
+      "sha256": "ac2e41f0d5b2479ce5e1779fbaa6d6b73a6151050d86f04f80a872759034865c",
+      "size_bytes": 1281350694,
+      "packets": 13565553,
+      "evaluation_summary": "docs/evaluation/published-ground-truth/published_ground_truth_summary.json"
     },
     {
       "candidate_id": "stratosphere_ctu_hns_botnet_1_1",

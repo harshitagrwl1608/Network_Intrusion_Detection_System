@@ -535,7 +535,13 @@ def load_zeek_connections(conn_path: str, max_records: int | None = None) -> lis
 
             # Standard TSV format with #fields header
             if line_str.startswith("#fields"):
-                fields = line_str.split("\t")[1:]
+                raw_fields = line_str.split("\t")[1:]
+                fields = []
+                for rf in raw_fields:
+                    if " " in rf:
+                        fields.extend([f.strip() for f in rf.split() if f.strip()])
+                    else:
+                        fields.append(rf)
                 continue
             if line_str.startswith("#"):
                 continue
@@ -543,6 +549,9 @@ def load_zeek_connections(conn_path: str, max_records: int | None = None) -> lis
                 continue
 
             parts = line_str.split("\t")
+            if len(parts) < len(fields) and parts:
+                last = parts.pop()
+                parts.extend(last.split())
             if len(parts) < len(fields):
                 continue
             row = dict(zip(fields, parts))
@@ -577,6 +586,7 @@ def load_zeek_connections(conn_path: str, max_records: int | None = None) -> lis
             resp_bytes = _to_int(row.get("resp_bytes"))
             orig_pkts = _to_int(row.get("orig_pkts"))
             label = _clean_val(row.get("label"))
+            detailed_label = _clean_val(row.get("detailed-label"))
             uid = _clean_val(row.get("uid"))
             if not uid:
                 uid = f"{src_ip}:{src_port}->{dst_ip}:{dst_port}/{proto}@{ts}"
@@ -586,7 +596,7 @@ def load_zeek_connections(conn_path: str, max_records: int | None = None) -> lis
                 "src_port": src_port, "dst_port": dst_port, "protocol": proto,
                 "service": service, "conn_state": state, "history": history,
                 "orig_bytes": orig_bytes, "resp_bytes": resp_bytes,
-                "orig_pkts": orig_pkts, "label": label, "uid": uid,
+                "orig_pkts": orig_pkts, "label": label, "detailed_label": detailed_label, "uid": uid,
             })
             if max_records and len(records) >= max_records:
                 break
