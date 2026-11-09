@@ -678,6 +678,26 @@ def api_alert_detail(alert_id: int):
             f"within {getattr(config, 'TCP_ZERO_WINDOW_WINDOW', 10)} seconds. This signature indicates a Sockstress or zero-window "
             "resource-exhaustion attack, designed to tie up server connection buffers and trigger persist-timer starvation."
         ),
+        "NON_DNS_TRAFFIC_ON_DNS_PORT": (
+            "Interactive shell prompts (cmd.exe, /bin/sh, powershell), cleartext HTTP commands, or high-ratio "
+            "printable ASCII streams were observed on DNS port 53 (TCP/UDP). Threat actors frequently abuse port 53 "
+            "to establish reverse shells or bypass restrictive perimeter egress firewalls."
+        ),
+        "ICMP_TUNNEL": (
+            "Covert ICMP data tunneling or reverse shell traffic (ptunnel magic, embedded PE/ELF executables, "
+            "interactive command prompts, or high-entropy oversized Echo payloads) was detected inside ICMP Echo "
+            "Request or Reply packets. Legitimate diagnostics carry predictable sequential or zeroed padding."
+        ),
+        "IP_FRAGMENT_ANOMALY": (
+            "Anomalous IP packet fragmentation was detected, such as overlapping fragment offsets (Teardrop / Bonk "
+            "TCP/IP reassembly crash attacks), conflicting payload bytes across retransmissions, or tiny initial fragments "
+            "(RFC 1858 firewall evasion splitting the transport header)."
+        ),
+        "IRC_C2_BEACONING": (
+            "Periodic beaconing or botnet command-and-control activity was detected on IRC ports (e.g. 6667). "
+            "Confirmed C2 classification requires observable botnet registration tokens (e.g. #botnet, bot_*) paired "
+            "with malicious command syntax (e.g. !flood, !attack, download) across regular connection intervals."
+        ),
     }
     alert["explanation"] = explanations.get(alert.get("rule_name", ""), "No explanation available.")
     # Attach GeoIP flag for the modal

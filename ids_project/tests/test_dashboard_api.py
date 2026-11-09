@@ -107,27 +107,36 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(data["rule_breakdown"]["TCP_ZERO_WINDOW"], 1)
 
     def test_alert_detail_explanations_for_new_rules(self):
-        """Verify explanations are present for newly introduced rules like TCP_ZERO_WINDOW and TLS_ANOMALY."""
+        """Verify explanations are present for all 23 rules including recent additions."""
         conn = get_connection()
-        write_alert(conn, {
-            "rule_name": "TLS_ANOMALY",
-            "rule_version": "1.0",
-            "src_ip": "10.0.0.50",
-            "dst_ip": "10.0.0.1",
-            "src_port": 45678,
-            "dst_port": 443,
-            "protocol": "TCP",
-            "severity": "high",
-            "confidence": "high",
-            "detail": "Literal IP in SNI",
-            "timestamp": time.time(),
-        })
+        test_alerts = [
+            ("TLS_ANOMALY", "Literal IP in SNI", "rfc 6066"),
+            ("NON_DNS_TRAFFIC_ON_DNS_PORT", "Shell on 53", "reverse shell"),
+            ("ICMP_TUNNEL", "Covert ICMP", "ptunnel"),
+            ("IP_FRAGMENT_ANOMALY", "Fragment overlap", "teardrop"),
+            ("IRC_C2_BEACONING", "C2 beacon", "botnet"),
+        ]
+        for idx, (r_name, detail, expected_kw) in enumerate(test_alerts, start=1):
+            write_alert(conn, {
+                "rule_name": r_name,
+                "rule_version": "1.0",
+                "src_ip": f"10.0.0.{idx}",
+                "dst_ip": "10.0.0.1",
+                "src_port": 45678,
+                "dst_port": 443,
+                "protocol": "TCP",
+                "severity": "high",
+                "confidence": "high",
+                "detail": detail,
+                "timestamp": time.time(),
+            })
+            resp = self.client.get(f"/api/alerts/{idx}")
+            self.assertEqual(resp.status_code, 200)
+            data = resp.get_json()
+            explanation = data.get("explanation", "").lower()
+            self.assertNotEqual(explanation, "no explanation available.", f"Rule {r_name} missing explanation")
+            self.assertIn(expected_kw, explanation, f"Rule {r_name} explanation missing keyword '{expected_kw}'")
         conn.close()
-
-        resp = self.client.get("/api/alerts/1")
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()
-        self.assertIn("rfc 6066", data.get("explanation", "").lower())
 
     def test_aggregator_plain_language_templates_for_new_rules(self):
         """Verify aggregator generates plain-language observations for newly registered rules."""
