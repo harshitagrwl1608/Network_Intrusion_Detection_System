@@ -833,8 +833,8 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             aid, rname, a["rule_version"], a["src_ip"], a["dst_port"],
             f"{a['window_start']:.6f}", f"{a['window_end']:.6f}",
             alert_valid_syn_counts[aid], rec_targets, corrob_targets, thr,
-            len(alert_matched_uids.get(aid, set())), tier_key,
-            f"{rationale}; ambiguous_targets={ambiguous_targets}; unmatched_targets={unm_targets}"
+            len(alert_matched_uids.get(aid, set())), ambiguous_targets, unm_targets,
+            tier_key, rationale
         ])
 
         for uid in alert_matched_uids.get(aid, set()):
@@ -883,6 +883,7 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             "alert_id", "rule_name", "rule_version", "src_ip", "dst_port",
             "window_start", "window_end", "valid_syn_count", "distinct_targets_reconstructed",
             "corroborated_targets_count", "threshold", "matched_uids_count",
+            "ambiguous_targets_count", "unmatched_targets_count",
             "classification_tier", "evidentiary_rationale"
         ])
         writer.writerows(per_alert_rows)
@@ -1216,9 +1217,9 @@ Every scan alert trigger window was independently extracted from raw PCAP packet
 | :--- | :--- | :--- | :--- |
 | **Tier A** | **Confirmed Rule-Specific Detection** | **{a['tier_a_confirmed_tp']:,}** | **{a['strict_precision_pct']:.2f}%** |
 | **Tier B** | **Malicious Associated** | **{a['tier_b_malicious_associated']:,}** | **{a['tier_b_malicious_associated'] / a['total_alerts'] * 100:.2f}%** |
-| **Tier C** | **Confirmed False Positive** | **{a['tier_c_false_positive']:,}** | **0.00%** |
+| **Tier C** | **Confirmed False Positive** | **{a['tier_c_false_positive']:,}** | **{a['tier_c_false_positive'] / a['total_alerts'] * 100:.2f}%** |
 | **Tier D** | **Unassessed Historical Baseline** | **{a['tier_d_unassessed']:,}** | **{a['unassessed_rate_pct']:.2f}%** |
-| **Tier E** | **No Defensible Association** | **{a['tier_e_no_association']:,}** | **0.00%** |
+| **Tier E** | **No Defensible Association** | **{a['tier_e_no_association']:,}** | **{a['tier_e_no_association'] / a['total_alerts'] * 100:.2f}%** |
 | **Total** | **All Emitted Alerts** | **{a['total_alerts']:,}** | **100.00%** |
 """)
 
