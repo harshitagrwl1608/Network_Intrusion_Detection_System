@@ -3042,14 +3042,24 @@ class DnsRule:
 
         Prevents adversaries from tunneling alphanumeric exfiltration payloads under .in-addr.arpa or .ip6.arpa.
         """
-        if domain_lower.endswith(".in-addr.arpa"):
-            prefix = domain_lower[:-len(".in-addr.arpa")].strip(".")
-            labels = [l for l in prefix.split(".") if l]
-            return bool(labels) and all(label.isdigit() and 0 <= int(label) <= 255 for label in labels)
-        elif domain_lower.endswith(".ip6.arpa"):
-            prefix = domain_lower[:-len(".ip6.arpa")].strip(".")
-            labels = [l for l in prefix.split(".") if l]
-            return bool(labels) and all(len(label) == 1 and label in "0123456789abcdef" for label in labels)
+        try:
+            if domain_lower.endswith(".in-addr.arpa"):
+                prefix = domain_lower[:-len(".in-addr.arpa")].strip(".")
+                labels = [l for l in prefix.split(".") if l]
+                return bool(labels) and all(
+                    1 <= len(label) <= 3
+                    and all(c in "0123456789" for c in label)
+                    and 0 <= int(label) <= 255
+                    for label in labels
+                )
+            elif domain_lower.endswith(".ip6.arpa"):
+                prefix = domain_lower[:-len(".ip6.arpa")].strip(".")
+                labels = [l for l in prefix.split(".") if l]
+                return bool(labels) and len(labels) <= 32 and all(
+                    len(label) == 1 and label in "0123456789abcdef" for label in labels
+                )
+        except (ValueError, TypeError, OverflowError):
+            return False
         return False
 
     def _calc_entropy(self, label: str) -> float:
@@ -3118,8 +3128,15 @@ class DnsRule:
         if dst_port != 53 and src_port != 53:
             return None
 
-        domain: str | None = record.get("dns_query")
+        domain = record.get("dns_query")
         if not domain:
+            return None
+        if isinstance(domain, (bytes, bytearray)):
+            try:
+                domain = bytes(domain).decode("utf-8", errors="replace")
+            except Exception:
+                return None
+        elif not isinstance(domain, str):
             return None
 
         # DNS labels are case-insensitive; canonicalize before deriving the

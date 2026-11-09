@@ -762,5 +762,52 @@ class TestDnsAndArpDetection(unittest.TestCase):
         self.assertEqual(alerts[0]["evidence"]["sub_type"], "DNS_EXFIL")
 
 
+    def test_dns_query_bytes_and_malformed_type_handling(self):
+        """DnsRule must safely handle bytes dns_query and discard non-string types without crashing."""
+        rule = DnsRule()
+        # Bytes query should decode properly and detect long label tunnel
+        rec_bytes = {
+            "type": "IP", "protocol": "UDP",
+            "src_port": 53000, "dst_port": 53,
+            "src_ip": "192.168.1.50", "dst_ip": "8.8.8.8",
+            "dns_query": b"a" * 63 + b".tunnel.example.com",
+            "timestamp": 1000.0,
+        }
+        alert = rule.check(rec_bytes)
+        self.assertIsNotNone(alert, "Bytes dns_query should be decoded and inspected")
+        self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
+
+        # Malformed types should safely return None without raising exceptions
+        for malformed in (12345, 99.9, None, ["evil.com"], {"query": "evil.com"}, object()):
+            rec_bad = {
+                "type": "IP", "protocol": "UDP",
+                "src_port": 53000, "dst_port": 53,
+                "src_ip": "192.168.1.50", "dst_ip": "8.8.8.8",
+                "dns_query": malformed,
+                "timestamp": 1000.0,
+            }
+            try:
+                res = rule.check(rec_bad)
+                self.assertIsNone(res)
+            except Exception as exc:
+                self.fail(f"DnsRule.check crashed on non-string dns_query {malformed}: {exc}")
+
+    def test_reverse_mapping_syntax_and_unicode_digit_rejection(self):
+        """Reverse DNS validation must reject non-ASCII unicode digits and oversized octets."""
+        rule = DnsRule(subdomain_threshold=20, subdomain_window=60)
+        # Unicode Arabic-Indic digits are not RFC 1035 ASCII octets
+        self.assertFalse(rule._is_valid_reverse_mapping("١.٢.٣.٤.in-addr.arpa"))
+        # Octet longer than 3 characters is invalid
+        self.assertFalse(rule._is_valid_reverse_mapping("1234.2.3.4.in-addr.arpa"))
+        # 5000-digit string must safely return False without Integer conversion limits
+        self.assertFalse(rule._is_valid_reverse_mapping("9" * 5000 + ".in-addr.arpa"))
+        # Valid IPv4 reverse PTR
+        self.assertTrue(rule._is_valid_reverse_mapping("4.3.2.1.in-addr.arpa"))
+        # Valid IPv6 reverse PTR
+        self.assertTrue(rule._is_valid_reverse_mapping("1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa"))
+        # IPv6 with > 32 nibbles is invalid
+        self.assertFalse(rule._is_valid_reverse_mapping("1." * 35 + "ip6.arpa"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -138,6 +138,26 @@ class TestRuleGovernanceInvariants(unittest.TestCase):
                         self.fail(f"Rule {rule.name}.check() crashed on bad timestamp {ts}: {exc}")
 
 
+    def test_malformed_record_type_fuzz_resilience(self):
+        """All registered detection rules must handle malformed data types gracefully without crashing."""
+        fuzz_records = [
+            {"type": "IP", "protocol": "TCP", "src_ip": 12345, "dst_ip": "10.0.0.2", "payload": 99999, "timestamp": 100.0},
+            {"type": "IP", "protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": None, "payload": [1, 2, 3], "timestamp": 100.0},
+            {"type": "IP", "protocol": "UDP", "src_port": "bad_port", "dst_port": 53, "dns_query": 999, "timestamp": 100.0},
+            {"type": "IP", "protocol": "UDP", "src_port": 53000, "dst_port": 53, "dns_query": ["evil.com"], "timestamp": 100.0},
+            {"type": "IP", "protocol": "ICMP", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "icmp_type": "not_int", "payload": 1234, "timestamp": 100.0},
+            {"type": "IP", "protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "tcp_flags": "invalid_flags", "timestamp": 100.0},
+            {"type": "IP", "protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "tcp_payload_seq": "not_a_seq", "timestamp": 100.0},
+        ]
+        for rule in self.engine.rules:
+            for rec in fuzz_records:
+                with self.subTest(rule=rule.name, rec=rec):
+                    try:
+                        rule.check(rec)
+                    except Exception as exc:
+                        self.fail(f"Rule {rule.name}.check() crashed on malformed record {rec}: {exc}")
+
+
 if __name__ == "__main__":
     unittest.main()
 

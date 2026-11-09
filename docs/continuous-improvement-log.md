@@ -786,5 +786,10 @@ Across 15 substantive engineering cycles, the NetGuard IDS repository was system
   6. **Adversarial Stress & Governance Invariant Verification**:
      - Added multi-source interleaved SYN tracking and RFC 1858 tiny fragment tests to `test_adversarial_evasion_stress.py`.
      - Added port boundary (`1 <= port <= 65535`) and non-finite timestamp drift tests across all 23 rules in `test_rule_governance_invariants.py`.
-- **Regression Test Suite**: **735 passed** across 30 test modules (0 failures, 0 skipped, 0 disabled).
+  7. **DNS Anomaly Input Hardening & Reverse PTR Strictness (`rules.py` v1.24)**:
+     - Handled `bytes` and non-string `dns_query` inputs safely with UTF-8 fallback decoding and invalid type suppression.
+     - Hardened `_is_valid_reverse_mapping` with RFC 1035 / RFC 3596 bounds checks: enforced octet length bounds ($1 \le \text{len} \le 3$), ASCII digit check `all(c in "0123456789")` preventing unicode Arabic-Indic digit bypasses, $\le 32$ nibbles for IPv6, and wrapped conversion in `try...except (ValueError, TypeError, OverflowError)` to protect against integer conversion length exceptions.
+  8. **Dynamic Governance Fuzz Resilience (`test_rule_governance_invariants.py`)**:
+     - Added cross-rule fuzz test ensuring all 23 detection rules handle malformed payload, sequence, flag, and port types without uncaught exceptions or state corruption.
+- **Regression Test Suite**: **738 passed** across 30 test modules (0 failures, 0 skipped, 0 disabled).
 - **Synthetic Ground-Truth Evaluation**: **42/42 TP, 0 FN, 0 FP (100.0% Precision, 100.0% Recall, 100.0% F1)**.
