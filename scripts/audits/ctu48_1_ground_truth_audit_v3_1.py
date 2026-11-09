@@ -775,8 +775,8 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
         aid = a["id"]
         ats = a["timestamp"]
         ev = a["evidence"]
-        claimed_prev_mac = ev.get("previous_mac", "00:11:22:33:44:01")
-        claimed_new_mac = ev.get("new_mac", "78:8a:20:43:93:d5")
+        claimed_prev_mac = ev.get("previous_mac", ev.get("old_mac", "")) or ""
+        claimed_new_mac = ev.get("new_mac", "") or ""
 
         # Find nearest ARP frame
         nearest_frame = min(observed_arp_frames, key=lambda x: abs(x[1] - ats)) if observed_arp_frames else None
@@ -793,7 +793,7 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
         writer = csv.writer(f)
         writer.writerow([
             "alert_id", "timestamp", "target_ip", "claimed_old_mac", "claimed_new_mac",
-            "observed_physical_mac", "tier_classification", "evidentiary_rationale"
+            "nearest_frame_sender_mac_context_only", "tier_classification", "evidentiary_rationale"
         ])
         writer.writerows(arp_export_rows)
 
@@ -848,7 +848,7 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             a["id"], a["rule_name"], a["rule_version"], a["src_ip"], "-",
             ws_str, we_str,
             0, 0, 0, 0, 0, "TIER_D_UNASSESSED",
-            "Layer-2 ARP alert unassessed due to missing historical runtime baseline table"
+            "Nearest frame is temporal context only, not a demonstrated alert-to-packet match; historical runtime baseline is missing"
         ])
 
     # Reconcile counts
@@ -1131,7 +1131,7 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     _write_v3_1_reports(docs_dir, summary_data)
 
     print("\n" + "=" * 80)
-    print("  NETGUARD IDS FORENSIC AUDIT V3.1 COMPLETED SUCCESSFULLY")
+    print("  NETGUARD IDS FORENSIC AUDIT V3.1.1 COMPLETED; REVIEW REQUIRED")
     print(f"  Tier-A Share of All Alerts : {strict_precision_pct}% ({tier_a:,} / {total_emitted:,})")
     print(f"  Tier-A Share of Scan Alerts: {scan_rule_precision_pct}% ({tier_a:,} / {len(scan_alerts):,})")
     print(f"  Unassessed ARP Rate    : {unassessed_rate_pct}% ({tier_d:,} / {total_emitted:,})")
@@ -1162,10 +1162,10 @@ All analyses were performed on official CTU IoT-23 Capture 48-1 dataset artifact
 
 | Input File | Size (Bytes) | Exact SHA-256 Digest | Status |
 | :--- | :--- | :--- | :--- |
-| **PCAP** | {p['pcap_size_bytes']:,} | `{p['pcap_sha256']}` | **VERIFIED** |
-| **Zeek Conn Log** | {p['zeek_size_bytes']:,} | `{p['zeek_sha256']}` | **VERIFIED** |
-| **SQLite DB** | {p['db_size_bytes']:,} | `{p['db_sha256']}` | **VERIFIED** |
-| **Suricata EVE** | 943,092,234 | `{p['suricata_eve_sha256']}` | **VERIFIED** |
+| **PCAP** | {p['pcap_size_bytes']:,} | `{p['pcap_sha256']}` | **SHA-256 CALCULATED; ORIGIN NOT AUTHENTICATED** |
+| **Zeek Conn Log** | {p['zeek_size_bytes']:,} | `{p['zeek_sha256']}` | **SHA-256 CALCULATED; ORIGIN NOT AUTHENTICATED** |
+| **SQLite DB** | {p['db_size_bytes']:,} | `{p['db_sha256']}` | **SHA-256 CALCULATED; INTEGRITY CHECKED** |
+| **Suricata EVE** | 943,092,234 | `{p['suricata_eve_sha256']}` | **SHA-256 CALCULATED; INPUT IDENTITY UNKNOWN** |
 
 ---
 
@@ -1279,7 +1279,9 @@ $$\\text{{Unassessed Alert Rate (ARP)}} = \\frac{{{a['tier_d_unassessed']}}}{{{a
     with open(os.path.join(docs_dir, "09_final_submission_verdict.md"), "w", encoding="utf-8") as f:
         f.write(f"""# 9. Final Submission-Readiness Verdict
 
-## Official Verdict: SUPPORTED WITH LIMITATIONS
+## Status: PROVISIONAL — V3.1.1 CORRECTIONS REQUIRE A FRESH FULL-DATA RUN
+
+This report is generated only after the corrected V3.1.1 execution. It must not be labelled final until all output reconciliation checks pass.
 
 NetGuard's core behavioral scanning detection engine against real-world Mirai botnet activity is **substantiated**:
 - **Tier-A Share of All Alerts**: **{a['strict_precision_pct']:.2f}%** ({a['tier_a_confirmed_tp']:,} / {a['total_alerts']:,})
@@ -1289,12 +1291,12 @@ NetGuard's core behavioral scanning detection engine against real-world Mirai bo
 ### Established Limitations
 1. The 262 ARP alerts ({a['unassessed_rate_pct']:.2f}%) are classified as **Tier D (Unassessed due to missing historical baseline)**.
 2. Per-flow recall is **NOT MEASURABLE** due to incident rate-limiting cooldown aggregation.
-3. All 402 retransmission cases are verified as **Tier A True Positives**.
+3. **{r['resolved_via_flow_lifetime']}** retransmission cases met the complete Tier A threshold; **{r['partially_resolved']}** were only partially corroborated and remain Tier B; **{r['unresolved']}** remain unresolved.
 """)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="NetGuard IDS — Forensic Ground-Truth Audit V3.1")
+    parser = argparse.ArgumentParser(description="NetGuard IDS — Forensic Ground-Truth Audit V3.1.1")
     parser.add_argument("--pcap", default=DEFAULT_PCAP, help="Path to original PCAP")
     parser.add_argument("--zeek", default=DEFAULT_ZEEK, help="Path to official labelled Zeek conn log")
     parser.add_argument("--db", default=DEFAULT_DB, help="Path to evaluation SQLite database")
