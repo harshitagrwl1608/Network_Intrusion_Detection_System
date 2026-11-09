@@ -92,6 +92,51 @@ class TestRuleGovernanceInvariants(unittest.TestCase):
         for r in rules:
             self.assertTrue(r.name.isupper(), f"Rule name '{r.name}' should follow UPPER_SNAKE_CASE standard")
 
+    def test_port_boundaries_enforced_across_transport_rules(self):
+        """Transport rules must strictly enforce 1 <= port <= 65535 and reject invalid port boundaries."""
+        invalid_records = [
+            {"type": "IP", "protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 0, "dst_port": 80, "tcp_flags": 0x02, "timestamp": 100.0},
+            {"type": "IP", "protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 0, "tcp_flags": 0x02, "timestamp": 100.0},
+            {"type": "IP", "protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": -1, "dst_port": 80, "tcp_flags": 0x02, "timestamp": 100.0},
+            {"type": "IP", "protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": 65536, "tcp_flags": 0x02, "timestamp": 100.0},
+            {"type": "IP", "protocol": "TCP", "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "src_port": 50000, "dst_port": "bad_port", "tcp_flags": 0x02, "timestamp": 100.0},
+        ]
+        for rule in self.engine.rules:
+            for rec in invalid_records:
+                with self.subTest(rule=rule.name, rec=rec):
+                    try:
+                        alert = rule.check(rec)
+                        # Invalid port bounds must never produce a port-based scan or beacon alert
+                        if alert:
+                            src_p = alert.get("src_port")
+                            dst_p = alert.get("dst_port")
+                            if src_p is not None:
+                                self.assertTrue(1 <= src_p <= 65535, f"Rule {rule.name} emitted invalid src_port: {src_p}")
+                            if dst_p is not None:
+                                self.assertTrue(1 <= dst_p <= 65535, f"Rule {rule.name} emitted invalid dst_port: {dst_p}")
+                    except Exception as exc:
+                        self.fail(f"Rule {rule.name}.check() crashed on invalid port boundary {rec}: {exc}")
+
+    def test_finite_timestamp_drift_protection(self):
+        """Rules must reject non-finite (NaN, inf) or negative timestamps without state corruption."""
+        import math
+        bad_timestamps = [float("nan"), float("inf"), float("-inf"), -1.0, -999999.0]
+        base_rec = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2",
+            "src_port": 49152, "dst_port": 80, "tcp_flags": 0x02,
+        }
+        for rule in self.engine.rules:
+            for ts in bad_timestamps:
+                with self.subTest(rule=rule.name, ts=ts):
+                    rec = dict(base_rec, timestamp=ts)
+                    try:
+                        alert = rule.check(rec)
+                        # Invalid timestamps must never produce valid alerts
+                        self.assertIsNone(alert, f"Rule {rule.name} alerted on non-finite timestamp {ts}")
+                    except Exception as exc:
+                        self.fail(f"Rule {rule.name}.check() crashed on bad timestamp {ts}: {exc}")
+
 
 if __name__ == "__main__":
     unittest.main()

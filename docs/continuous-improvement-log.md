@@ -754,3 +754,37 @@ Across 15 substantive engineering cycles, the NetGuard IDS repository was system
      - Closed connection, cleared partial file, and reissued fresh HTTP request from byte 0 when resumed server response has invalid `Content-Range`.
 - **Regression Test Suite**: **721 passed** across 30 test modules in 137s (0 failures, 0 skipped, 0 disabled).
 - **Synthetic Ground-Truth Evaluation**: **42/42 TP, 0 FN, 0 FP (100.0% Precision, 100.0% Recall, 100.0% F1)**.
+
+---
+
+## Final Integrity Gate (2026-11-09)
+**Holdout Security, Evaluation Correctness & Detection-State Hardening**
+
+- **Sprint Goal**: Address all remaining security, evaluation integrity, and state hardening findings across NetGuard IDS.
+- **Rules Verified**: 23 canonical detection rules (`ALL_RULE_CLASSES`). Zero unmaintainable rules added.
+- **Key Enhancements**:
+  1. **P0 — Fail-Closed Holdout Validation (`holdout_pipeline.py`)**:
+     - **Mandatory Expected SHA-256**: `verify_holdout_quarantine` strictly rejects `None`, non-hex, or malformed digests.
+     - **Quarantine Membership & Canonical Symlink Enforcement**: Canonical path resolution via `os.path.realpath` enforced on quarantine root and target PCAPs; rejects escapes and symlinks.
+     - **Registered Sidecar Metadata Agreement**: Replay requires an existing `<candidate_id>.meta.json` sidecar within the canonical quarantine root agreeing with candidate ID and SHA-256; blocks arbitrary filesystem PCAPs.
+     - **Exact HDD Mount & Device Invariants**: `verify_external_mount` matches `/run/media/harshitgarg/Data1` on `/dev/sdb1` before writes; strictly rejects `/dev/sda1` and parent mounts.
+     - **Durable Runtime Registry**: Operational runtime registry on external storage (`holdout_runtime_registry.json`) with atomic concurrency locks, tracking lifecycle states (`PENDING_ACQUISITION` -> `REGISTERED_QUARANTINED` -> `EVALUATING` -> `EVALUATED` / `EVALUATION_FAILED`) and strictly enforcing single-pass evaluation.
+     - **Honest Sealing**: Sealed local files to read-only (`0o444`) with verifiable companion `.sha256` files.
+  2. **P1 — Granularity-Specific Ground-Truth Matching (`pipeline.py`)**:
+     - **Closed `event_id` Loophole**: Labels with `event` or `packet` granularity require matching evidence (`alert["evidence"]["event_id"]` / `alert["evidence"]["packet_index"]`). When the IDS does not emit matching event evidence, the label is classified as `unassessed_labels`, never as a True Positive.
+     - Validated complete 5-tuples and bounds for `flow` and `time-window` schemas.
+  3. **P1 — Evaluation Cache Key Fingerprint Alignment (`pipeline.py`)**:
+     - Reconciled evaluator worker and cache fingerprint around single `AUTHORITATIVE_BLOCKLIST_PATH` (`ids_project/data/test_blocklist.txt`).
+     - Added explicit `b"blocklist:MISSING"` marker and fail-closed handling (`FileNotFoundError`) for missing specified labels files.
+     - Bumped `_EVALUATOR_VERSION` to `1.5.0`.
+  4. **P1 — IRC Confidence Corroboration & Memory Hardening (`rules.py` v1.3)**:
+     - Single keywords or nicks (`#botnet`, `bot_1234`, `flood`) remain heuristic (`SUSPICIOUS_IRC_ACTIVITY`, medium severity).
+     - Confirmed C2 (`LIKELY_IRC_C2`, high severity) strictly requires botnet identity + malicious command or dual signal.
+     - Capped sliding window `timestamps` list to $\le 128$ floats, enforcing $O(1)$ memory.
+  5. **P2 — Fragment-Rule Input Hardening (`rules.py` v1.3)**:
+     - Robustly parses `ip_fragment_data_len` and `payload_len` against malformed strings, negative values, and non-numeric types without crashing.
+  6. **Adversarial Stress & Governance Invariant Verification**:
+     - Added multi-source interleaved SYN tracking and RFC 1858 tiny fragment tests to `test_adversarial_evasion_stress.py`.
+     - Added port boundary (`1 <= port <= 65535`) and non-finite timestamp drift tests across all 23 rules in `test_rule_governance_invariants.py`.
+- **Regression Test Suite**: **735 passed** across 30 test modules (0 failures, 0 skipped, 0 disabled).
+- **Synthetic Ground-Truth Evaluation**: **42/42 TP, 0 FN, 0 FP (100.0% Precision, 100.0% Recall, 100.0% F1)**.

@@ -220,6 +220,71 @@ class TestAdversarialEvasionStress(unittest.TestCase):
         self.assertIn("Ping of Death", alert["detail"])
         self.assertEqual(alert["evidence"]["anomaly_type"], "FRAGMENT_OVERFLOW")
 
+    def test_06_irc_c2_interleaved_syn_and_spoofed_session_evasion(self):
+        """Interleaved connections from multiple bot sources are tracked independently without state bleed."""
+        from engine.rules import IrcC2BeaconingRule
+        rule = IrcC2BeaconingRule(threshold=4, window=300)
+
+        # 3 bots sending interleaved SYNs to the same C2 server
+        # Bot 1 sends 4 distinct SYNs -> triggers
+        # Bot 2 sends 2 distinct SYNs -> no alert
+        # Bot 3 sends 3 identical retransmissions -> suppressed
+        for i in range(4):
+            # Bot 1
+            rec1 = {
+                "type": "IP", "protocol": "TCP",
+                "src_ip": "10.0.1.10", "dst_ip": "185.244.25.235",
+                "src_port": 50000 + i, "dst_port": 6667,
+                "tcp_flags": 0x02, "tcp_seq": i * 1000,
+                "timestamp": 1000.0 + (i * 1.0),
+            }
+            a1 = rule.check(rec1)
+            if i == 3:
+                self.assertIsNotNone(a1, "Bot 1 reaching threshold must alert")
+                self.assertEqual(a1["evidence"]["connection_count"], 4)
+            else:
+                self.assertIsNone(a1)
+
+            # Bot 2 (only 2 packets)
+            if i < 2:
+                rec2 = {
+                    "type": "IP", "protocol": "TCP",
+                    "src_ip": "10.0.2.20", "dst_ip": "185.244.25.235",
+                    "src_port": 60000 + i, "dst_port": 6667,
+                    "tcp_flags": 0x02, "tcp_seq": i * 2000,
+                    "timestamp": 1000.0 + (i * 1.0),
+                }
+                a2 = rule.check(rec2)
+                self.assertIsNone(a2, "Bot 2 below threshold must not alert")
+
+            # Bot 3 (identical retransmission: same src_port and seq)
+            rec3 = {
+                "type": "IP", "protocol": "TCP",
+                "src_ip": "10.0.3.30", "dst_ip": "185.244.25.235",
+                "src_port": 44444, "dst_port": 6667,
+                "tcp_flags": 0x02, "tcp_seq": 99999,
+                "timestamp": 1000.0 + (i * 0.5),
+            }
+            a3 = rule.check(rec3)
+            self.assertIsNone(a3, "Identical SYN retransmissions must be suppressed without alerting")
+
+    def test_07_tiny_fragment_evasion_rfc1858(self):
+        """Tiny initial IP fragment splitting transport header (<20 bytes TCP) must trigger TINY_FRAGMENT_EVASION."""
+        rule = IpFragmentAnomalyRule()
+        # Initial fragment (offset 0, MF=True) with only 8 bytes of TCP header (< 20 byte minimum)
+        rec = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.0.2.55", "dst_ip": "192.168.1.1",
+            "ip_fragmented": True, "ip_fragment_id": 12345,
+            "ip_fragment_offset": 0, "ip_more_fragments": True,
+            "ip_fragment_data_len": 8, "payload": b"\x00" * 8,
+            "timestamp": 2000.0,
+        }
+        alert = rule.check(rec)
+        self.assertIsNotNone(alert, "Tiny initial TCP fragment must trigger TINY_FRAGMENT_EVASION")
+        self.assertEqual(alert["evidence"]["anomaly_type"], "TINY_FRAGMENT_EVASION")
+        self.assertEqual(alert["severity"], "high")
+
 
 if __name__ == "__main__":
     unittest.main()
