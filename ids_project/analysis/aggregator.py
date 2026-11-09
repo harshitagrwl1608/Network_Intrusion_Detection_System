@@ -109,6 +109,22 @@ TEMPLATES = {
         "⚠️  Plaintext HTTP traffic detected on TLS port ({dst_port}) from {src_ip} — "
         "indicates proxy bypass, unencrypted C2 communication, or misconfigured SSL."
     ),
+    "NON_DNS_TRAFFIC_ON_DNS_PORT": (
+        "🐚  Interactive command shell or non-DNS traffic detected on DNS port 53 between {src_ip} and {dst_ip} — "
+        "possible reverse shell or firewall bypass."
+    ),
+    "ICMP_TUNNEL": (
+        "📡  Covert ICMP data tunnel or embedded payload detected from {src_ip} to {dst_ip} — "
+        "diagnostic Echo traffic is transporting unauthorized data."
+    ),
+    "IP_FRAGMENT_ANOMALY": (
+        "🧩  Anomalous IP fragment reassembly or overlap exploit detected from {src_ip} targeting {dst_ip} — "
+        "possible Teardrop or RFC 1858 firewall evasion attack."
+    ),
+    "IRC_C2_BEACONING": (
+        "🤖  Periodic IRC botnet beaconing or C2 commands detected from {src_ip} to {dst_ip}:{dst_port} — "
+        "active botnet communication channel observed."
+    ),
     "MOST_ACTIVE": (
         "📊  The most active suspicious device in the last hour is {src_ip} "
         "with {count} flagged events."

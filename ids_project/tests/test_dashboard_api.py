@@ -140,7 +140,8 @@ class TestDashboardApi(unittest.TestCase):
 
     def test_aggregator_plain_language_templates_for_new_rules(self):
         """Verify aggregator generates plain-language observations for newly registered rules."""
-        from analysis.aggregator import _obs_per_alert_type
+        from analysis.aggregator import _obs_per_alert_type, TEMPLATES
+        from engine.rules import RuleEngine
         alerts = [
             {
                 "rule_name": "TCP_ZERO_WINDOW",
@@ -163,12 +164,49 @@ class TestDashboardApi(unittest.TestCase):
                 "dst_port": 9001,
                 "detail": "High-volume transfer",
             },
+            {
+                "rule_name": "NON_DNS_TRAFFIC_ON_DNS_PORT",
+                "src_ip": "192.168.1.106",
+                "dst_ip": "203.0.113.106",
+                "dst_port": 53,
+                "detail": "Shell on 53",
+            },
+            {
+                "rule_name": "ICMP_TUNNEL",
+                "src_ip": "192.168.1.107",
+                "dst_ip": "203.0.113.107",
+                "dst_port": 0,
+                "detail": "Covert ICMP",
+            },
+            {
+                "rule_name": "IP_FRAGMENT_ANOMALY",
+                "src_ip": "192.168.1.108",
+                "dst_ip": "192.168.1.1",
+                "dst_port": 80,
+                "detail": "Fragment overlap",
+            },
+            {
+                "rule_name": "IRC_C2_BEACONING",
+                "src_ip": "192.168.1.109",
+                "dst_ip": "185.244.25.235",
+                "dst_port": 6667,
+                "detail": "IRC beacon",
+            },
         ]
         observations = _obs_per_alert_type(alerts)
         rules_observed = {o["rule_name"] for o in observations}
         self.assertIn("TCP_ZERO_WINDOW", rules_observed)
         self.assertIn("TCP_FLAG_ANOMALY", rules_observed)
         self.assertIn("DATA_EXFIL", rules_observed)
+        self.assertIn("NON_DNS_TRAFFIC_ON_DNS_PORT", rules_observed)
+        self.assertIn("ICMP_TUNNEL", rules_observed)
+        self.assertIn("IP_FRAGMENT_ANOMALY", rules_observed)
+        self.assertIn("IRC_C2_BEACONING", rules_observed)
+
+        # Verify all 23 canonical detection rules have plain-language templates
+        engine = RuleEngine(None, set(), config)
+        for r in engine.rules:
+            self.assertIn(r.name, TEMPLATES, f"Rule {r.name} missing from analysis/aggregator.py TEMPLATES")
 
 
 if __name__ == "__main__":
