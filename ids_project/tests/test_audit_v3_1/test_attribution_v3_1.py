@@ -1,6 +1,6 @@
 """
 NetGuard IDS — Forensic Ground-Truth Audit V3.1 Test Suite
-Covers 27 strict verification invariants exercising the real Audit V3.1
+Covers 31 strict verification invariants exercising the real Audit V3.1.1
 parsers, binary decoders, 5-tuple matchers, and classification logic.
 """
 
