@@ -1178,6 +1178,14 @@ def _write_v3_1_reports(docs_dir: str, s: dict):
     arp = s["arp_forensics"]
     sur = s["suricata_provenance"]
     exp = s["exports"]
+    checks = s["audit_validation_checks"]
+    submission_verdict = (
+        "SUPPORTED WITH LIMITATIONS — CAPTURE-SPECIFIC"
+        if checks["tier_counts_reconcile"]
+        and checks["zeek_records_reconcile"]
+        and checks["pcap_stream_completed_without_truncation"]
+        else "INCONCLUSIVE — A REQUIRED RECONCILIATION GATE FAILED"
+    )
 
     # 01_provenance_and_integrity.md
     with open(os.path.join(docs_dir, "01_provenance_and_integrity.md"), "w", encoding="utf-8") as f:
@@ -1306,7 +1314,7 @@ $$\\text{{Unassessed Alert Rate (ARP)}} = \\frac{{{a['tier_d_unassessed']}}}{{{a
     with open(os.path.join(docs_dir, "09_final_submission_verdict.md"), "w", encoding="utf-8") as f:
         f.write(f"""# 9. Final Submission-Readiness Verdict
 
-## Verdict: SUPPORTED WITH LIMITATIONS — CAPTURE-SPECIFIC
+## Verdict: {submission_verdict}
 
 This verdict supports a capture-specific case study only. The Tier-A values below are confirmation fractions, not conventional precision. Suricata input-PCAP identity and runtime cooldown overrides remain unverified.
 
