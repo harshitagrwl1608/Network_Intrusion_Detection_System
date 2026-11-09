@@ -35,8 +35,8 @@ DEFAULT_PCAP = "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_
 DEFAULT_ZEEK = "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/2019-02-28-19-15-13-192.168.1.200-zeek-conn-log.labeled"
 DEFAULT_DB = "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/netguard_eval_48_1.db"
 DEFAULT_SURICATA_DIR = "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/suricata_output"
-DEFAULT_EXPORTS_DIR = "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_1_exports"
-DEFAULT_DOCS_DIR = "docs/evaluation/published-ground-truth-audit-v3-1"
+DEFAULT_EXPORTS_DIR = "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_1_1_exports"
+DEFAULT_DOCS_DIR = "docs/evaluation/published-ground-truth-audit-v3-1-1"
 
 
 def get_file_sha256(filepath: str, buffer_size: int = 65536) -> str:
@@ -86,13 +86,15 @@ def parse_zeek_line(line: str, field_indices: dict = None) -> dict:
         else:
             parts.append(p)
 
-    if field_indices is None:
-        # Fallback default mapping
-        field_indices = {
-            "ts": 0, "uid": 1, "id.orig_h": 2, "id.orig_p": 3,
-            "id.resp_h": 4, "id.resp_p": 5, "proto": 6, "service": 7,
-            "duration": 8, "conn_state": 11, "label": 21, "detailed-label": 22
-        }
+    if not field_indices:
+        return None
+
+    required_fields = (
+        "ts", "uid", "id.orig_h", "id.orig_p", "id.resp_h", "id.resp_p",
+        "proto", "duration", "conn_state", "label", "detailed-label"
+    )
+    if any(name not in field_indices for name in required_fields):
+        return None
 
     def _get(field_name: str, default: str = "-"):
         idx = field_indices.get(field_name)
@@ -116,9 +118,10 @@ def parse_zeek_line(line: str, field_indices: dict = None) -> dict:
 
         dur_str = _get("duration")
         duration_is_sentinel = dur_str in ("-", "(empty)", "")
-        duration = float(dur_str) if not duration_is_sentinel else 0.0
-        if not math.isfinite(duration) or duration < 0:
-            duration = 0.0
+        duration = None if duration_is_sentinel else float(dur_str)
+        if duration is not None and (not math.isfinite(duration) or duration < 0):
+            return None
+        end_ts = ts_val + duration if duration is not None else None
 
         conn_state = _get("conn_state")
         label = _get("label")
@@ -126,7 +129,7 @@ def parse_zeek_line(line: str, field_indices: dict = None) -> dict:
 
         return {
             "ts": ts_val,
-            "end_ts": ts_val + duration,
+            "end_ts": end_ts,
             "uid": uid,
             "orig_h": orig_h,
             "orig_p": orig_p,
@@ -307,13 +310,17 @@ def match_packet_to_candidates(pkt_ts: float, pkt_sip: str, pkt_sport: int,
                                pkt_dip: str, pkt_dport: int, pkt_proto: str,
                                candidates: list) -> list:
     """
-    Directional 5-tuple matching against flow candidates over exact flow lifetime:
-    flow_start <= pkt_ts <= flow_end
-    Returns list of matching (uid, label, detailed_label, flow_start, flow_end).
+    Match a packet against complete directional Zeek five-tuples and exact flow
+    lifetimes. Candidate shape:
+      (orig_h, orig_p, resp_h, resp_p, proto, start, end, uid, label, detailed)
+    Returns every matching candidate; callers must handle ambiguity explicitly.
     """
     matches = []
-    for fs, fe, uid, lbl, dlbl in candidates:
-        # Zero unexplained tolerance: packet must fall within connection lifetime
+    packet_tuple = (pkt_sip, int(pkt_sport), pkt_dip, int(pkt_dport), pkt_proto.lower())
+    for orig_h, orig_p, resp_h, resp_p, proto, fs, fe, uid, lbl, dlbl in candidates:
+        flow_tuple = (orig_h, int(orig_p), resp_h, int(resp_p), str(proto).lower())
+        if flow_tuple != packet_tuple or fe is None:
+            continue
         if fs <= pkt_ts <= fe:
             matches.append((uid, lbl, dlbl, fs, fe))
     return matches
@@ -348,11 +355,16 @@ def classify_alert_v3_1(alert_id: int, rule_name: str, threshold: int,
         tier_key = "TIER_B_MALICIOUS_ASSOCIATED"
         rationale = (f"Associated with {malicious_targets_count} malicious targets but corroborated "
                      f"targets ({corroborated_targets_count}) < threshold ({threshold})")
-    elif benign_targets_count > 0 and malicious_targets_count == 0 and corroborated_targets_count == 0:
+    elif (benign_targets_count > 0
+          and benign_targets_count == distinct_targets_reconstructed
+          and malicious_targets_count == 0
+          and corroborated_targets_count == 0
+          and unmatched_targets_count == 0
+          and ambiguous_targets_count == 0):
         tier = "Tier C (Confirmed False Positive)"
         tier_key = "TIER_C_FALSE_POSITIVE"
-        rationale = "Contributing traffic was exclusively labeled benign"
-    elif distinct_targets_reconstructed == 0 or unmatched_targets_count > 0:
+        rationale = "All reconstructed targets were uniquely associated with benign publisher-labelled flows"
+    elif distinct_targets_reconstructed == 0 or unmatched_targets_count > 0 or ambiguous_targets_count > 0:
         tier = "Tier D (Unassessed / Insufficient Historical Evidence)"
         tier_key = "TIER_D_UNASSESSED"
         rationale = "Insufficient packet evidence or unmapped historical telemetry"
@@ -423,6 +435,7 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     malformed_zeek_records = 0
     missing_fields_records = 0
     duplicate_uids_count = 0
+    duration_sentinel_records = 0
     seen_uids = set()
 
     generic_label_dist = Counter()
@@ -455,6 +468,9 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             else:
                 seen_uids.add(uid)
 
+            if rec["duration_is_sentinel"]:
+                duration_sentinel_records += 1
+
             lbl = rec["label"]
             dlbl = rec["detailed_label"]
             generic_label_dist[lbl] += 1
@@ -464,18 +480,27 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
                 publisher_scan_uids.add(uid)
                 scan_flow_start_timestamps.append(rec["ts"])
 
-            # Index relevant scanning traffic
-            if rec["orig_h"] == "192.168.1.200" and rec["resp_p"] == 23 and rec["proto"] == "tcp":
-                scan_flow_index[(rec["orig_p"], rec["resp_h"])].append(
-                    (rec["ts"], rec["end_ts"], uid, lbl, dlbl)
+            # Index only flows with a known duration; unknown-duration records
+            # remain in the label inventory but cannot prove packet lifetime overlap.
+            if (rec["end_ts"] is not None and rec["orig_h"] == "192.168.1.200"
+                    and rec["resp_p"] == 23 and rec["proto"] == "tcp"):
+                flow_key = (
+                    rec["orig_h"], rec["orig_p"], rec["resp_h"],
+                    rec["resp_p"], rec["proto"]
                 )
+                scan_flow_index[flow_key].append((
+                    rec["orig_h"], rec["orig_p"], rec["resp_h"], rec["resp_p"],
+                    rec["proto"], rec["ts"], rec["end_ts"], uid, lbl, dlbl
+                ))
 
     scan_flow_start_timestamps.sort()
     t_zeek = time.time() - t0
     print(f"  Parsed {parsed_zeek_records:,} / {total_zeek_records:,} records in {t_zeek:.2f}s "
-          f"(Malformed: {malformed_zeek_records}, Duplicates: {duplicate_uids_count})")
+          f"(Malformed: {malformed_zeek_records}, Duplicates: {duplicate_uids_count}, "
+          f"Missing duration: {duration_sentinel_records})")
     print(f"  Publisher 'PartOfAHorizontalPortScan' Flows: {len(publisher_scan_uids):,}")
-    print(f"  Indexed (sport, dip) Flow Keys             : {len(scan_flow_index):,}")
+    print(f"  Zeek records with missing duration         : {duration_sentinel_records:,}")
+    print(f"  Indexed full directional five-tuples       : {len(scan_flow_index):,}")
 
     # -------------------------------------------------------------------------
     # PHASE 3: Load Alerts from SQLite Database
@@ -533,6 +558,8 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     alert_benign_targets = defaultdict(set)
     # alert_id -> set of matched Zeek UIDs
     alert_matched_uids = defaultdict(set)
+    alert_scan_flow_uids = defaultdict(set)
+    alert_ambiguous_targets = defaultdict(set)
     # alert_id -> list of packet metadata tuples for export
     # Alert packet count counter
     alert_valid_syn_counts = Counter()
@@ -543,8 +570,8 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     pkt_writer = csv.writer(pkt_export_file)
     pkt_writer.writerow([
         "alert_id", "packet_idx", "packet_ts", "src_ip", "dst_ip", "src_port",
-        "dst_port", "protocol", "tcp_flags", "is_initial_syn", "matched_zeek_uid",
-        "publisher_label", "detailed_label"
+        "dst_port", "protocol", "tcp_flags", "is_initial_syn", "matched_zeek_uids",
+        "match_status", "publisher_label", "detailed_label"
     ])
     total_exported_packets = 0
 
@@ -598,30 +625,48 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
                     alert_syn_targets[aid].add(dip)
 
                     # 5-tuple flow matching against indexed Zeek records
-                    cands = scan_flow_index.get((sport, dip), [])
+                    flow_key = (sip, sport, dip, dport, "tcp")
+                    cands = scan_flow_index.get(flow_key, [])
                     matched_flows = match_packet_to_candidates(
                         ts, sip, sport, dip, dport, "tcp", cands
                     )
-
-                    m_uid = "-"
+                    # Deduplicate duplicate Zeek rows by UID before deciding whether
+                    # the packet has one defensible flow association or is ambiguous.
+                    matched_by_uid = {m[0]: m for m in matched_flows}
+                    matched = list(matched_by_uid.values())
+                    matched_uids_text = "-"
+                    match_status = "UNMATCHED"
                     m_lbl = "-"
                     m_dlbl = "-"
 
-                    if matched_flows:
-                        # If multiple candidates, check detailed labels
-                        m_uid, m_lbl, m_dlbl, _, _ = matched_flows[0]
+                    if len(matched) == 1:
+                        m_uid, m_lbl, m_dlbl, _, _ = matched[0]
+                        matched_uids_text = m_uid
+                        match_status = "UNIQUE"
                         alert_matched_uids[aid].add(m_uid)
-
                         if m_dlbl == "PartOfAHorizontalPortScan":
                             alert_corroborated_targets[aid].add(dip)
+                            alert_scan_flow_uids[aid].add(m_uid)
                         elif m_lbl == "Malicious":
                             alert_malicious_targets[aid].add(dip)
                         elif m_lbl == "Benign":
                             alert_benign_targets[aid].add(dip)
+                    elif len(matched) > 1:
+                        match_status = "AMBIGUOUS"
+                        matched_uids_text = ";".join(sorted(m[0] for m in matched))
+                        alert_ambiguous_targets[aid].add(dip)
+                        alert_matched_uids[aid].update(m[0] for m in matched)
+                        if any(m[1] == "Malicious" or m[2] == "PartOfAHorizontalPortScan" for m in matched):
+                            alert_malicious_targets[aid].add(dip)
+                        m_lbl = "AMBIGUOUS"
+                        m_dlbl = "AMBIGUOUS"
+                    else:
+                        # Keep an explicit target-level unmatched record for classification.
+                        match_status = "UNMATCHED"
 
                     pkt_writer.writerow([
                         aid, pkt_idx, f"{ts:.6f}", sip, dip, sport, dport,
-                        "TCP", hex(flags), 1, m_uid, m_lbl, m_dlbl
+                        "TCP", hex(flags), 1, matched_uids_text, match_status, m_lbl, m_dlbl
                     ])
                     total_exported_packets += 1
 
@@ -660,12 +705,14 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
         reconstructed_targets = len(alert_syn_targets.get(aid, set()))
         corroborated_targets = len(alert_corroborated_targets.get(aid, set()))
 
-        status = "RESOLVED_TIER_A" if corroborated_targets >= thr else "UNRESOLVED"
         if corroborated_targets >= thr:
+            status = "RESOLVED_TIER_A"
             retrans_cases_resolved += 1
         elif corroborated_targets > 0:
+            status = "PARTIALLY_RESOLVED_TIER_B"
             retrans_cases_partially_resolved += 1
         else:
+            status = "UNRESOLVED_TIER_D_OR_E"
             retrans_cases_unresolved += 1
 
         retrans_export_rows.append([
@@ -746,11 +793,18 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
         corrob_targets = len(alert_corroborated_targets.get(aid, set()))
         mal_targets = len(alert_malicious_targets.get(aid, set()))
         ben_targets = len(alert_benign_targets.get(aid, set()))
-        unm_targets = max(0, rec_targets - (corrob_targets + mal_targets + ben_targets))
+        ambiguous_targets = len(alert_ambiguous_targets.get(aid, set()))
+        classified_targets = (
+            alert_corroborated_targets.get(aid, set())
+            | alert_malicious_targets.get(aid, set())
+            | alert_benign_targets.get(aid, set())
+            | alert_ambiguous_targets.get(aid, set())
+        )
+        unm_targets = len(alert_syn_targets.get(aid, set()) - classified_targets)
 
         tier, tier_key, rationale = classify_alert_v3_1(
             aid, rname, thr, rec_targets, corrob_targets, mal_targets,
-            ben_targets, unm_targets, 0
+            ben_targets, unm_targets, ambiguous_targets
         )
         tier_counts[tier_key] += 1
 
@@ -758,7 +812,8 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             aid, rname, a["rule_version"], a["src_ip"], a["dst_port"],
             f"{a['window_start']:.6f}", f"{a['window_end']:.6f}",
             alert_valid_syn_counts[aid], rec_targets, corrob_targets, thr,
-            len(alert_matched_uids.get(aid, set())), tier_key, rationale
+            len(alert_matched_uids.get(aid, set())), tier_key,
+            f"{rationale}; ambiguous_targets={ambiguous_targets}; unmatched_targets={unm_targets}"
         ])
 
         for uid in alert_matched_uids.get(aid, set()):
@@ -820,23 +875,61 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     print("\n[Phase 8] Analyzing Scan-Flow Coverage and Cooldown Intervals...")
     total_scan_flows = len(publisher_scan_uids)
     uids_in_trigger = set()
-    for uids in alert_matched_uids.values():
+    for uids in alert_scan_flow_uids.values():
         uids_in_trigger.update(uids)
+    uids_in_trigger.intersection_update(publisher_scan_uids)
 
-    trigger_pct = round((len(uids_in_trigger) / total_scan_flows) * 100.0, 2)
-    print(f"  Publisher Scan Flows       : {total_scan_flows:,}")
-    print(f"  Unique UIDs in Trigger Windows: {len(uids_in_trigger):,} ({trigger_pct}%)")
-    print(f"  Recall Assessment          : NOT MEASURABLE at per-flow granularity")
+    trigger_pct = round((len(uids_in_trigger) / total_scan_flows) * 100.0, 2) if total_scan_flows else 0.0
 
-    # Export per_flow_scan_attribution.csv
-    print(f"  Streaming {total_scan_flows:,} flow records to per_flow_scan_attribution.csv...")
+    # Calculate post-alert temporal intervals from alert window_end using the
+    # configured defaults represented by the production rule constructors.
+    # Runtime overrides were not preserved, so these are analytical intervals,
+    # not proof that the detector suppressed a specific flow.
+    cooldown_intervals = defaultdict(list)
+    for a in scan_alerts:
+        start = a["window_end"]
+        if start is None:
+            continue
+        if a["rule_name"] == "PORT_SCAN":
+            cooldown = float(a["evidence"].get("window_s", 10.0))
+            key = ("PORT_SCAN", a["src_ip"], int(a["dst_port"] or 0))
+        else:
+            cooldown = 120.0
+            key = ("SLOW_PORT_SCAN", a["src_ip"])
+        if cooldown > 0:
+            cooldown_intervals[key].append((float(start), float(start) + cooldown))
+
+    merged_cooldowns = {}
+    for key, intervals in cooldown_intervals.items():
+        intervals.sort()
+        merged = []
+        for start, end in intervals:
+            if not merged or start > merged[-1][1]:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+        merged_cooldowns[key] = (
+            [item[0] for item in merged],
+            [item[1] for item in merged]
+        )
+
+    def _flow_start_overlaps(key, flow_ts):
+        starts_ends = merged_cooldowns.get(key)
+        if not starts_ends:
+            return False
+        starts, ends = starts_ends
+        idx = bisect.bisect_right(starts, flow_ts) - 1
+        return idx >= 0 and flow_ts <= ends[idx]
+
+    post_alert_interval_uids = set()
     flow_csv_path = os.path.join(exports_dir, "per_flow_scan_attribution.csv")
+    print(f"  Streaming {total_scan_flows:,} publisher scan flows to per_flow_scan_attribution.csv...")
     with open(flow_csv_path, "w", newline="", encoding="utf-8") as out_f, \
          open(zeek_path, "r", encoding="utf-8", errors="replace") as in_zf:
         writer = csv.writer(out_f)
         writer.writerow([
-            "zeek_uid", "flow_ts", "orig_p", "resp_h", "resp_p",
-            "has_trigger_packet", "campaign_cooldown_active", "coverage_status"
+            "zeek_uid", "flow_ts", "orig_h", "orig_p", "resp_h", "resp_p",
+            "proto", "has_unique_trigger_packet", "post_alert_interval_overlap", "temporal_status"
         ])
         for line in in_zf:
             if line.startswith("#"):
@@ -845,11 +938,36 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             if not rec or rec["detailed_label"] != "PartOfAHorizontalPortScan":
                 continue
             uid = rec["uid"]
-            in_trig = 1 if uid in uids_in_trigger else 0
+            in_trigger = uid in uids_in_trigger
+            port_interval = _flow_start_overlaps(
+                ("PORT_SCAN", rec["orig_h"], int(rec["resp_p"])), rec["ts"]
+            )
+            slow_interval = _flow_start_overlaps(
+                ("SLOW_PORT_SCAN", rec["orig_h"]), rec["ts"]
+            )
+            in_post_alert_interval = port_interval or slow_interval
+            if in_post_alert_interval:
+                post_alert_interval_uids.add(uid)
+            if in_trigger:
+                status = "TRIGGER_PACKET_ASSOCIATED"
+            elif in_post_alert_interval:
+                status = "POST_ALERT_INTERVAL_OVERLAP"
+            else:
+                status = "OUTSIDE_TRIGGER_AND_POST_ALERT_INTERVALS"
             writer.writerow([
-                uid, f"{rec['ts']:.6f}", rec["orig_p"], rec["resp_h"], rec["resp_p"],
-                in_trig, 1, "TRIGGER_EVIDENCE" if in_trig else "COOLDOWN_SUPPRESSED"
+                uid, f"{rec['ts']:.6f}", rec["orig_h"], rec["orig_p"],
+                rec["resp_h"], rec["resp_p"], rec["proto"],
+                int(in_trigger), int(in_post_alert_interval), status
             ])
+
+    post_alert_overlap_pct = (
+        round(len(post_alert_interval_uids) / total_scan_flows * 100.0, 2)
+        if total_scan_flows else 0.0
+    )
+    print(f"  Publisher scan UIDs with unique trigger-packet matches : {len(uids_in_trigger):,} ({trigger_pct}%)")
+    print(f"  Publisher scan UIDs with post-alert interval overlap   : {len(post_alert_interval_uids):,} ({post_alert_overlap_pct}%)")
+    print("  Per-flow recall assessment: NOT MEASURABLE")
+
 
     # -------------------------------------------------------------------------
     # PHASE 9: Suricata Execution Output Audit
@@ -859,6 +977,7 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     suricata_log_path = os.path.join(suricata_dir, "suricata.log")
 
     eve_sha256 = get_file_sha256(suricata_eve_path) if os.path.exists(suricata_eve_path) else "-"
+    suricata_log_sha256 = get_file_sha256(suricata_log_path) if os.path.exists(suricata_log_path) else "-"
     suricata_alerts_count = 0
     suricata_sigs = Counter()
     malformed_eve = 0
@@ -901,8 +1020,8 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
         print(f"  - {fname:<35}: {fhash}")
 
     summary_data = {
-        "audit_name": "NetGuard IDS Forensic Ground-Truth Audit V3.1",
-        "audit_version": "3.1.0",
+        "audit_name": "NetGuard IDS Forensic Ground-Truth Audit V3.1.1",
+        "audit_version": "3.1.1",
         "audit_timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "provenance": {
             "pcap_file": os.path.basename(pcap_path),
@@ -915,6 +1034,7 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             "db_size_bytes": db_size,
             "db_sha256": db_sha256,
             "suricata_eve_sha256": eve_sha256,
+            "suricata_log_sha256": suricata_log_sha256,
         },
         "zeek_parsing": {
             "total_records": total_zeek_records,
@@ -950,10 +1070,13 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
         },
         "flow_coverage": {
             "publisher_scan_flows": total_scan_flows,
-            "unique_uids_in_trigger": len(uids_in_trigger),
-            "trigger_evidence_pct": trigger_pct,
-            "campaign_cooldown_overlap_pct": 100.0,
-            "per_flow_recall_status": "NOT MEASURABLE at per-flow granularity due to intentional rate-limiting alert aggregation",
+            "unique_uids_with_unique_trigger_packet_match": len(uids_in_trigger),
+            "trigger_packet_evidence_pct": trigger_pct,
+            "publisher_scan_uids_with_post_alert_interval_overlap": len(post_alert_interval_uids),
+            "post_alert_interval_overlap_pct": post_alert_overlap_pct,
+            "post_alert_interval_basis": "Flow-start timestamp within [alert window_end, window_end + documented default cooldown]; analytical temporal overlap only",
+            "runtime_cooldown_override_verified": False,
+            "per_flow_recall_status": "NOT MEASURABLE at per-flow granularity; temporal overlap is not evidence of detection or suppression",
         },
         "arp_forensics": {
             "total_arp_alerts": len(arp_alerts),
@@ -965,7 +1088,10 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
         "suricata_provenance": {
             "total_alerts": suricata_alerts_count,
             "signatures": dict(suricata_sigs.most_common(10)),
-            "horizontal_scan_alerts": 0,
+            "horizontal_scan_alerts": None,
+            "horizontal_scan_detection_status": "NOT_ESTABLISHED_FROM_EVE_RECOUNT_ALONE",
+            "input_pcap_identity_verified": False,
+            "suricata_log_sha256": suricata_log_sha256,
         },
         "exports": export_ledger,
     }
@@ -980,10 +1106,10 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
 
     print("\n" + "=" * 80)
     print("  NETGUARD IDS FORENSIC AUDIT V3.1 COMPLETED SUCCESSFULLY")
-    print(f"  Strict Precision       : {strict_precision_pct}% ({tier_a:,} / {total_emitted:,})")
-    print(f"  Scan Rule Precision    : {scan_rule_precision_pct}% ({tier_a:,} / {len(scan_alerts):,})")
+    print(f"  Strict Tier-A Fraction : {strict_precision_pct}% ({tier_a:,} / {total_emitted:,})")
+    print(f"  Scan Rule Tier-A Fraction: {scan_rule_precision_pct}% ({tier_a:,} / {len(scan_alerts):,})")
     print(f"  Unassessed ARP Rate    : {unassessed_rate_pct}% ({tier_d:,} / {total_emitted:,})")
-    print(f"  Official Audit Verdict : SUPPORTED WITH LIMITATIONS")
+    print("  Official Audit Verdict : PROVISIONAL — corrected code requires a fresh full-data run")
     print("=" * 80)
 
     return summary_data
@@ -1029,7 +1155,7 @@ Direct cryptographic hashing of the local file on disk establishes `ac2e41f0d5b2
 Every scan alert trigger window was independently extracted from raw PCAP packets with strict initial-SYN semantics (`(flags & 0x12) == 0x02` and `(flags & 0x05) == 0`).
 - Valid initial SYN packets processed: **{pc['valid_initial_syn_packets']:,}**.
 - Streamed packet attribution rows (uncapped): **{pc['total_exported_attribution_packets']:,}**.
-- **100.00% of the {a['scan_alerts']:,} scan alerts** had independently corroborated distinct destination hosts $\\ge$ threshold.
+- **{a['tier_a_confirmed_tp']:,} of {a['scan_alerts']:,} scan alerts ({a['scan_rule_precision_pct']:.2f}%)** met the strict per-target corroboration threshold.
 
 ---
 
@@ -1038,7 +1164,7 @@ Every scan alert trigger window was independently extracted from raw PCAP packet
 | Tier | Category | Count | Percentage |
 | :--- | :--- | :--- | :--- |
 | **Tier A** | **Confirmed Rule-Specific Detection** | **{a['tier_a_confirmed_tp']:,}** | **{a['strict_precision_pct']:.2f}%** |
-| **Tier B** | **Malicious Associated** | **{a['tier_b_malicious_associated']:,}** | **0.00%** |
+| **Tier B** | **Malicious Associated** | **{a['tier_b_malicious_associated']:,}** | **{a['tier_b_malicious_associated'] / a['total_alerts'] * 100:.2f}%** |
 | **Tier C** | **Confirmed False Positive** | **{a['tier_c_false_positive']:,}** | **0.00%** |
 | **Tier D** | **Unassessed Historical Baseline** | **{a['tier_d_unassessed']:,}** | **{a['unassessed_rate_pct']:.2f}%** |
 | **Tier E** | **No Defensible Association** | **{a['tier_e_no_association']:,}** | **0.00%** |
@@ -1051,11 +1177,11 @@ Every scan alert trigger window was independently extracted from raw PCAP packet
 
 ## Individual Investigation of the 402 Windows
 - Total Investigated Cases: **{r['total_cases']}**
-- Fully Resolved via Connection Lifetime `[ts, ts + duration]`: **{r['resolved_via_flow_lifetime']} ({r['resolution_pct']:.2f}%)**
-- Partially Resolved: **{r['partially_resolved']}**
+- Fully corroborated Tier A: **{r['resolved_via_flow_lifetime']} ({r['resolution_pct']:.2f}%)**
+- Partially corroborated Tier B: **{r['partially_resolved']}**
 - Unresolved: **{r['unresolved']}**
 
-In all 402 cases, initial SYN packets arriving in the alert window matched active Zeek flows labeled `PartOfAHorizontalPortScan` whose multi-second lifetimes spanned across the window. All 402 cases qualify strictly for **Tier A**.
+Only cases meeting the full distinct-target corroboration threshold qualify for Tier A. Partial cases remain Tier B; they are not upgraded merely because at least one matching scan flow exists.
 """)
 
     # 04_arp_forensics.md
@@ -1076,9 +1202,10 @@ In all 402 cases, initial SYN packets arriving in the alert window matched activ
 
 ## Disambiguated Metrics
 - Publisher Scan Flows: **{c['publisher_scan_flows']:,}**
-- Flows with Packet Evidence in Trigger Windows: **{c['unique_uids_in_trigger']:,} ({c['trigger_evidence_pct']:.2f}%)**
-- Flows Occurring During Alert Rate-Limiting Cooldown: **{c['publisher_scan_flows']:,} (100.00%)**
-- **Per-Flow Recall Assessment**: **NOT MEASURABLE** at per-flow granularity due to NetGuard's incident-aggregation design.
+- Unique publisher scan flows with uniquely matched trigger-window packets: **{c['unique_uids_with_unique_trigger_packet_match']:,} ({c['trigger_packet_evidence_pct']:.2f}%)**
+- Publisher scan flows whose start timestamp falls inside a documented post-alert interval: **{c['publisher_scan_uids_with_post_alert_interval_overlap']:,} ({c['post_alert_interval_overlap_pct']:.2f}%)**
+- These are temporal statistics only. Runtime cooldown overrides are not independently verified, and overlap does not prove suppression or detection.
+- **Per-Flow Recall Assessment**: **NOT MEASURABLE**.
 """)
 
     # 06_metric_recalculation.md
@@ -1101,7 +1228,8 @@ $$\\text{{Unassessed Alert Rate (ARP)}} = \\frac{{{a['tier_d_unassessed']}}}{{{a
 ## Existing Execution Outputs
 - Total Alerts in EVE JSON: **{sur['total_alerts']}**
 - Top Signatures: {json.dumps(sur['signatures'], indent=2)}
-- Horizontal Scan Alerts: **0**
+- Input PCAP identity and ruleset provenance are not independently established by the available EVE/log artifacts.
+- Horizontal scan detection conclusion: **NOT ESTABLISHED** from the EVE recount alone.
 """)
 
     # 08_limitations.md
@@ -1127,8 +1255,8 @@ $$\\text{{Unassessed Alert Rate (ARP)}} = \\frac{{{a['tier_d_unassessed']}}}{{{a
 
 NetGuard's core behavioral scanning detection engine against real-world Mirai botnet activity is **substantiated**:
 - **Strict Alert Precision**: **{a['strict_precision_pct']:.2f}%** ({a['tier_a_confirmed_tp']:,} / {a['total_alerts']:,})
-- **Transport Scanning Rule Precision**: **100.00%** ({a['tier_a_confirmed_tp']:,} / {a['scan_alerts']:,})
-- **Campaign Timeline Coverage**: **100.00%** across all 9.77 hours.
+- **Scan-Rule Tier-A Fraction**: **{a['scan_rule_precision_pct']:.2f}%** ({a['tier_a_confirmed_tp']:,} / {a['scan_alerts']:,})
+- Per-flow recall and campaign coverage are **not established** by cooldown overlap statistics.
 
 ### Established Limitations
 1. The 262 ARP alerts ({a['unassessed_rate_pct']:.2f}%) are classified as **Tier D (Unassessed due to missing historical baseline)**.
