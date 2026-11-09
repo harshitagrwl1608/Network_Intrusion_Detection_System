@@ -182,6 +182,9 @@ The web dashboard is designed for both security analysts and non-technical stake
 
 NetGuard includes a complete evaluation pipeline to benchmark detection accuracy against **Suricata** and run offline analysis on real or synthetic capture files (e.g., `log.pcap`).
 
+> [!IMPORTANT]
+> **Published-ground-truth audit status (CTU IoT-23 v2 Capture 48-1):** The capture and publisher-labelled Zeek dataset are real, and the repository records 4,027 raw NetGuard alert rows. The Audit V2 correction found that its current per-alert matcher does not independently join each scan alert to contributing publisher-labelled flows. Therefore the previously reported 93.49% precision, 99.88% malicious precision, and 100% scan-flow coverage/recall are **not established** and must not be cited as verified accuracy metrics. See [the corrected audit verdict](docs/evaluation/published-ground-truth-audit-v2/11_final_independent_audit_verdict.md) and [correction register](docs/evaluation/published-ground-truth-audit-v2/13_correction_and_submission_readiness.md).
+
 ### 1. Capturing Real Network Traffic (`log.pcap`)
 
 You can capture live traffic from your network into a `log.pcap` file using `tcpdump` or Wireshark:
