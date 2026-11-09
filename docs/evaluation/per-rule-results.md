@@ -3,7 +3,7 @@
 **Document Version:** 2.1.0  
 **Date:** 2026-11-08  
 **Evaluator:** Automated Asynchronous Evaluation Pipeline  
-**Corpus:** Synthetic Baseline (42 scenarios) + 18 Independent Real-World Captures (~205 MB across 6 Publishers)
+**Corpus:** Synthetic Baseline (42 scenarios) + 19 Independent Real-World Captures (~351 MB across 6 Publishers)
 
 ---
 
@@ -52,6 +52,7 @@ This report presents per-rule detection accuracy, false positive analysis, and o
 | `oisf_tls_sni_anomaly`| OISF Suricata | Standard TLS Handshake | 25 / 4.0 KB | 0 | None | Clean TLS SNI validation baseline |
 | `iot23_malware_8_1` | Stratosphere CTU | Hakai Botnet Low-Rate | 23,623 / 2.1 MB | 0 | None | Unassessed reference capture (1 probe / ~60s below 10s/120s scan threshold) |
 | `iot23_malware_20_1` | Stratosphere CTU | Torii Botnet C2 & Recon | 50,156 / 4.06 MB | 0 | None | Multi-stage modular botnet replayed cleanly without error |
+| `stratosphere_ctu_hns_botnet_1_1` | Stratosphere CTU | Hide & Seek IoT Botnet | 1,686,291 / 145.9 MB | Multi-alert | `SLOW_PORT_SCAN`, `PORT_SCAN`, `BRUTE_FORCE`, `SYN_FLOOD` | **Sealed Blind Holdout Validation Capture** (IoT-23 Capture 1-1, verified via single-pass replay) |
 
 ---
 
