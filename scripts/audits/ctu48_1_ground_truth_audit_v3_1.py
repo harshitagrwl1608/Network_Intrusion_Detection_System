@@ -853,6 +853,10 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
 
     # Reconcile counts
     total_emitted = len(alerts_rows)
+    if sum(tier_counts.values()) != total_emitted:
+        raise RuntimeError(
+            f"Tier reconciliation failed: {sum(tier_counts.values())} classifications for {total_emitted} alerts"
+        )
     tier_a = tier_counts["TIER_A_CONFIRMED_TP"]
     tier_b = tier_counts["TIER_B_MALICIOUS_ASSOCIATED"]
     tier_c = tier_counts["TIER_C_FALSE_POSITIVE"]
@@ -1062,7 +1066,24 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             "parsed_records": parsed_zeek_records,
             "malformed_records": malformed_zeek_records,
             "duplicate_uids": duplicate_uids_count,
+            "duration_sentinel_records": duration_sentinel_records,
             "publisher_scan_flows": total_scan_flows,
+            "record_reconciliation_passed": (
+                parsed_zeek_records == total_zeek_records
+                and malformed_zeek_records == 0
+                and duplicate_uids_count == 0
+            ),
+        },
+        "audit_validation_checks": {
+            "tier_counts_reconcile": sum(tier_counts.values()) == total_emitted,
+            "zeek_records_reconcile": (
+                parsed_zeek_records == total_zeek_records
+                and malformed_zeek_records == 0
+                and duplicate_uids_count == 0
+            ),
+            "pcap_stream_completed_without_truncation": parser.truncated_records == 0,
+            "suricata_input_pcap_identity_verified": False,
+            "runtime_cooldown_configuration_verified": False,
         },
         "pcap_parsing": {
             "packet_records_read": pcap_packets_read,
@@ -1088,11 +1109,13 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             "unassessed_rate_pct": unassessed_rate_pct,
         },
         "retransmission_investigation": {
-            "total_cases": 402,
+            "total_cases": len(alerts_zero_flow_start),
             "resolved_via_flow_lifetime": retrans_cases_resolved,
             "partially_resolved": retrans_cases_partially_resolved,
             "unresolved": retrans_cases_unresolved,
-            "resolution_pct": round((retrans_cases_resolved / 402) * 100.0, 2),
+            "resolution_pct": round(
+                retrans_cases_resolved / max(1, len(alerts_zero_flow_start)) * 100.0, 2
+            ),
         },
         "flow_coverage": {
             "publisher_scan_flows": total_scan_flows,
@@ -1107,8 +1130,10 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
         "arp_forensics": {
             "total_arp_alerts": len(arp_alerts),
             "physical_arp_frames": len(observed_arp_frames),
-            "gateway_mac_stable": "78:8a:20:43:93:d5",
-            "physical_spoofing_observed": False,
+            "gateway_ip_sender_mac_values": sorted(arp_macs_1_1.keys()),
+            "gateway_ip_sender_mac_counts": dict(arp_macs_1_1),
+            "gateway_ip_single_sender_mac_observed": len(arp_macs_1_1) == 1,
+            "physical_spoofing_conclusion": "NOT_ESTABLISHED_FROM_CAPTURE_ONLY_WITHOUT_HISTORICAL_BASELINE",
             "classification": "Tier D (Unassessed due to missing historical runtime arp_table.json)",
         },
         "suricata_provenance": {
@@ -1135,7 +1160,7 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     print(f"  Tier-A Share of All Alerts : {strict_precision_pct}% ({tier_a:,} / {total_emitted:,})")
     print(f"  Tier-A Share of Scan Alerts: {scan_rule_precision_pct}% ({tier_a:,} / {len(scan_alerts):,})")
     print(f"  Unassessed ARP Rate    : {unassessed_rate_pct}% ({tier_d:,} / {total_emitted:,})")
-    print("  Official Audit Verdict : PROVISIONAL — corrected code requires a fresh full-data run")
+    print("  Review all audit_validation_checks before submission; this script does not certify external provenance")
     print("=" * 80)
 
     return summary_data
@@ -1216,10 +1241,11 @@ Only cases meeting the full distinct-target corroboration threshold qualify for 
 
 ## Physical Evidence & Evidentiary Standard
 - Total ARP Frames in PCAP: **{arp['physical_arp_frames']:,}**
-- Physical Gateway MAC: strictly **{arp['gateway_mac_stable']}** across all 9.77 hours.
-- Claimed previous MAC (`00:11:22:33:44:01`): **Never observed in capture**.
-- Because the historical runtime `arp_table.json` was not preserved in Git, the {arp['total_arp_alerts']} ARP alerts are conservatively classified as:
+- Sender-MAC values observed for gateway IP `192.168.1.1`: **{json.dumps(arp['gateway_ip_sender_mac_values'])}**.
+- Per-alert nearest-frame values in the CSV are temporal context only, not validated alert-to-packet matches.
+- The historical runtime `arp_table.json` was not preserved. The {arp['total_arp_alerts']} ARP alerts remain:
   **{arp['classification']}**.
+- These observations do not establish a global absence of ARP spoofing or prove the historical cause.
 """)
 
     # 05_flow_and_cooldown_analysis.md
@@ -1279,19 +1305,26 @@ $$\\text{{Unassessed Alert Rate (ARP)}} = \\frac{{{a['tier_d_unassessed']}}}{{{a
     with open(os.path.join(docs_dir, "09_final_submission_verdict.md"), "w", encoding="utf-8") as f:
         f.write(f"""# 9. Final Submission-Readiness Verdict
 
-## Status: PROVISIONAL — V3.1.1 CORRECTIONS REQUIRE A FRESH FULL-DATA RUN
+## Verdict: SUPPORTED WITH LIMITATIONS — CAPTURE-SPECIFIC
 
-This report is generated only after the corrected V3.1.1 execution. It must not be labelled final until all output reconciliation checks pass.
+This verdict supports a capture-specific case study only. The Tier-A values below are confirmation fractions, not conventional precision. Suricata input identity and runtime cooldown overrides remain unverified.
 
-NetGuard's core behavioral scanning detection engine against real-world Mirai botnet activity is **substantiated**:
+NetGuard's scan alerts are evaluated against publisher-labelled traffic using the attribution rules documented in this report:""",
+
 - **Tier-A Share of All Alerts**: **{a['strict_precision_pct']:.2f}%** ({a['tier_a_confirmed_tp']:,} / {a['total_alerts']:,})
 - **Scan-Rule Tier-A Share**: **{a['scan_rule_precision_pct']:.2f}%** ({a['tier_a_confirmed_tp']:,} / {a['scan_alerts']:,})
 - Per-flow recall and campaign coverage are **not established** by cooldown overlap statistics.
 
+### Reconciliation Gates
+- Alert classifications reconcile: **{s['audit_validation_checks']['tier_counts_reconcile']}**.
+- Zeek records reconcile with zero malformed/duplicate UIDs: **{s['audit_validation_checks']['zeek_records_reconcile']}**.
+- PCAP stream completed without truncated records: **{s['audit_validation_checks']['pcap_stream_completed_without_truncation']}**.
+
 ### Established Limitations
 1. The 262 ARP alerts ({a['unassessed_rate_pct']:.2f}%) are classified as **Tier D (Unassessed due to missing historical baseline)**.
-2. Per-flow recall is **NOT MEASURABLE** due to incident rate-limiting cooldown aggregation.
+2. Per-flow recall is **NOT MEASURABLE**. Post-alert interval overlap is temporal only.
 3. **{r['resolved_via_flow_lifetime']}** retransmission cases met the complete Tier A threshold; **{r['partially_resolved']}** were only partially corroborated and remain Tier B; **{r['unresolved']}** remain unresolved.
+4. Suricata input-PCAP identity and effective cooldown overrides were not independently established.
 """)
 
 
