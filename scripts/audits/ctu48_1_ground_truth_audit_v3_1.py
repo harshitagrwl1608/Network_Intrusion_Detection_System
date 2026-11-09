@@ -255,6 +255,7 @@ class PcapParser:
             # 802.1Q VLAN encapsulation
             if ethertype == 0x8100:
                 if caplen < 18:
+                    self.runt_frames += 1
                     continue
                 ethertype = struct.unpack(">H", pkt_bytes[16:18])[0]
                 offset = 18
@@ -284,22 +285,33 @@ class PcapParser:
             # IPv4 frame (0x0800)
             if ethertype == 0x0800:
                 if caplen < offset + 20:
+                    yield (pkt_idx, ts, False, False, False, False, None, 0, None, 0, 0, None)
                     continue
                 ip_hdr = pkt_bytes[offset:offset+20]
                 version = ip_hdr[0] >> 4
                 if version != 4:
+                    yield (pkt_idx, ts, False, False, False, False, None, 0, None, 0, 0, None)
                     continue
                 ihl = (ip_hdr[0] & 0x0F) * 4
                 if ihl < 20 or caplen < offset + ihl:
+                    yield (pkt_idx, ts, False, False, False, False, None, 0, None, 0, 0, None)
                     continue
 
+                # Check IPv4 fragmentation: non-first fragments cannot contain a TCP header at offset 0
+                frag_word = struct.unpack(">H", ip_hdr[6:8])[0]
+                frag_offset = frag_word & 0x1FFF
                 proto = ip_hdr[9]
                 sip = socket.inet_ntoa(ip_hdr[12:16])
                 dip = socket.inet_ntoa(ip_hdr[16:20])
 
+                if frag_offset != 0:
+                    yield (pkt_idx, ts, True, False, False, False, sip, 0, dip, 0, 0, None)
+                    continue
+
                 if proto == 6:  # TCP
                     tcp_offset = offset + ihl
                     if caplen < tcp_offset + 20:
+                        yield (pkt_idx, ts, True, False, False, False, sip, 0, dip, 0, 0, None)
                         continue
                     tcp_hdr = pkt_bytes[tcp_offset:tcp_offset+20]
                     sport, dport = struct.unpack(">HH", tcp_hdr[0:4])
@@ -382,6 +394,15 @@ def classify_alert_v3_1(alert_id: int, rule_name: str, threshold: int,
         tier = "Tier C (Confirmed False Positive)"
         tier_key = "TIER_C_FALSE_POSITIVE"
         rationale = "All reconstructed targets were uniquely associated with benign publisher-labelled flows"
+    elif (distinct_targets_reconstructed == 0
+          and unmatched_targets_count == 0
+          and ambiguous_targets_count == 0
+          and malicious_targets_count == 0
+          and corroborated_targets_count == 0
+          and benign_targets_count == 0):
+        tier = "Tier E (No Defensible Association)"
+        tier_key = "TIER_E_NO_ASSOCIATION"
+        rationale = "No defensible packet or flow association established (zero targets reconstructed)"
     elif distinct_targets_reconstructed == 0 or unmatched_targets_count > 0 or ambiguous_targets_count > 0:
         tier = "Tier D (Unassessed / Insufficient Historical Evidence)"
         tier_key = "TIER_D_UNASSESSED"
@@ -459,8 +480,14 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     generic_label_dist = Counter()
     detailed_label_dist = Counter()
 
-    # Index: (orig_p, resp_h) -> list of (ts, end_ts, uid, label, detailed_label)
-    # Stored for TCP port 23 traffic from 192.168.1.200
+    # Dynamically extract target (src_ip, dst_port) pairs from alert database to index relevant scan flows
+    cur.execute("SELECT DISTINCT src_ip, dst_port FROM alerts WHERE dst_port IS NOT NULL")
+    target_scan_keys = {(r[0], int(r[1])) for r in cur.fetchall()}
+    if not target_scan_keys:
+        target_scan_keys = {("192.168.1.200", 23)}
+
+    # Index: (orig_h, orig_p, resp_h, resp_p, proto) -> list of (orig_h, orig_p, resp_h, resp_p, proto, ts, end_ts, uid, label, detailed_label)
+    # Stored for TCP traffic matching alert (src_ip, dst_port) pairs
     scan_flow_index = defaultdict(list)
     publisher_scan_uids = set()
     scan_flow_start_timestamps = []
@@ -500,8 +527,9 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
 
             # Index only flows with a known duration; unknown-duration records
             # remain in the label inventory but cannot prove packet lifetime overlap.
-            if (rec["end_ts"] is not None and rec["orig_h"] == "192.168.1.200"
-                    and rec["resp_p"] == 23 and rec["proto"] == "tcp"):
+            if (rec["end_ts"] is not None
+                    and (rec["orig_h"], rec["resp_p"]) in target_scan_keys
+                    and rec["proto"] == "tcp"):
                 flow_key = (
                     rec["orig_h"], rec["orig_p"], rec["resp_h"],
                     rec["resp_p"], rec["proto"]
@@ -847,7 +875,9 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
         per_alert_rows.append([
             a["id"], a["rule_name"], a["rule_version"], a["src_ip"], "-",
             ws_str, we_str,
-            0, 0, 0, 0, 0, "TIER_D_UNASSESSED",
+            0, 0, 0, 0, 0,
+            0, 0,
+            "TIER_D_UNASSESSED",
             "Nearest frame is temporal context only, not a demonstrated alert-to-packet match; historical runtime baseline is missing"
         ])
 
@@ -1002,7 +1032,9 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     suricata_eve_path = os.path.join(suricata_dir, "eve.json")
     suricata_log_path = os.path.join(suricata_dir, "suricata.log")
 
+    eve_size = os.path.getsize(suricata_eve_path) if os.path.exists(suricata_eve_path) else 0
     eve_sha256 = get_file_sha256(suricata_eve_path) if os.path.exists(suricata_eve_path) else "-"
+    suricata_log_size = os.path.getsize(suricata_log_path) if os.path.exists(suricata_log_path) else 0
     suricata_log_sha256 = get_file_sha256(suricata_log_path) if os.path.exists(suricata_log_path) else "-"
     suricata_alerts_count = 0
     suricata_sigs = Counter()
@@ -1059,7 +1091,9 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             "db_file": os.path.basename(db_path),
             "db_size_bytes": db_size,
             "db_sha256": db_sha256,
+            "suricata_eve_size_bytes": eve_size,
             "suricata_eve_sha256": eve_sha256,
+            "suricata_log_size_bytes": suricata_log_size,
             "suricata_log_sha256": suricata_log_sha256,
         },
         "zeek_parsing": {
@@ -1199,7 +1233,7 @@ All analyses were performed on official CTU IoT-23 Capture 48-1 dataset artifact
 | **PCAP** | {p['pcap_size_bytes']:,} | `{p['pcap_sha256']}` | **SHA-256 CALCULATED; ORIGIN NOT AUTHENTICATED** |
 | **Zeek Conn Log** | {p['zeek_size_bytes']:,} | `{p['zeek_sha256']}` | **SHA-256 CALCULATED; ORIGIN NOT AUTHENTICATED** |
 | **SQLite DB** | {p['db_size_bytes']:,} | `{p['db_sha256']}` | **SHA-256 CALCULATED; INTEGRITY CHECKED** |
-| **Suricata EVE** | 943,092,234 | `{p['suricata_eve_sha256']}` | **SHA-256 CALCULATED; INPUT IDENTITY UNKNOWN** |
+| **Suricata EVE** | {p.get('suricata_eve_size_bytes', 0):,} | `{p['suricata_eve_sha256']}` | **SHA-256 CALCULATED; INPUT IDENTITY UNKNOWN** |
 
 ---
 

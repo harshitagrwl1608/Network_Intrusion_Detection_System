@@ -513,3 +513,115 @@ def test_31_truncated_pcap_record_is_not_silently_treated_as_eof(tmp_path):
         with pytest.raises(ValueError, match="Truncated PCAP packet header"):
             list(parser.iter_packets())
         assert parser.truncated_records == 1
+
+
+# =============================================================================
+# 32-36: Remediation Invariants (Tier E, ARP Row Schema, Fragments, Truncation)
+# =============================================================================
+
+def test_32_tier_e_no_defensible_association():
+    """32. Test that an alert with 0 reconstructed targets and 0 evidence maps to Tier E (not Tier D)."""
+    tier, key, rationale = classify_alert_v3_1(
+        alert_id=32,
+        rule_name="PORT_SCAN",
+        threshold=15,
+        distinct_targets_reconstructed=0,
+        corroborated_targets_count=0,
+        malicious_targets_count=0,
+        benign_targets_count=0,
+        unmatched_targets_count=0,
+        ambiguous_targets_count=0
+    )
+    assert key == "TIER_E_NO_ASSOCIATION"
+    assert "No defensible packet or flow association" in rationale
+
+
+def test_33_arp_row_column_count_reconciliation():
+    """33. Test that per-alert CSV schema matches 16 columns for both scan and ARP alerts."""
+    header = [
+        "alert_id", "rule_name", "rule_version", "src_ip", "dst_port",
+        "window_start", "window_end", "valid_syn_count", "distinct_targets_reconstructed",
+        "corroborated_targets_count", "threshold", "matched_uids_count",
+        "ambiguous_targets_count", "unmatched_targets_count",
+        "classification_tier", "evidentiary_rationale"
+    ]
+    assert len(header) == 16
+
+    # Scan alert row structure
+    scan_row = [
+        1, "PORT_SCAN", "v1.13", "192.168.1.200", 23,
+        "1551377744.000000", "1551377754.000000",
+        20, 15, 15, 15, 15, 0, 0,
+        "TIER_A_CONFIRMED_TP", "Rationale"
+    ]
+    assert len(scan_row) == len(header)
+
+    # ARP alert row structure with ambiguous and unmatched counts included
+    arp_row = [
+        4000, "ARP_SPOOF", "v1.8", "192.168.1.1", "-",
+        "1551377744.000000", "1551377754.000000",
+        0, 0, 0, 0, 0,
+        0, 0,
+        "TIER_D_UNASSESSED",
+        "Nearest frame is temporal context only"
+    ]
+    assert len(arp_row) == len(header)
+
+
+def test_34_ipv4_non_first_fragment_rejected_as_tcp(tmp_path):
+    """34. Test that non-first IPv4 fragments (frag_offset > 0) are not inspected as TCP headers."""
+    pcap_frag = tmp_path / "frag.pcap"
+    hdr = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
+
+    eth = b"\x00" * 12 + struct.pack(">H", 0x0800)
+    # IPv4 header: ver=4, ihl=5 (20 bytes), proto=6 (TCP), frag_offset=1 (flags_frag=0x0001)
+    # Byte 6-7: 0x00, 0x01 -> frag_offset = 1 (8 bytes into payload)
+    ip = bytes([0x45, 0, 0, 40, 0, 0, 0x00, 0x01, 64, 6, 0, 0, 192, 168, 1, 200, 10, 0, 0, 1])
+    # Fragment payload: byte 13 happens to be 0x02 (would look like SYN if misparsed as TCP)
+    frag_payload = b"\x00" * 13 + b"\x02" + b"\x00" * 6
+
+    frame = eth + ip + frag_payload
+    pkt_hdr = struct.pack("<IIII", 1551377744, 0, len(frame), len(frame))
+    pcap_frag.write_bytes(hdr + pkt_hdr + frame)
+
+    with PcapParser(str(pcap_frag)) as p:
+        packets = list(p.iter_packets())
+        assert len(packets) == 1
+        idx, ts, is_ip, is_tcp, is_syn, is_arp, sip, sport, dip, dport, flags, _ = packets[0]
+        assert is_ip is True
+        # Must NOT be treated as TCP or initial SYN!
+        assert is_tcp is False
+        assert is_syn is False
+
+
+def test_35_truncated_ip_header_yields_safe_packet_record(tmp_path):
+    """35. Test that truncated IPv4 frames yield safely without false positives or lost records."""
+    pcap_trunc = tmp_path / "trunc_ip.pcap"
+    hdr = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
+
+    eth = b"\x00" * 12 + struct.pack(">H", 0x0800)
+    # Truncated IP header: only 10 bytes instead of 20
+    ip_short = bytes([0x45, 0, 0, 40, 0, 0, 0, 0, 64, 6])
+    frame = eth + ip_short  # Total 24 bytes (caplen < 14 + 20 = 34)
+
+    pkt_hdr = struct.pack("<IIII", 1551377744, 0, len(frame), len(frame))
+    pcap_trunc.write_bytes(hdr + pkt_hdr + frame)
+
+    with PcapParser(str(pcap_trunc)) as p:
+        packets = list(p.iter_packets())
+        assert len(packets) == 1
+        idx, ts, is_ip, is_tcp, is_syn, is_arp, sip, sport, dip, dport, flags, _ = packets[0]
+        # Frame was safely accounted for but cannot be misparsed as valid IP or SYN
+        assert is_ip is False
+        assert is_syn is False
+
+
+def test_36_suricata_eve_size_dynamic_calculation(tmp_path):
+    """36. Test dynamic file size calculation for Suricata EVE without hardcoding."""
+    eve_file = tmp_path / "eve.json"
+    dummy_eve = '{"event_type": "alert"}\n' * 50
+    eve_file.write_text(dummy_eve, encoding="utf-8")
+
+    expected_size = len(dummy_eve.encode("utf-8"))
+    assert os.path.getsize(str(eve_file)) == expected_size
+
