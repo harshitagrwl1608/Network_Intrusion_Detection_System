@@ -1,0 +1,102 @@
+{
+  "audit_name": "NetGuard IDS Forensic Ground-Truth Audit V2",
+  "audit_date_utc": "2026-11-09T14:45:47Z",
+  "target_dataset": {
+    "name": "CTU-IoT-Malware-Capture-48-1",
+    "pcap_file": "2019-02-28-19-15-13-192.168.1.200.pcap",
+    "pcap_sha256": "ac2e41f0d5b2479ce5e1779fbaa6d6b73a6151050d86f04f80a872759034865c",
+    "pcap_packets": 13565553,
+    "zeek_labeled_file": "2019-02-28-19-15-13-192.168.1.200-zeek-conn-log.labeled",
+    "zeek_labeled_sha256": "9f69946243df93c199876c0783cb4b5fb188e6d2325c593858f2db8fb5fa847f",
+    "zeek_total_flows": 3394338,
+    "zeek_scan_flows": 3386119,
+    "generic_labels": {
+      "Malicious": 3390604,
+      "Benign": 3734
+    },
+    "detailed_labels": {
+      "C&C-HeartBeat-FileDownload": 11,
+      "PartOfAHorizontalPortScan": 3386119,
+      "Attack": 2752,
+      "-": 3734,
+      "C&C-HeartBeat-Attack": 834,
+      "C&C-PartOfAHorizontalPortScan": 888
+    }
+  },
+  "engine_state": {
+    "head_commit": "59520d48f704b3a89be3c0c5dc819b33d992264d",
+    "parent_engine_commit": "f7e816a5f0dc41e3f1db458001899b145abfbca4",
+    "engine_fingerprint": "86c41a7839fcaae6660190615a2da8681f6a60283377817542d720c324de22d7",
+    "reported_eval_fingerprint": "86c41a7839fcaae6660190615a2da8681f6a60283377817542d720c324de22d7",
+    "is_engine_frozen": true,
+    "config_port_scan_threshold": 15,
+    "config_slow_scan_threshold": 30,
+    "effective_port_scan_alert_burst": 30
+  },
+  "database_audit": {
+    "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/netguard_eval_48_1.db",
+    "sha256": "6bb5376835c5b25ba721e80fa2547c6cbadb56f38710a8d28650dc8ec6cff042",
+    "integrity": "ok",
+    "total_alerts": 4027,
+    "alerts_by_rule": {
+      "PORT_SCAN": 3473,
+      "SLOW_PORT_SCAN": 292,
+      "ARP_SPOOF": 262
+    },
+    "database_reuse_identified": true,
+    "performance_metrics_provenance": "Measured in initial replay; reused via bypass in subsequent validation pass"
+  },
+  "audited_alert_classification": {
+    "tier_a_confirmed_true_positive": 3765,
+    "tier_b_malicious_associated": 0,
+    "tier_c_false_positive": 262,
+    "tier_d_unassessed": 0,
+    "tier_e_unmatched": 0,
+    "strict_alert_precision_pct": 93.49,
+    "alert_false_discovery_rate_pct": 6.51,
+    "transport_scan_rule_precision_pct": 100.0
+  },
+  "arp_audit": {
+    "total_arp_alerts": 262,
+    "layer2_arp_packets": 6252,
+    "actual_gateway_mac": "78:8a:20:43:93:d5",
+    "actual_device_mac": "b8:27:eb:e1:1a:08",
+    "synthetic_mac_in_config": "00:11:22:33:44:01",
+    "cause_of_arp_alerts": "Pre-existing initial state contamination in data/arp_table.json",
+    "verdict": "Confirmed False Positive / Initial State Contamination Artifact"
+  },
+  "flow_coverage_audit": {
+    "total_publisher_scan_flows": 3386119,
+    "strict_trigger_window_flows": 65243,
+    "strict_trigger_window_coverage_pct": 1.93,
+    "campaign_cooldown_window_flows": 3386119,
+    "campaign_cooldown_window_coverage_pct": 100.0,
+    "interpretation": "NetGuard aggregates 3.39M flows into 3,765 incident bursts; 1.93% of flows directly triggered alerts, while 100.0% of flows occurred during active campaign-alert suppression episodes."
+  },
+  "suricata_audit": {
+    "total_alerts": 85,
+    "top_signatures": {
+      "SURICATA STREAM Packet with invalid ack": 23,
+      "SURICATA STREAM SHUTDOWN RST invalid ack": 23,
+      "ET INFO Executable and linking format (ELF) file download Over HTTP": 11,
+      "ET HUNTING Possible ELF executable sent when remote host claims to send a Text File": 11,
+      "SURICATA TCPv4 invalid checksum": 6,
+      "SURICATA STREAM excessive retransmissions": 3,
+      "ET DROP Spamhaus DROP Listed Traffic Inbound group 36": 2,
+      "SURICATA HTTP unable to match response to request": 2,
+      "SURICATA STREAM 3way handshake SYNACK with wrong ack": 2,
+      "ET DROP Spamhaus DROP Listed Traffic Inbound group 37": 1
+    },
+    "byte_parity_verified": true,
+    "horizontal_scan_detection": 0,
+    "http_dropper_detection": 22
+  },
+  "forensic_exports": {
+    "per_alert_attribution_csv": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v2_exports/per_alert_attribution.csv",
+    "per_alert_attribution_sha256": "0ee5cdc730c9195d29bad42b22f0ad93723db81b9b64f34c8a18877c4ac32223",
+    "per_flow_scan_coverage_csv": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v2_exports/per_flow_scan_coverage.csv",
+    "per_flow_scan_coverage_sha256": "6918d12ded2364c6e30cc14bb7715001abd505ada3ffe3a14358610e34c3c294",
+    "arp_packet_audit_csv": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v2_exports/arp_packet_audit.csv",
+    "arp_packet_audit_sha256": "459318476b8fba3f6564d5bf6cab19bb486edd39f92549b91e5bfa116654db52"
+  }
+}
