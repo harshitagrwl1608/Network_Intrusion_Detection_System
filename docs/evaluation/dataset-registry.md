@@ -313,15 +313,41 @@ This registry records all external network traffic datasets acquired, verified, 
 
 ---
 
+### Entry DS-19: `stratosphere_ctu_hns_botnet_1_1` (CTU-IoT-Malware-Capture-1-1 / Hide & Seek Botnet)
+- **Official Name:** `CTU-IoT-Malware-Capture-1-1`
+- **Publisher:** Stratosphere Laboratory, AIC Group, Czech Technical University (CTU) in Prague & Avast Software
+- **Official Download URL:** `https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset/IndividualScenarios/CTU-IoT-Malware-Capture-1-1/`
+- **Capture File Name:** `2018-05-09-192.168.100.103.pcap`
+- **Dataset Collection:** IoT-23 (Version 1.0.0)
+- **Download Date:** 2026-11-09
+- **License / Terms:** Creative Commons Attribution 2.0 Generic (CC BY 2.0)
+- **File Format:** libpcap (binary capture)
+- **Capture File Size:** 145,928,231 bytes (~139.17 MiB / 145.93 MB)
+- **SHA-256 Digest:** `8ebcd17af4e2d20b1cf7ad564760756f457a80b791a0757a2b1a624b2724969c`
+- **Packet Count:** 1,686,291 packets
+- **Duration:** 402,852.02 seconds (~4.66 days)
+- **Quarantined Path:** `/run/media/harshitgarg/Data1/NetGuard-datasets/holdout_quarantine/stratosphere_ctu_hns_botnet_1_1.pcap`
+- **Quarantine Permissions:** `0o444` (read-only)
+- **Infected Device:** Raspberry Pi 3 Model B (`192.168.100.103`), running Linux armhf
+- **Malware Executed:** Hide and Seek (HNS) IoT P2P botnet
+- **Attack Behaviors:** Low-and-slow horizontal port scanning (111,819 Telnet frames on port 23 across external subnets), fast scanning bursts, Telnet credential brute-force, volumetric SYN bursts, P2P mesh communication (387,888 UDP DOF frames).
+- **Publisher Telemetry Available:**
+  - Zeek Connection Log (`CTU-IoT-Malware-1-1.conn.log.labeled`, 1,008,889 bytes, 7,008 labeled flows: 4,000 `PartOfAHorizontalPortScan`, 8 `C&C`, 3,000 `Benign`).
+- **Target NetGuard Rules:** `SLOW_PORT_SCAN`, `PORT_SCAN`, `BRUTE_FORCE`, `SYN_FLOOD`, `UDP_FLOOD` (benign P2P suppression).
+- **Evaluation Status:** Sealed independent holdout validation candidate.
+- **Citation:** Sebastian Garcia, Agustin Parmisano, & Maria Jose Erquiaga. (2020). *IoT-23: A labeled dataset with malicious and benign IoT network traffic*. Zenodo. DOI: 10.5281/zenodo.4743746.
+
+---
+
 ## 3. Storage Allocation and Quota Audit
 
 | Metric | Measured Value | Quota Limit | Status |
 |---|---|---|---|
 | **Mount Device** | `/dev/sdb1` | `/dev/sdb1` | Valid |
 | **Mount Location** | `/run/media/harshitgarg/Data1` | External HDD | Valid |
-| **Total Acquired Data** | 195,879,232 bytes (~0.182 GiB) | $\le 5.0$ GiB (initial) | **PASS** (3.6% of initial cap) |
+| **Total Acquired Data** | 341,807,463 bytes (~0.318 GiB) | $\le 5.0$ GiB (initial) | **PASS** (6.4% of initial cap) |
 | **Available Disk Space** | 625.3 GiB | $\ge 100$ GiB | **PASS** (625% above minimum) |
-| **Total NetGuard Allocation** | $\approx 0.19$ GiB | $\le 450$ GiB | **PASS** |
+| **Total NetGuard Allocation** | $\approx 0.34$ GiB | $\le 450$ GiB | **PASS** |
 | **Independent Publishers** | 6 (Stratosphere CTU, Wireshark, Nozomi Networks, Fox-IT, m-rau5, OISF) | $\ge 2$ | **PASS** |
-| **Distinct Verified Captures** | 18 | Multi-scenario | **PASS** |
+| **Distinct Verified Captures** | 19 | Multi-scenario | **PASS** |
 | **Registered Detection Rules** | 23 | Distinct & Tested | **PASS** |

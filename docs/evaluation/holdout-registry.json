@@ -41,6 +41,20 @@
       "target_rules": ["PORT_SCAN", "SYN_FLOOD", "BRUTE_FORCE"],
       "ground_truth_source": "CTU University Verified Malware Execution",
       "quarantine_status": "PENDING_ACQUISITION"
+    },
+    {
+      "candidate_id": "stratosphere_ctu_hns_botnet_1_1",
+      "name": "Stratosphere CTU IoT-23 Malware Capture 1-1 (Hide and Seek Botnet)",
+      "publisher": "Stratosphere IPS / CTU University",
+      "source_url": "https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset/IndividualScenarios/CTU-IoT-Malware-Capture-1-1/",
+      "expected_attack_family": "Hide and Seek (HNS) P2P Botnet & Telnet Scanner",
+      "target_rules": ["PORT_SCAN", "SLOW_PORT_SCAN", "SYN_FLOOD", "UDP_FLOOD", "BRUTE_FORCE"],
+      "ground_truth_source": "CTU University Verified Malware Execution & Labeled Netflows",
+      "quarantine_status": "REGISTERED_QUARANTINED",
+      "quarantined_pcap_path": "/run/media/harshitgarg/Data1/NetGuard-datasets/holdout_quarantine/stratosphere_ctu_hns_botnet_1_1.pcap",
+      "sha256": "8ebcd17af4e2d20b1cf7ad564760756f457a80b791a0757a2b1a624b2724969c",
+      "size_bytes": 145928231,
+      "packets": 1686291
     }
   ]
 }
