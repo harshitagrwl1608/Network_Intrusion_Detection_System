@@ -13,7 +13,7 @@
 > [!NOTE]
 > ### 🚧 Ongoing Project Notice
 > **NetGuard IDS is currently under active development.**  
-> The core packet-sniffing engine, 23-rule evidence-driven detection suite, 18-signature Deep Packet Inspection (DPI) with multi-pass decoding and evasion normalization (including Triconex TriStation 1131 ICS signatures), Shannon entropy & hex-chunk DNS covert tunneling analysis, TLS handshake SNI inspection, TCP zero-window DoS protection, IP fragmentation reassembly attack detection, IRC botnet C2 beaconing detection, independent holdout validation pipeline, and real-time Flask SOC dashboard with interactive filtering and Server-Sent Events (SSE) streaming passed **808 tests** (across 32 unit and integration test modules). The synthetic evaluation detected **42/42 labelled scenarios** across all registered rules with 100.0% precision, 100.0% recall, zero unmatched attack alerts, and zero alerts on the benign fixture. Real-world validation spans 18 PCAP captures across 6 independent publishers with cross-engine corroboration against Suricata and Zeek. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
+> The core packet-sniffing engine, 23-rule evidence-driven detection suite, Deep Packet Inspection (DPI), protocol anomaly detection, independent holdout validation pipeline, and real-time Flask SOC dashboard are under active development. The synthetic evaluation's previously reported 42/42 scenario result is a fixture-specific result, not evidence of general real-world accuracy. The project test suite was last reported as 808 passing tests before the latest audit-only corrections; rerun is pending. The CTU IoT-23 published-ground-truth audit is being corrected and its latest V3.1 metrics are not final. Upcoming milestones include **Automated Intrusion Prevention (Active Defense via iptables)**, **Machine Learning Anomaly Detection (Isolation Forest)**, and **Webhook Notifications (Discord/Slack)**.
 
 ---
 
@@ -183,7 +183,7 @@ The web dashboard is designed for both security analysts and non-technical stake
 NetGuard includes a complete evaluation pipeline to benchmark detection accuracy against **Suricata** and run offline analysis on real or synthetic capture files (e.g., `log.pcap`).
 
 > [!IMPORTANT]
-> **Published-ground-truth audit status (CTU IoT-23 v2 Capture 48-1):** The capture and publisher-labelled Zeek dataset are real, and the repository records 4,027 raw NetGuard alert rows. The Audit V2 correction found that its current per-alert matcher does not independently join each scan alert to contributing publisher-labelled flows. Therefore the previously reported 93.49% precision, 99.88% malicious precision, and 100% scan-flow coverage/recall are **not established** and must not be cited as verified accuracy metrics. See [the corrected audit verdict](docs/evaluation/published-ground-truth-audit-v2/11_final_independent_audit_verdict.md) and [correction register](docs/evaluation/published-ground-truth-audit-v2/13_correction_and_submission_readiness.md).
+> **Published-ground-truth audit status (CTU IoT-23 v2 Capture 48-1):** Audit V3.1 reported 3,669 Tier A, 96 Tier B and 262 Tier D alerts, but subsequent code review found remaining attribution and reporting defects. Corrective V3.1.1 changes are committed; the full PCAP run has not yet been repeated. The previous 91.11% and 97.45% values are Tier-A confirmation fractions from the old run, **not final or conventional precision estimates**. Do not cite them as final results. See the [V3.1.1 correction and rerun status](docs/evaluation/published-ground-truth-audit-v3-1-1/00_correction_status.md), the [V3.1.1 audit code](scripts/audits/ctu48_1_ground_truth_audit_v3_1.py), and the [historical V2 correction register](docs/evaluation/published-ground-truth-audit-v2/13_correction_and_submission_readiness.md).
 
 ### 1. Capturing Real Network Traffic (`log.pcap`)
 
@@ -233,7 +233,7 @@ python evaluation/run_eval.py
 **Evaluation Results Summary:**
 - **Attack Detection:** **42 / 42 labelled scenarios detected** across all 23 registered rules; zero unmatched attack alerts in the fixture replay (100.0% Recall, 100.0% Precision).
 - **Benign Background Traffic:** **0 alerts** on the 837-packet benign fixture (100.0% Specificity).
-- **Unit Test Suite:** **808 passed tests** (`python -m pytest -q`, from `ids_project/`, across 32 test modules).
+- **Unit Test Suite:** 808 tests were reported passing in the pre-V3.1.1 run (`python -m pytest -q`, from `ids_project/`, across 32 test modules). The suite must be rerun after the latest audit-only changes; this is not a current pass claim.
 - *Note:* Synthetic benchmark results validate rule mechanics and do not imply 100% real-world accuracy on unlabelled production traffic. Independent holdout validation protocol is detailed in `docs/evaluation/threshold-sensitivity-and-holdout-plan.md`.
 
 This command runs with zero contamination:
