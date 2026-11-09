@@ -798,6 +798,151 @@ class TestComparisonMatching(unittest.TestCase):
         self.assertEqual(len(res["exact_5tuple_matches"]), 1)
         self.assertEqual(len(res["semantic_scan_matches"]), 1)
 
+    def test_correlate_netguard_zeek_udp_scan(self):
+        """UDP_SCAN aggregates multiple UDP ports and corroborates with unanswered UDP probes."""
+        alerts = [{
+            "rule_name": "UDP_SCAN",
+            "src_ip": "192.168.1.50",
+            "dst_ip": "10.0.0.1",
+            "dst_port": 53,
+            "protocol": "UDP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [
+            {"uid": f"udp_{p}", "timestamp": 100.0 + p * 0.01, "src_ip": "192.168.1.50", "dst_ip": "10.0.0.1", "dst_port": p, "protocol": "UDP", "conn_state": "S0", "orig_pkts": 1, "resp_pkts": 0}
+            for p in (53, 69, 123, 161)
+        ]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 1)
+        self.assertEqual(res["semantically_corroborated"][0]["corroboration_type"], "UNANSWERED_UDP_PROBE")
+        self.assertEqual(res["semantically_corroborated"][0]["probe_flow_count"], 4)
+
+    def test_correlate_netguard_zeek_udp_flood(self):
+        """UDP_FLOOD is semantically corroborated by high packet or byte rate."""
+        alerts = [{
+            "rule_name": "UDP_FLOOD",
+            "src_ip": "192.168.1.50",
+            "dst_ip": "10.0.0.1",
+            "dst_port": 8080,
+            "protocol": "UDP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [{
+            "uid": "uf1", "timestamp": 100.5, "src_ip": "192.168.1.50", "dst_ip": "10.0.0.1",
+            "dst_port": 8080, "protocol": "UDP", "conn_state": "SF", "orig_pkts": 120, "orig_bytes": 15000,
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 1)
+        self.assertEqual(res["semantically_corroborated"][0]["corroboration_type"], "HIGH_RATE_UDP_FLOOD_CONFIRMED")
+
+    def test_correlate_netguard_zeek_icmp_sweep(self):
+        """ICMP_SWEEP is semantically corroborated by ICMP flow presence between endpoints."""
+        alerts = [{
+            "rule_name": "ICMP_SWEEP",
+            "src_ip": "192.168.1.50",
+            "dst_ip": "10.0.0.5",
+            "protocol": "ICMP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [{
+            "uid": "icmp1", "timestamp": 101.0, "src_ip": "192.168.1.50", "dst_ip": "10.0.0.5",
+            "protocol": "ICMP", "conn_state": "OTH",
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 1)
+        self.assertEqual(res["semantically_corroborated"][0]["corroboration_type"], "ICMP_ACTIVITY_CONFIRMED")
+
+    def test_correlate_netguard_zeek_tcp_flag_anomaly(self):
+        """TCP_FLAG_ANOMALY is semantically corroborated by abnormal TCP connection state."""
+        alerts = [{
+            "rule_name": "TCP_FLAG_ANOMALY",
+            "src_ip": "192.168.1.50",
+            "dst_ip": "10.0.0.1",
+            "dst_port": 80,
+            "protocol": "TCP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [{
+            "uid": "flag1", "timestamp": 100.2, "src_ip": "192.168.1.50", "dst_ip": "10.0.0.1",
+            "dst_port": 80, "protocol": "TCP", "conn_state": "OTH", "history": "FaR",
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 1)
+        self.assertEqual(res["semantically_corroborated"][0]["corroboration_type"], "ANOMALOUS_TCP_STATE_CONFIRMED")
+
+    def test_correlate_netguard_zeek_non_dns_on_dns_port(self):
+        """NON_DNS_TRAFFIC_ON_DNS_PORT is semantically corroborated when Zeek detects non-DNS service."""
+        alerts = [{
+            "rule_name": "NON_DNS_TRAFFIC_ON_DNS_PORT",
+            "src_ip": "192.168.1.50",
+            "dst_ip": "10.0.0.1",
+            "dst_port": 53,
+            "protocol": "TCP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [{
+            "uid": "nondns1", "timestamp": 100.2, "src_ip": "192.168.1.50", "dst_ip": "10.0.0.1",
+            "dst_port": 53, "protocol": "TCP", "conn_state": "SF", "service": "ssl",
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 1)
+        self.assertEqual(res["semantically_corroborated"][0]["corroboration_type"], "NON_DNS_PROTOCOL_ON_DNS_PORT_CONFIRMED")
+
+    def test_correlate_netguard_zeek_icmp_tunnel(self):
+        """ICMP_TUNNEL is semantically corroborated by large byte payload in ICMP flow."""
+        alerts = [{
+            "rule_name": "ICMP_TUNNEL",
+            "src_ip": "192.168.1.50",
+            "dst_ip": "10.0.0.1",
+            "protocol": "ICMP",
+            "timestamp": 100.0,
+        }]
+        zeek_conns = [{
+            "uid": "tunnel1", "timestamp": 100.2, "src_ip": "192.168.1.50", "dst_ip": "10.0.0.1",
+            "protocol": "ICMP", "conn_state": "OTH", "orig_bytes": 1200,
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=10.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 1)
+        self.assertEqual(res["semantically_corroborated"][0]["corroboration_type"], "ICMP_TUNNEL_PAYLOAD_CONFIRMED")
+
+    def test_correlate_netguard_zeek_window_from_evidence(self):
+        """Window specified in alert evidence dictionary is respected."""
+        alerts = [{
+            "rule_name": "CUSTOM_SCAN",
+            "src_ip": "192.168.1.50",
+            "dst_ip": "10.0.0.1",
+            "dst_port": 80,
+            "protocol": "TCP",
+            "timestamp": 200.0,
+            "evidence": {"window_s": 80.0},
+        }]
+        zeek_conns = [{
+            "uid": "w1", "timestamp": 135.0,  # 65s before alert (inside 80s window, outside 30s default)
+            "src_ip": "192.168.1.50", "dst_ip": "10.0.0.1", "dst_port": 80,
+            "protocol": "TCP", "conn_state": "SF",
+        }]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=30.0)
+        self.assertEqual(len(res["flow_observed_only"]), 1)
+        self.assertEqual(len(res["endpoint_pair_only"]), 0)
+
+    def test_correlate_netguard_zeek_irc_beaconing_long_window(self):
+        """IRC_C2_BEACONING uses 300s window to match flows spanning periodic beacon interval."""
+        alerts = [{
+            "rule_name": "IRC_C2_BEACONING",
+            "src_ip": "192.168.1.50",
+            "dst_ip": "198.51.100.1",
+            "dst_port": 6667,
+            "protocol": "TCP",
+            "timestamp": 500.0,
+        }]
+        zeek_conns = [
+            {"uid": "irc_b1", "timestamp": 280.0, "src_ip": "192.168.1.50", "dst_ip": "198.51.100.1", "dst_port": 6667, "protocol": "TCP", "conn_state": "S0", "service": "irc"},
+            {"uid": "irc_b2", "timestamp": 490.0, "src_ip": "192.168.1.50", "dst_ip": "198.51.100.1", "dst_port": 6667, "protocol": "TCP", "conn_state": "S0", "service": "irc"},
+        ]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=30.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 1)
+        self.assertEqual(res["semantically_corroborated"][0]["corroboration_type"], "IRC_SESSION_CONFIRMED")
+
 
 if __name__ == "__main__":
     unittest.main()

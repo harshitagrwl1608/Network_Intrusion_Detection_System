@@ -630,7 +630,7 @@ def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict],
 
     # Rules that aggregate probes across multiple ports or sources
     AGGREGATED_SCAN_RULES = {
-        "PORT_SCAN", "SLOW_PORT_SCAN", "TCP_STEALTH_SCAN",
+        "PORT_SCAN", "SLOW_PORT_SCAN", "UDP_SCAN", "TCP_STEALTH_SCAN",
         "SYN_FLOOD", "DISTRIBUTED_SYN_FLOOD", "ICMP_SWEEP", "ICMP_FLOOD", "UDP_FLOOD"
     }
 
@@ -700,9 +700,40 @@ def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict],
             else:
                 matching_port = matching_proto
 
+        # Determine effective detection window
+        evidence_dict = alert.get("evidence")
+        if not isinstance(evidence_dict, dict) and alert.get("evidence_json"):
+            try:
+                evidence_dict = json.loads(alert["evidence_json"])
+            except Exception:
+                evidence_dict = None
+
+        evidence_win = None
+        if isinstance(evidence_dict, dict) and "window_s" in evidence_dict:
+            try:
+                evidence_win = float(evidence_dict["window_s"])
+            except (ValueError, TypeError):
+                pass
+
+        RULE_WINDOWS = {
+            "SLOW_PORT_SCAN": 120.0,
+            "IRC_C2_BEACONING": 300.0,
+            "BRUTE_FORCE": 60.0,
+            "DATA_EXFIL": 30.0,
+            "PORT_SCAN": 10.0,
+            "SYN_FLOOD": 10.0,
+            "DISTRIBUTED_SYN_FLOOD": 10.0,
+            "UDP_FLOOD": 10.0,
+            "UDP_SCAN": 10.0,
+            "ICMP_FLOOD": 10.0,
+            "ICMP_SWEEP": 10.0,
+            "TCP_STEALTH_SCAN": 10.0,
+        }
+        rule_win = evidence_win if evidence_win is not None else RULE_WINDOWS.get(rule, 10.0)
+        win = max(tolerance, rule_win)
+
         # Filter by timestamp window (strictly, no fallback)
         if alert_ts > 0.0:
-            win = max(tolerance, 120.0) if rule == "SLOW_PORT_SCAN" else tolerance
             matching_window = [
                 f for f in matching_port
                 if f["timestamp"] == 0.0 or abs(f["timestamp"] - alert_ts) <= win
@@ -719,7 +750,7 @@ def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict],
                 "reason": "ENDPOINT_PAIR_ONLY",
                 "evidence": (
                     f"Zeek observed {len(any_pair_flows)} flow(s) between endpoints, "
-                    f"but none matched port={alert_dport}, proto={proto or 'ANY'}, or Δt<={tolerance}s"
+                    f"but none matched port={alert_dport}, proto={proto or 'ANY'}, or Δt<={win:.1f}s"
                 ),
             })
             continue
@@ -768,6 +799,117 @@ def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict],
             else:
                 corroboration_type = "ESTABLISHED_FLOW_WITHOUT_SCAN_STATE"
                 evidence_notes.append(f"Zeek observed {len(active_flows)} established connection(s) without scan indicators")
+                claimed_uids = [_flow_uid(active_flows[0])]
+
+        elif rule == "UDP_SCAN":
+            s0_flows = [
+                f for f in active_flows
+                if f.get("conn_state") in ("S0", "OTH") or (f.get("orig_pkts", 0) > 0 and f.get("resp_pkts", 0) == 0)
+            ]
+            rej_flows = [
+                f for f in active_flows
+                if f.get("conn_state") in ("REJ", "RSTR")
+            ]
+            if s0_flows:
+                corroboration_type = "UNANSWERED_UDP_PROBE"
+                ports = {f["dst_port"] for f in s0_flows if f.get("dst_port")}
+                evidence_notes.append(f"{len(s0_flows)} Zeek UDP flow(s) without response across {len(ports)} probe port(s)")
+                claimed_uids = [_flow_uid(f) for f in s0_flows]
+            elif rej_flows:
+                corroboration_type = "REJECTED_UDP_PROBE"
+                evidence_notes.append(f"{len(rej_flows)} Zeek UDP flow(s) rejected by destination (ICMP unreachable)")
+                claimed_uids = [_flow_uid(f) for f in rej_flows]
+            else:
+                corroboration_type = "ESTABLISHED_UDP_FLOW"
+                evidence_notes.append(f"Zeek observed {len(active_flows)} bidirectional UDP flow(s)")
+                claimed_uids = [_flow_uid(active_flows[0])]
+
+        elif rule == "UDP_FLOOD":
+            udp_flows = [f for f in active_flows if f.get("protocol") == "UDP"]
+            high_vol = [
+                f for f in udp_flows
+                if f.get("orig_pkts", 0) >= 50 or f.get("orig_bytes", 0) >= 10000
+            ]
+            if high_vol or len(udp_flows) >= 10:
+                corroboration_type = "HIGH_RATE_UDP_FLOOD_CONFIRMED"
+                evidence_notes.append(f"Zeek confirmed high-rate UDP flooding ({len(udp_flows)} flow(s))")
+                claimed_uids = [_flow_uid(f) for f in (high_vol or udp_flows)]
+            else:
+                corroboration_type = "FLOW_OBSERVED"
+                evidence_notes.append(f"Zeek observed {len(udp_flows)} UDP flow(s) below flood threshold")
+                claimed_uids = [_flow_uid(active_flows[0])]
+
+        elif rule in ("ICMP_FLOOD", "ICMP_SWEEP"):
+            icmp_flows = [f for f in active_flows if f.get("protocol") == "ICMP"]
+            if icmp_flows:
+                corroboration_type = "ICMP_ACTIVITY_CONFIRMED"
+                evidence_notes.append(f"Zeek recorded {len(icmp_flows)} ICMP flow(s) between endpoints")
+                claimed_uids = [_flow_uid(f) for f in icmp_flows]
+            else:
+                corroboration_type = "FLOW_OBSERVED"
+                evidence_notes.append("Zeek observed non-ICMP flow between endpoints")
+                claimed_uids = [_flow_uid(active_flows[0])]
+
+        elif rule == "TCP_FLAG_ANOMALY":
+            abnormal = [
+                f for f in active_flows
+                if f.get("conn_state") in ("OTH", "REJ", "RSTOS0", "RSTO")
+                or any(h in f.get("history", "") for h in ("F", "R", "C"))
+            ]
+            if abnormal:
+                corroboration_type = "ANOMALOUS_TCP_STATE_CONFIRMED"
+                evidence_notes.append(f"Zeek recorded anomalous TCP connection state ({abnormal[0].get('conn_state')}, history: {abnormal[0].get('history')})")
+                claimed_uids = [_flow_uid(abnormal[0])]
+            else:
+                corroboration_type = "FLOW_OBSERVED"
+                evidence_notes.append("Zeek observed standard TCP connection without abnormal flags")
+                claimed_uids = [_flow_uid(active_flows[0])]
+
+        elif rule == "NON_DNS_TRAFFIC_ON_DNS_PORT":
+            non_dns = [
+                f for f in active_flows
+                if f.get("dst_port") == 53 and f.get("service") and f.get("service") != "dns"
+            ]
+            if non_dns:
+                corroboration_type = "NON_DNS_PROTOCOL_ON_DNS_PORT_CONFIRMED"
+                evidence_notes.append(f"Zeek confirmed non-DNS service ({non_dns[0].get('service')}) on port 53")
+                claimed_uids = [_flow_uid(non_dns[0])]
+            else:
+                corroboration_type = "FLOW_OBSERVED"
+                evidence_notes.append("Zeek observed port 53 flow without non-DNS service identification")
+                claimed_uids = [_flow_uid(active_flows[0])]
+
+        elif rule == "ICMP_TUNNEL":
+            large_icmp = [
+                f for f in active_flows
+                if f.get("protocol") == "ICMP" and f.get("orig_bytes", 0) >= 500
+            ]
+            if large_icmp:
+                corroboration_type = "ICMP_TUNNEL_PAYLOAD_CONFIRMED"
+                evidence_notes.append(f"Zeek observed large ICMP payload ({large_icmp[0].get('orig_bytes')} bytes)")
+                claimed_uids = [_flow_uid(large_icmp[0])]
+            else:
+                corroboration_type = "FLOW_OBSERVED"
+                evidence_notes.append("Zeek observed standard ICMP traffic")
+                claimed_uids = [_flow_uid(active_flows[0])]
+
+        elif rule == "BLOCKLIST":
+            corroboration_type = "BLOCKLIST_COMMUNICATION_CONFIRMED"
+            evidence_notes.append("Zeek confirmed communication between endpoints involving blocklisted IP")
+            claimed_uids = [_flow_uid(active_flows[0])]
+
+        elif rule == "PAYLOAD_HIT":
+            http_flows = [
+                f for f in active_flows
+                if f.get("service") == "http" or f.get("dst_port") in (80, 8080, 8000, 8888, 443)
+            ]
+            if http_flows:
+                corroboration_type = "HTTP_APPLICATION_TRANSACTION_CONFIRMED"
+                evidence_notes.append(f"Zeek observed HTTP transaction to service port {http_flows[0].get('dst_port')}")
+                claimed_uids = [_flow_uid(http_flows[0])]
+            else:
+                corroboration_type = "FLOW_OBSERVED"
+                evidence_notes.append("Zeek observed flow without HTTP application payload confirmation")
                 claimed_uids = [_flow_uid(active_flows[0])]
 
         elif rule == "DATA_EXFIL":
@@ -851,11 +993,20 @@ def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict],
         is_semantic = corroboration_type in (
             "UNANSWERED_SYN_SCAN",
             "REJECTED_CONNECTION_PROBE",
+            "UNANSWERED_UDP_PROBE",
+            "REJECTED_UDP_PROBE",
             "HIGH_VOLUME_EGRESS",
+            "HIGH_RATE_UDP_FLOOD_CONFIRMED",
+            "ICMP_ACTIVITY_CONFIRMED",
+            "ANOMALOUS_TCP_STATE_CONFIRMED",
             "IRC_SESSION_CONFIRMED",
             "CLEARTEXT_HTTP_ON_TLS_PORT_CONFIRMED",
             "MULTIPLE_FAILED_AUTH_ATTEMPTS",
             "TCP_ZERO_WINDOW_CONFIRMED",
+            "NON_DNS_PROTOCOL_ON_DNS_PORT_CONFIRMED",
+            "ICMP_TUNNEL_PAYLOAD_CONFIRMED",
+            "BLOCKLIST_COMMUNICATION_CONFIRMED",
+            "HTTP_APPLICATION_TRANSACTION_CONFIRMED",
         )
 
         entry = {
