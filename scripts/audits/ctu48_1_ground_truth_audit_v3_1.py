@@ -1307,9 +1307,9 @@ $$\\text{{Unassessed Alert Rate (ARP)}} = \\frac{{{a['tier_d_unassessed']}}}{{{a
 
 ## Verdict: SUPPORTED WITH LIMITATIONS — CAPTURE-SPECIFIC
 
-This verdict supports a capture-specific case study only. The Tier-A values below are confirmation fractions, not conventional precision. Suricata input identity and runtime cooldown overrides remain unverified.
+This verdict supports a capture-specific case study only. The Tier-A values below are confirmation fractions, not conventional precision. Suricata input-PCAP identity and runtime cooldown overrides remain unverified.
 
-NetGuard's scan alerts are evaluated against publisher-labelled traffic using the attribution rules documented in this report:""",
+NetGuard's scan alerts are evaluated against publisher-labelled traffic using the attribution rules documented in this report:
 
 - **Tier-A Share of All Alerts**: **{a['strict_precision_pct']:.2f}%** ({a['tier_a_confirmed_tp']:,} / {a['total_alerts']:,})
 - **Scan-Rule Tier-A Share**: **{a['scan_rule_precision_pct']:.2f}%** ({a['tier_a_confirmed_tp']:,} / {a['scan_alerts']:,})
