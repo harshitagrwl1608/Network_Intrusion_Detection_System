@@ -639,9 +639,19 @@ def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict],
 
     # Index Zeek connections
     zeek_by_pair: dict[tuple[str, str], list[dict]] = {}
+    zeek_by_src_proto_port: dict[tuple[str, str, int], list[dict]] = {}
+    zeek_by_dst_proto_port: dict[tuple[str, str, int], list[dict]] = {}
+
     for z in zeek_conns:
-        p = (z["src_ip"], z["dst_ip"])
-        zeek_by_pair.setdefault(p, []).append(z)
+        s_ip = z["src_ip"]
+        d_ip = z["dst_ip"]
+        z_proto = (z.get("protocol") or "").strip().upper()
+        d_port = z.get("dst_port")
+
+        zeek_by_pair.setdefault((s_ip, d_ip), []).append(z)
+        if d_port is not None and d_port != 0:
+            zeek_by_src_proto_port.setdefault((s_ip, z_proto, d_port), []).append(z)
+            zeek_by_dst_proto_port.setdefault((d_ip, z_proto, d_port), []).append(z)
 
     used_flow_uids: set[str] = set()
 
@@ -664,12 +674,57 @@ def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict],
             unassessed.append(entry)
             continue
 
-        # Look up all flows between these endpoints in either direction
-        fwd_flows = zeek_by_pair.get((src, dst), [])
-        rev_flows = zeek_by_pair.get((dst, src), [])
-        any_pair_flows = fwd_flows + rev_flows
+        # Extract evidence dict to determine scan/aggregation structure
+        evidence_dict = alert.get("evidence")
+        if not isinstance(evidence_dict, dict) and alert.get("evidence_json"):
+            try:
+                evidence_dict = json.loads(alert["evidence_json"])
+            except Exception:
+                evidence_dict = None
 
-        # 2. Tier: UNMATCHED (no flows between endpoints at all)
+        scan_type = evidence_dict.get("scan_type") if isinstance(evidence_dict, dict) else None
+        is_horizontal = (
+            scan_type in ("slow_horizontal", "horizontal")
+            or (rule in ("SLOW_PORT_SCAN", "PORT_SCAN") and isinstance(evidence_dict, dict) and "distinct_hosts" in evidence_dict)
+        )
+        is_distributed = (
+            rule in ("DISTRIBUTED_SYN_FLOOD",)
+            or (isinstance(evidence_dict, dict) and "distinct_sources" in evidence_dict)
+        )
+        scanned_port = (
+            (evidence_dict.get("scanned_port") if isinstance(evidence_dict, dict) else None)
+            or alert_dport
+        )
+
+        # Look up candidate flows:
+        # Aggregated horizontal scans represent probes to multiple destination targets on scanned_port.
+        # Distributed attacks represent probes from multiple sources to victim dst on alert_dport.
+        if is_horizontal and scanned_port:
+            fwd_flows = zeek_by_pair.get((src, dst), [])
+            other_flows = zeek_by_src_proto_port.get((src, proto or "TCP", scanned_port), [])
+            seen_uids = set()
+            any_pair_flows = []
+            for f in fwd_flows + other_flows:
+                uid = _flow_uid(f)
+                if uid not in seen_uids:
+                    seen_uids.add(uid)
+                    any_pair_flows.append(f)
+        elif is_distributed and alert_dport:
+            fwd_flows = zeek_by_pair.get((src, dst), [])
+            other_flows = zeek_by_dst_proto_port.get((dst, proto or "TCP", alert_dport), [])
+            seen_uids = set()
+            any_pair_flows = []
+            for f in fwd_flows + other_flows:
+                uid = _flow_uid(f)
+                if uid not in seen_uids:
+                    seen_uids.add(uid)
+                    any_pair_flows.append(f)
+        else:
+            fwd_flows = zeek_by_pair.get((src, dst), [])
+            rev_flows = zeek_by_pair.get((dst, src), [])
+            any_pair_flows = fwd_flows + rev_flows
+
+        # 2. Tier: UNMATCHED (no candidate flows at all)
         if not any_pair_flows:
             unmatched.append({
                 "alert": alert,
@@ -701,13 +756,6 @@ def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict],
                 matching_port = matching_proto
 
         # Determine effective detection window
-        evidence_dict = alert.get("evidence")
-        if not isinstance(evidence_dict, dict) and alert.get("evidence_json"):
-            try:
-                evidence_dict = json.loads(alert["evidence_json"])
-            except Exception:
-                evidence_dict = None
-
         evidence_win = None
         if isinstance(evidence_dict, dict) and "window_s" in evidence_dict:
             try:
@@ -790,7 +838,11 @@ def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict],
             if s0_flows:
                 corroboration_type = "UNANSWERED_SYN_SCAN"
                 ports = {f["dst_port"] for f in s0_flows if f.get("dst_port")}
-                evidence_notes.append(f"{len(s0_flows)} Zeek flow(s) in S0 state (unacknowledged SYNs) across {len(ports)} probe port(s)")
+                dst_targets = {f["dst_ip"] for f in s0_flows if f.get("dst_ip")}
+                if len(dst_targets) > 1:
+                    evidence_notes.append(f"{len(s0_flows)} Zeek flow(s) in S0 state across {len(dst_targets)} destination target(s)")
+                else:
+                    evidence_notes.append(f"{len(s0_flows)} Zeek flow(s) in S0 state (unacknowledged SYNs) across {len(ports)} probe port(s)")
                 claimed_uids = [_flow_uid(f) for f in s0_flows]
             elif rej_flows:
                 corroboration_type = "REJECTED_CONNECTION_PROBE"
@@ -1017,6 +1069,7 @@ def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict],
             "evidence": "; ".join(evidence_notes),
             "sample_flow": active_flows[0],
             "probe_flow_count": len(claimed_uids) if rule in AGGREGATED_SCAN_RULES else 1,
+            "probe_destination_count": len({f["dst_ip"] for f in active_flows if f.get("dst_ip")}) if is_horizontal else 1,
         }
 
         if is_semantic:
@@ -1035,6 +1088,7 @@ def correlate_netguard_zeek(netguard_alerts: list[dict], zeek_conns: list[dict],
         "endpoint_pair_only": endpoint_pair_only,
         "unmatched": unmatched,
         "unassessed": unassessed,
+        "total_flows_claimed": len(used_flow_uids),
         # Backward compatibility aliases
         "corroborated": semantically_corroborated,
         "corroboration_rate": sem_rate,
@@ -1050,6 +1104,7 @@ def print_zeek_corroboration_report(results: dict):
     ep_only = len(results.get("endpoint_pair_only", []))
     unmatched = len(results.get("unmatched", []))
     unassessed = len(results.get("unassessed", []))
+    flows_claimed = results.get("total_flows_claimed", 0)
 
     sem_rate = results.get("semantic_corroboration_rate", sem_corr / max(total, 1)) * 100
     flow_rate = results.get("flow_presence_rate", (sem_corr + flow_only) / max(total, 1)) * 100
@@ -1063,6 +1118,8 @@ def print_zeek_corroboration_report(results: dict):
     print(f"  Corroborated by Zeek:               {sem_corr:4d} ({sem_rate:.1f}%)")
     print(f"  - Rule Semantically Corroborated:   {sem_corr:4d} ({sem_rate:.1f}%)")
     print(f"  - Flow Observed Only (no attack):   {flow_only:4d} (presence {flow_rate:.1f}%)")
+    if flows_claimed:
+        print(f"  - Zeek flows claimed by alerts:     {flows_claimed:4d} (zero flow reuse)")
     print(f"  Endpoint Pair Only (time/port gap): {ep_only:4d}")
     print(f"  Unmatched:                          {unmatched:4d}")
     print(f"  Unassessed (telemetry boundary):    {unassessed:4d}")

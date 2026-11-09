@@ -943,6 +943,39 @@ class TestComparisonMatching(unittest.TestCase):
         self.assertEqual(len(res["semantically_corroborated"]), 1)
         self.assertEqual(res["semantically_corroborated"][0]["corroboration_type"], "IRC_SESSION_CONFIRMED")
 
+    def test_correlate_netguard_zeek_horizontal_scan_multi_targets(self):
+        """Horizontal scan alert accounts for multiple destination targets and flows without reuse."""
+        alerts = [{
+            "rule_name": "SLOW_PORT_SCAN",
+            "src_ip": "192.168.1.100",
+            "dst_ip": "10.0.0.5",  # Threshold-crossing target
+            "dst_port": 23,
+            "protocol": "TCP",
+            "timestamp": 200.0,
+            "evidence": {
+                "scan_type": "slow_horizontal",
+                "scanned_port": 23,
+                "distinct_hosts": 5,
+                "window_s": 120.0,
+            },
+        }]
+        # Zeek observed probes to 5 distinct destination hosts on port 23
+        zeek_conns = [
+            {
+                "uid": f"h_{i}", "timestamp": 120.0 + i * 10,
+                "src_ip": "192.168.1.100", "dst_ip": f"10.0.0.{i}",
+                "dst_port": 23, "protocol": "TCP", "conn_state": "S0",
+            }
+            for i in range(1, 6)
+        ]
+        res = correlate_netguard_zeek(alerts, zeek_conns, tolerance=30.0)
+        self.assertEqual(len(res["semantically_corroborated"]), 1)
+        entry = res["semantically_corroborated"][0]
+        self.assertEqual(entry["corroboration_type"], "UNANSWERED_SYN_SCAN")
+        self.assertEqual(entry["probe_flow_count"], 5)
+        self.assertEqual(entry["probe_destination_count"], 5)
+        self.assertIn("5 destination target(s)", entry["evidence"])
+
 
 if __name__ == "__main__":
     unittest.main()
