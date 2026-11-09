@@ -218,9 +218,9 @@ def test_10_zeek_dash_sentinel_duration_tracking():
     rec = parse_zeek_line(line, hmap)
 
     assert rec is not None
-    assert rec["duration"] == 0.0
+    assert rec["duration"] is None
     assert rec["duration_is_sentinel"] is True
-    assert rec["end_ts"] == 100.0
+    assert rec["end_ts"] is None
 
 
 def test_11_malformed_zeek_line_rejected():
@@ -258,7 +258,8 @@ def test_13_exact_detailed_label_semantics():
 def test_14_exact_directional_five_tuple_matching():
     """14. Test directional 5-tuple matching: orig_h, orig_p, resp_h, resp_p, proto."""
     candidates = [
-        (100.0, 103.5, "C1", "Malicious", "PartOfAHorizontalPortScan")
+        ("192.168.1.200", 50000, "1.1.1.1", 23, "tcp",
+         100.0, 103.5, "C1", "Malicious", "PartOfAHorizontalPortScan")
     ]
     # Packet matching lifetime [100.0, 103.5] exactly
     matches = match_packet_to_candidates(101.5, "192.168.1.200", 50000, "1.1.1.1", 23, "tcp", candidates)
@@ -281,7 +282,8 @@ def test_15_reverse_direction_traffic_rejected():
 def test_16_flow_lifetime_boundaries_exact():
     """16. Test exact connection lifetime [ts, ts+duration] with zero unexplained tolerance."""
     # Flow from 100.0 to 103.0
-    candidates = [(100.0, 103.0, "C1", "Malicious", "PartOfAHorizontalPortScan")]
+    candidates = [("1.1.1.1", 1, "2.2.2.2", 23, "tcp",
+                   100.0, 103.0, "C1", "Malicious", "PartOfAHorizontalPortScan")]
 
     # Exact start
     assert len(match_packet_to_candidates(100.0, "1.1.1.1", 1, "2.2.2.2", 23, "tcp", candidates)) == 1
@@ -305,7 +307,8 @@ def test_17_retransmission_packet_inside_window_flow_start_outside():
     assert flow_start < window_start
     assert flow_end > window_end
 
-    candidates = [(flow_start, flow_end, "Cretrans_flow", "Malicious", "PartOfAHorizontalPortScan")]
+    candidates = [("192.168.1.200", 40000, "5.5.5.5", 23, "tcp",
+                   flow_start, flow_end, "Cretrans_flow", "Malicious", "PartOfAHorizontalPortScan")]
     matches = match_packet_to_candidates(pkt_ts, "192.168.1.200", 40000, "5.5.5.5", 23, "tcp", candidates)
     assert len(matches) == 1
     assert matches[0][0] == "Cretrans_flow"
@@ -314,8 +317,10 @@ def test_17_retransmission_packet_inside_window_flow_start_outside():
 def test_18_concurrent_overlapping_flow_candidates():
     """18. Test that overlapping candidate flows on same tuple are tracked without arbitrary truncation."""
     candidates = [
-        (100.0, 105.0, "Cearly", "Malicious", "PartOfAHorizontalPortScan"),
-        (102.0, 107.0, "Clater", "Malicious", "PartOfAHorizontalPortScan"),
+        ("192.168.1.200", 50000, "1.1.1.1", 23, "tcp",
+         100.0, 105.0, "Cearly", "Malicious", "PartOfAHorizontalPortScan"),
+        ("192.168.1.200", 50000, "1.1.1.1", 23, "tcp",
+         102.0, 107.0, "Clater", "Malicious", "PartOfAHorizontalPortScan"),
     ]
     # Packet at 103.0 falls within BOTH flows
     matches = match_packet_to_candidates(103.0, "192.168.1.200", 50000, "1.1.1.1", 23, "tcp", candidates)
@@ -399,8 +404,8 @@ def test_22_tier_d_unassessed_historical_baseline():
 def test_23_reconciliation_of_all_tiers_to_total_alerts():
     """23. Test that sum of all 5 tiers strictly equals total emitted alert count."""
     counts = {
-        "TIER_A_CONFIRMED_TP": 3765,
-        "TIER_B_MALICIOUS_ASSOCIATED": 0,
+        "TIER_A_CONFIRMED_TP": 3669,
+        "TIER_B_MALICIOUS_ASSOCIATED": 96,
         "TIER_C_FALSE_POSITIVE": 0,
         "TIER_D_UNASSESSED": 262,
         "TIER_E_NO_ASSOCIATION": 0
@@ -456,3 +461,42 @@ def test_27_recall_marked_not_measurable():
     """27. Test invariant: per-flow recall is strictly marked NOT MEASURABLE."""
     status = "NOT MEASURABLE at per-flow granularity due to intentional rate-limiting alert aggregation"
     assert "NOT MEASURABLE" in status
+
+
+def test_28_five_tuple_mismatch_is_rejected_even_when_lifetime_matches():
+    """A time-overlapping candidate with a different endpoint or protocol must not match."""
+    candidates = [
+        ("192.168.1.200", 50000, "1.1.1.1", 23, "tcp",
+         100.0, 103.0, "C1", "Malicious", "PartOfAHorizontalPortScan")
+    ]
+    assert match_packet_to_candidates(
+        101.0, "192.168.1.200", 50000, "2.2.2.2", 23, "tcp", candidates
+    ) == []
+    assert match_packet_to_candidates(
+        101.0, "192.168.1.200", 50000, "1.1.1.1", 80, "tcp", candidates
+    ) == []
+    assert match_packet_to_candidates(
+        101.0, "192.168.1.200", 50000, "1.1.1.1", 23, "udp", candidates
+    ) == []
+
+
+def test_29_partial_benign_and_unmatched_targets_are_not_false_positive():
+    """Mixed benign and unknown targets remain unassessed, not confirmed FP."""
+    _, key, _ = classify_alert_v3_1(
+        alert_id=29, rule_name="PORT_SCAN", threshold=15,
+        distinct_targets_reconstructed=15, corroborated_targets_count=0,
+        malicious_targets_count=0, benign_targets_count=3,
+        unmatched_targets_count=12, ambiguous_targets_count=0
+    )
+    assert key == "TIER_D_UNASSESSED"
+
+
+def test_30_ambiguous_target_cannot_be_silently_counted_as_correlated():
+    """Ambiguous associations must not be presented as unique corroboration."""
+    _, key, _ = classify_alert_v3_1(
+        alert_id=30, rule_name="PORT_SCAN", threshold=15,
+        distinct_targets_reconstructed=15, corroborated_targets_count=14,
+        malicious_targets_count=1, benign_targets_count=0,
+        unmatched_targets_count=0, ambiguous_targets_count=1
+    )
+    assert key == "TIER_B_MALICIOUS_ASSOCIATED"
