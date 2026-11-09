@@ -149,19 +149,19 @@ class TestEvaluationPipeline(unittest.TestCase):
             orig_file = p_module.CUMULATIVE_BUDGET_FILE
             p_module.CUMULATIVE_BUDGET_FILE = test_budget_file
             try:
-                b1 = load_cumulative_budget()
+                b1 = load_cumulative_budget(require_mount=False)
                 self.assertEqual(b1["cumulative_downloaded_bytes"], 0)
 
-                b2 = update_cumulative_budget(1024, 1.5)
+                b2 = update_cumulative_budget(1024, 1.5, require_mount=False)
                 self.assertEqual(b2["cumulative_downloaded_bytes"], 1024)
                 self.assertEqual(b2["cumulative_download_time_s"], 1.5)
 
-                b3 = update_cumulative_budget(2048, 2.0)
+                b3 = update_cumulative_budget(2048, 2.0, require_mount=False)
                 self.assertEqual(b3["cumulative_downloaded_bytes"], 3072)
                 self.assertEqual(b3["cumulative_download_time_s"], 3.5)
 
                 # Re-reading from disk yields updated totals
-                b4 = load_cumulative_budget()
+                b4 = load_cumulative_budget(require_mount=False)
                 self.assertEqual(b4["cumulative_downloaded_bytes"], 3072)
             finally:
                 p_module.CUMULATIVE_BUDGET_FILE = orig_file
@@ -561,6 +561,87 @@ class TestEvaluationPipeline(unittest.TestCase):
         self.assertTrue(expected_files.issubset(tracked_basenames), f"Expected all 7 files, got {tracked_basenames}")
         for path in p_module._CACHE_SOURCE_FILES:
             self.assertTrue(os.path.isfile(path), f"Engine source file {path} must exist on disk")
+
+    def test_evaluate_ground_truth_labels_event_granularity_requires_matching_evidence(self):
+        """event granularity requires matching event_id in alert evidence; alert firing alone is not enough."""
+        labels = [
+            {
+                "label_id": "lbl-evt-1",
+                "provenance": "Synthetic Benchmark",
+                "granularity": "event",
+                "expected_rule": "PORT_SCAN",
+                "event_id": "EVT-SCAN-001",
+            }
+        ]
+        # Case A: Alert fired for rule but lacks event_id evidence -> NOT a TP, classified as unassessed
+        alerts_no_ev = [
+            {"rule_name": "PORT_SCAN", "evidence": {"dst_port": 80}}
+        ]
+        res_no_ev = evaluate_ground_truth_labels(labels, alerts_no_ev)
+        self.assertEqual(res_no_ev["true_positives"], 0)
+        self.assertEqual(len(res_no_ev["unassessed_labels"]), 1)
+        self.assertIn("lacked required event evidence", res_no_ev["unassessed_labels"][0].get("rejection_reason"))
+
+        # Case B: Alert fired with matching event_id in evidence -> TRUE POSITIVE
+        alerts_with_ev = [
+            {"rule_name": "PORT_SCAN", "evidence": {"event_id": "EVT-SCAN-001"}}
+        ]
+        res_with_ev = evaluate_ground_truth_labels(labels, alerts_with_ev)
+        self.assertEqual(res_with_ev["true_positives"], 1)
+        self.assertEqual(res_with_ev["false_negatives"], 0)
+
+    def test_evaluate_ground_truth_labels_packet_granularity_requires_matching_packet_index(self):
+        """packet granularity requires matching packet_index in alert evidence."""
+        labels = [
+            {
+                "label_id": "lbl-pkt-1",
+                "provenance": "Synthetic Benchmark",
+                "granularity": "packet",
+                "expected_rule": "SYN_FLOOD",
+                "packet_index": 42,
+            }
+        ]
+        # Case A: Mismatched packet index -> NOT a TP
+        alerts_mismatch = [
+            {"rule_name": "SYN_FLOOD", "evidence": {"packet_index": 99}}
+        ]
+        res_mismatch = evaluate_ground_truth_labels(labels, alerts_mismatch)
+        self.assertEqual(res_mismatch["true_positives"], 0)
+
+        # Case B: Matching packet index -> TRUE POSITIVE
+        alerts_match = [
+            {"rule_name": "SYN_FLOOD", "evidence": {"packet_index": 42}}
+        ]
+        res_match = evaluate_ground_truth_labels(labels, alerts_match)
+        self.assertEqual(res_match["true_positives"], 1)
+
+    def test_compute_eval_cache_key_fails_closed_on_missing_labels_file(self):
+        """compute_eval_cache_key must raise FileNotFoundError if specified labels_path does not exist."""
+        with tempfile.NamedTemporaryFile("wb", delete=False) as f:
+            f.write(b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00")
+            dummy_pcap = f.name
+        try:
+            candidate = {"id": "test_missing_labels", "labels_path": "/nonexistent/path/labels_missing.json"}
+            with self.assertRaises(FileNotFoundError):
+                compute_eval_cache_key(dummy_pcap, candidate)
+        finally:
+            if os.path.exists(dummy_pcap):
+                os.remove(dummy_pcap)
+
+    def test_compute_eval_cache_key_hashes_authoritative_blocklist(self):
+        """compute_eval_cache_key includes AUTHORITATIVE_BLOCKLIST_PATH hash in fingerprint."""
+        from evaluation.pipeline import AUTHORITATIVE_BLOCKLIST_PATH
+        self.assertTrue(os.path.isfile(AUTHORITATIVE_BLOCKLIST_PATH))
+        with tempfile.NamedTemporaryFile("wb", delete=False) as f:
+            f.write(b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00")
+            dummy_pcap = f.name
+        try:
+            candidate = {"id": "test_bl_hash", "target_rules": ["PORT_SCAN"]}
+            k1 = compute_eval_cache_key(dummy_pcap, candidate)
+            self.assertEqual(len(k1), 64)
+        finally:
+            if os.path.exists(dummy_pcap):
+                os.remove(dummy_pcap)
 
 
 if __name__ == "__main__":

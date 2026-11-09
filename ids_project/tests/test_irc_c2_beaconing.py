@@ -518,19 +518,36 @@ class TestScapyNormalizerAndIntegerFlags:
             # Clear cooldown for the next message in loop
             rule._cooldown_map.clear()
 
-    def test_botnet_indicators_classified_as_likely_c2(self):
-        """Genuine botnet tokens and command indicators trigger confirmed high-severity LIKELY_IRC_C2."""
+    def test_single_keyword_indicators_classified_as_suspicious_heuristic(self):
+        """Single keyword or nick (e.g. #botnet, bot_1234, flood) without corroboration remains heuristic/suspicious."""
         rule = _make_irc_rule()
-        c2_messages = [
+        single_indicators = [
             b"JOIN #botnet\r\n",
-            b"PRIVMSG #c2 :!ddos 10.0.0.1 80\r\n",
             b"PRIVMSG #channel :flood 192.168.1.1 53\r\n",
             b"PRIVMSG #channel :infect target\r\n",
             b"NICK bot_1234\r\n",
             b"NICK ircbot\r\n",
+        ]
+        for msg in single_indicators:
+            pkt = _tcp_pkt(dport=6667, flags="ACK", payload=msg)
+            res = rule.check(pkt)
+            assert res is not None
+            assert res["evidence"]["classification"] == "IRC_PROTOCOL_SIGNATURE"
+            assert res["evidence"]["activity_assessment"] == "SUSPICIOUS_IRC_ACTIVITY"
+            assert res["severity"] == "medium"
+            assert res["confidence"] == "heuristic"
+            rule._cooldown_map.clear()
+
+    def test_corroborated_c2_indicators_classified_as_likely_c2(self):
+        """Corroborated C2 (botnet identity + command, or dual signal) triggers confirmed high-severity LIKELY_IRC_C2."""
+        rule = _make_irc_rule()
+        corroborated_messages = [
+            b"PRIVMSG #c2 :!ddos 10.0.0.1 80\r\n",
+            b"PRIVMSG #botnet :flood 192.168.1.1 53\r\n",
+            b"PRIVMSG #channel :!ddos 10.0.0.1\r\n",
             b"PING :mirai.botnet.c2\r\n",
         ]
-        for msg in c2_messages:
+        for msg in corroborated_messages:
             pkt = _tcp_pkt(dport=6667, flags="ACK", payload=msg)
             res = rule.check(pkt)
             assert res is not None
@@ -539,6 +556,21 @@ class TestScapyNormalizerAndIntegerFlags:
             assert res["severity"] == "high"
             assert res["confidence"] == "confirmed"
             rule._cooldown_map.clear()
+
+    def test_timestamps_list_bounded_under_flood(self):
+        """Verify per-entry timestamps list is bounded to at most 128 entries to prevent unbounded memory growth."""
+        rule = _make_irc_rule(threshold=1000, window=600)
+        # Send 250 SYNs to the same IRC destination within window
+        for i in range(250):
+            pkt = {
+                "type": "IP", "protocol": "TCP", "src_ip": "10.0.0.99", "dst_ip": "185.244.25.235",
+                "src_port": 10000 + i, "dst_port": 6667, "tcp_flags": 0x02, "tcp_seq": i * 100,
+                "timestamp": 1000.0 + (i * 0.5),
+            }
+            rule.check(pkt)
+        with rule._lock:
+            entry = rule._connections["10.0.0.99"][("185.244.25.235", 6667)]
+            assert len(entry["timestamps"]) <= 128
 
     def test_recent_syns_table_bounded_and_pruned(self):
         """recent_syns table is capped at 64 entries and pruned after 60s."""

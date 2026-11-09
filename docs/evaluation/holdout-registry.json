@@ -8,7 +8,7 @@
     "Strict cryptographic quarantine with read-only permissions (0o444)",
     "Engine code freeze verification (clean git tree & 64-char engine SHA-256 fingerprint)",
     "Single-pass blind execution with zero cache pollution",
-    "Immutable verbatim audit reporting"
+    "Read-only permission sealed audit reporting with verifiable SHA-256 digests"
   ],
   "candidate_holdout_datasets": [
     {

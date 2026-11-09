@@ -5869,7 +5869,7 @@ class IpFragmentAnomalyRule:
     - Stale state pruning: reassembly timeout (default 30.0s) and cooldown (default 60.0s).
     """
     name = "IP_FRAGMENT_ANOMALY"
-    rule_version = "1.2"
+    rule_version = "1.3"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
     MAX_FRAGMENTS_PER_DATAGRAM = 64
@@ -5938,9 +5938,11 @@ class IpFragmentAnomalyRule:
         if record.get("type") != "IP":
             return None
 
-        offset = record.get("ip_fragment_offset", 0) or 0
+        raw_offset = record.get("ip_fragment_offset", 0)
+        if raw_offset is None:
+            raw_offset = 0
         mf = bool(record.get("ip_more_fragments"))
-        is_fragmented = bool(record.get("ip_fragmented") or offset or mf)
+        is_fragmented = bool(record.get("ip_fragmented") or raw_offset or mf)
         if not is_fragmented:
             return None
 
@@ -5955,7 +5957,7 @@ class IpFragmentAnomalyRule:
 
         try:
             frag_id = int(frag_id)
-            offset = int(offset)
+            offset = int(raw_offset)
         except (TypeError, ValueError, OverflowError):
             return None
 
@@ -5967,7 +5969,16 @@ class IpFragmentAnomalyRule:
             return None
 
         proto = record.get("protocol", "IP")
-        data_len = int(record.get("ip_fragment_data_len") or record.get("payload_len") or 0)
+
+        # Robust input validation for ip_fragment_data_len and payload_len
+        raw_len = record.get("ip_fragment_data_len")
+        if raw_len is None:
+            raw_len = record.get("payload_len", 0)
+        try:
+            data_len = int(raw_len or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
         if data_len < 0:
             return None
 
@@ -6312,16 +6323,19 @@ class IrcC2BeaconingRule:
     - Full two-level LRU eviction and stale-state pruning.
     """
     name = "IRC_C2_BEACONING"
-    rule_version = "1.2"
+    rule_version = "1.3"
 
     IRC_PORTS: frozenset[int] = frozenset({194, 6660, 6661, 6662, 6663, 6664, 6665, 6666, 6667, 6668, 6669, 6697})
     _IRC_VERBS: tuple[bytes, ...] = (b"PING ", b"PONG ", b"NICK ", b"USER ", b"JOIN ", b"PRIVMSG ", b"PART ", b"QUIT ", b"MODE ")
-    _BOTNET_INDICATORS: tuple[bytes, ...] = (b"bot", b"mirai", b"#botnet", b"ddos", b"flood", b"attack", b"infect", b"scan")
-    _BOTNET_INDICATORS_RE: re.Pattern = re.compile(
-        rb"(?i)(?:\b(?:mirai|ddos|flood|attack|infect|scan)\b|"
-        rb"#(?:[a-z0-9_-]*bot[a-z0-9_-]*|c2|ddos)\b|"
-        rb"(?<![a-zA-Z])(?:bot|bots|botnet|botnets|ircbot)(?![a-zA-Z])|"
-        rb"(?:mirai|botnet|c2)\.[a-z0-9_.-]+)"
+
+    _C2_TOKEN_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
+        (re.compile(rb"(?i)\bmirai\b"), "mirai"),
+        (re.compile(rb"(?i)(?<![#a-zA-Z])(?:botnet|botnets|ircbot)(?![a-zA-Z])"), "botnet"),
+        (re.compile(rb"(?i)(?<![#a-zA-Z])c2(?![a-zA-Z])"), "c2"),
+        (re.compile(rb"(?i)#(?:[a-z0-9_-]*bot[a-z0-9_-]*|c2|ddos)\b"), "bot_channel"),
+        (re.compile(rb"(?i)!(?:ddos|flood|attack|infect|scan|kill|syn|udp|http|c2)\b"), "bot_command"),
+        (re.compile(rb"(?i)\b(?:flood|ddos|attack|infect|scan)\b"), "malicious_verb"),
+        (re.compile(rb"(?i)(?<![#a-zA-Z])(?:bot_\w+|[a-z0-9_-]*\[bot\])(?![a-zA-Z])"), "bot_nick"),
     )
 
     IRC_BEACONING_THRESHOLD: int = 5
@@ -6476,12 +6490,28 @@ class IrcC2BeaconingRule:
         irc_verb = self._check_payload_signature(payload_raw) if payload_raw else None
         if irc_verb:
             payload_lower = payload_raw.lower()
-            is_c2_indicator = bool(self._BOTNET_INDICATORS_RE.search(payload_lower))
-            if is_c2_indicator:
+            matched_categories = {
+                cat for pat, cat in self._C2_TOKEN_PATTERNS if pat.search(payload_lower)
+            }
+
+            has_identity = bool(matched_categories.intersection({"mirai", "botnet", "c2", "bot_channel"}))
+            has_command = bool(matched_categories.intersection({"bot_command", "malicious_verb"}))
+
+            # Corroborating signals required for confirmed high-confidence C2:
+            # (botnet identity + malicious command) OR dual distinct indicator categories
+            is_corroborated_c2 = (has_identity and has_command) or (len(matched_categories) >= 2)
+            is_single_indicator = len(matched_categories) == 1
+
+            if is_corroborated_c2:
                 activity_assessment = "LIKELY_IRC_C2"
                 severity = "high"
                 confidence = "confirmed"
-                detail_desc = "IRC botnet C2 command/registration signature observed"
+                detail_desc = "IRC botnet C2 command/registration signature observed (corroborated)"
+            elif is_single_indicator:
+                activity_assessment = "SUSPICIOUS_IRC_ACTIVITY"
+                severity = "medium"
+                confidence = "heuristic"
+                detail_desc = "Single IRC botnet token/keyword observed (unconfirmed heuristic)"
             else:
                 activity_assessment = "IRC_PROTOCOL_OBSERVED"
                 severity = "medium"
@@ -6602,6 +6632,8 @@ class IrcC2BeaconingRule:
                 entry["timestamps"] = []
 
             entry["count"] += 1
+            if len(entry["timestamps"]) >= 128:
+                entry["timestamps"] = entry["timestamps"][-64:]
             entry["timestamps"].append(now_t)
             count = entry["count"]
 

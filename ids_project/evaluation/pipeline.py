@@ -214,7 +214,7 @@ def update_cumulative_budget(newly_downloaded_bytes: int, elapsed_time_s: float,
 
 
 # Evaluator version — bump when evaluation logic changes to invalidate cached results.
-_EVALUATOR_VERSION = "1.4.0"
+_EVALUATOR_VERSION = "1.5.0"
 
 _CACHE_SOURCE_FILES = [
     os.path.join(IDS_PROJECT_DIR, "engine", "rules.py"),
@@ -226,14 +226,17 @@ _CACHE_SOURCE_FILES = [
     os.path.join(IDS_PROJECT_DIR, "evaluation", "compare.py"),
 ]
 
+# Single authoritative blocklist constant used consistently across evaluator workers and cache fingerprints
+AUTHORITATIVE_BLOCKLIST_PATH = os.path.join(DATA_DIR, "test_blocklist.txt")
+
 
 def compute_eval_cache_key(pcap_path: str, candidate: dict, labels_path: str = None) -> str:
     """
     Compute a stable full SHA-256 cache fingerprint for an evaluation result.
     Fail-closed: Invalidation guaranteed on any change to PCAP bytes, evaluator version,
     all detection engine and pipeline source files, registered rule versions,
-    detection configurations, target rules, labels, or blocklist.
-    Raises RuntimeError if required components cannot be fingerprinted.
+    detection configurations, target rules, labels, or authoritative blocklist.
+    Raises RuntimeError or FileNotFoundError if required components cannot be fingerprinted.
     """
     h = hashlib.sha256()
 
@@ -295,17 +298,21 @@ def compute_eval_cache_key(pcap_path: str, candidate: dict, labels_path: str = N
     rules_str = json.dumps(sorted(candidate.get("target_rules", [])), separators=(",", ":"))
     h.update(rules_str.encode())
 
-    # 7. Labels file or inline candidate labels
+    # 7. Labels file or inline candidate labels (Fail closed on missing specified file)
     res_labels = labels_path or candidate.get("labels_path") or candidate.get("labels_file")
-    if res_labels and os.path.isfile(res_labels):
+    if res_labels:
+        if not os.path.isfile(res_labels):
+            raise FileNotFoundError(f"compute_eval_cache_key: specified ground-truth labels file does not exist: {res_labels}")
         try:
             with open(res_labels, "rb") as lf:
-                h.update(hashlib.sha256(lf.read()).digest())
+                h.update(b"labels_file:" + hashlib.sha256(lf.read()).digest())
         except OSError as exc:
             raise RuntimeError(f"compute_eval_cache_key: could not hash labels file {res_labels}: {exc}")
     elif candidate.get("labels") or candidate.get("ground_truth_labels"):
         inline_lbls = candidate.get("labels") or candidate.get("ground_truth_labels")
-        h.update(json.dumps(inline_lbls, sort_keys=True).encode())
+        h.update(b"inline_labels:" + json.dumps(inline_lbls, sort_keys=True).encode())
+    else:
+        h.update(b"labels:NONE")
 
     # 8. Label coverage and granularity metadata
     if "label_coverage" in candidate:
@@ -313,14 +320,16 @@ def compute_eval_cache_key(pcap_path: str, candidate: dict, labels_path: str = N
     if "label_granularity" in candidate:
         h.update(f"gran:{candidate['label_granularity']}".encode())
 
-    # 9. Blocklist file actually used
-    blocklist_path = os.path.join(DATA_DIR, "blocklist.txt")
-    if os.path.isfile(blocklist_path):
+    # 9. Authoritative blocklist file used across evaluator workers (Fail-closed / explicit marker)
+    if os.path.isfile(AUTHORITATIVE_BLOCKLIST_PATH):
         try:
-            with open(blocklist_path, "rb") as bf:
-                h.update(hashlib.sha256(bf.read()).digest())
+            with open(AUTHORITATIVE_BLOCKLIST_PATH, "rb") as bf:
+                h.update(b"blocklist:" + hashlib.sha256(bf.read()).digest())
         except OSError as exc:
-            raise RuntimeError(f"compute_eval_cache_key: could not hash blocklist: {exc}")
+            raise RuntimeError(f"compute_eval_cache_key: could not hash authoritative blocklist: {exc}")
+    else:
+        h.update(b"blocklist:MISSING")
+
     return h.hexdigest()
 
 
@@ -623,40 +632,28 @@ def evaluate_ground_truth_labels(
             unmatched_labels.append(dict(lbl, rejection_reason=reason))
             continue
 
-        # 4. Check for independent event evidence (flow, time_window, or event_id)
+        # 4. Check for independent event evidence according to granularity
         flow = lbl.get("flow")
         window = lbl.get("time_window")
-        event_id = lbl.get("event_id") if "event_id" in lbl else lbl.get("packet_index")
+        event_id = lbl.get("event_id")
+        packet_index = lbl.get("packet_index")
+        if packet_index is None and "frame_index" in lbl:
+            packet_index = lbl.get("frame_index")
 
         has_flow = bool(flow and isinstance(flow, dict))
         has_window = bool(window and isinstance(window, dict) and (window.get("start") is not None or window.get("end") is not None))
-        has_event = bool(event_id is not None)
+        has_event = bool(event_id is not None and str(event_id).strip())
+        has_packet = bool(packet_index is not None)
+        has_scenario = bool(granularity == "scenario")
 
-        if not has_flow and not has_window and not has_event:
-            reason = "Insufficient matching constraints: rule-only label without flow, event or time-window"
+        # Reject rule-only labels without independent flow, event, packet, or time-window evidence
+        if not has_flow and not has_window and not has_event and not has_packet and not has_scenario:
+            reason = "Insufficient matching constraints: rule-only label without flow, event, packet or time-window"
             unassessed_labels.append(dict(lbl, rejection_reason=reason))
             unmatched_labels.append(dict(lbl, rejection_reason=reason))
             continue
 
-        # 5. Validate flow tuple completeness if flow specified
-        lbl_flow_key = None
-        if has_flow:
-            src_ip = flow.get("src_ip")
-            dst_ip = flow.get("dst_ip")
-            src_port = flow.get("src_port")
-            dst_port = flow.get("dst_port")
-            proto = flow.get("protocol")
-
-            # Require complete 5-tuple
-            if not src_ip or not dst_ip or src_port is None or dst_port is None or not proto:
-                reason = "Incomplete flow tuple (must specify src_ip, dst_ip, src_port, dst_port, protocol)"
-                unassessed_labels.append(dict(lbl, rejection_reason=reason))
-                unmatched_labels.append(dict(lbl, rejection_reason=reason))
-                continue
-
-            lbl_flow_key = canonicalize_flow(src_ip, dst_ip, src_port, dst_port, proto)
-
-        # 6. Validate time window timestamps if present
+        # 5. Validate time window timestamps if present
         win_start = window.get("start") if has_window else None
         win_end = window.get("end") if has_window else None
         if win_start is not None and win_end is not None:
@@ -685,8 +682,66 @@ def evaluate_ground_truth_labels(
                 unmatched_labels.append(dict(lbl, rejection_reason=reason))
                 continue
 
-        # 7. Search for matching alert (bijective 1-to-1)
+        # 6. Granularity-specific requirement checks
+        if granularity == "flow" and not has_flow and not has_window:
+            reason = "Granularity 'flow' requires valid 'flow' 5-tuple dictionary"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        if granularity == "time-window" and not has_window:
+            reason = "Granularity 'time-window' requires valid 'time_window' dictionary"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        if granularity == "event" and not has_event:
+            reason = "Granularity 'event' requires non-empty 'event_id'"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        if granularity == "packet" and not has_packet:
+            reason = "Granularity 'packet' requires valid 'packet_index'"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        # 7. Validate flow tuple completeness if flow specified
+        lbl_flow_key = None
+        if has_flow:
+            src_ip = flow.get("src_ip")
+            dst_ip = flow.get("dst_ip")
+            src_port = flow.get("src_port")
+            dst_port = flow.get("dst_port")
+            proto = flow.get("protocol")
+
+            # Require complete 5-tuple
+            if not src_ip or not dst_ip or src_port is None or dst_port is None or not proto:
+                reason = "Incomplete flow tuple (must specify src_ip, dst_ip, src_port, dst_port, protocol)"
+                unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                unmatched_labels.append(dict(lbl, rejection_reason=reason))
+                continue
+
+            try:
+                sp_i = int(src_port)
+                dp_i = int(dst_port)
+                if not (0 <= sp_i <= 65535 and 0 <= dp_i <= 65535):
+                    reason = "Flow port out of valid range 0..65535"
+                    unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                    unmatched_labels.append(dict(lbl, rejection_reason=reason))
+                    continue
+            except (ValueError, TypeError):
+                reason = "Flow port not a valid integer"
+                unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                unmatched_labels.append(dict(lbl, rejection_reason=reason))
+                continue
+
+            lbl_flow_key = canonicalize_flow(src_ip, dst_ip, src_port, dst_port, proto)
+
+        # 8. Search for matching alert (bijective 1-to-1)
         found = False
+        evidence_unemitted = False
         for idx, alert in enumerate(alerts):
             if idx in matched_alert_indices:
                 continue
@@ -729,6 +784,31 @@ def evaluate_ground_truth_labels(
                 if win_end is not None and ts_val > (float(win_end) + timestamp_tolerance_s):
                     continue
 
+            # D. Event ID matching for event granularity
+            alert_ev = alert.get("evidence")
+            if not isinstance(alert_ev, dict):
+                alert_ev = {}
+
+            if granularity == "event":
+                a_ev_id = alert_ev.get("event_id") or alert_ev.get("event")
+                if a_ev_id is None:
+                    evidence_unemitted = True
+                    continue
+                if str(a_ev_id).strip() != str(event_id).strip():
+                    continue
+
+            # E. Packet Index matching for packet granularity
+            if granularity == "packet":
+                a_pkt_idx = alert_ev.get("packet_index") if "packet_index" in alert_ev else alert_ev.get("frame_index")
+                if a_pkt_idx is None:
+                    evidence_unemitted = True
+                    continue
+                try:
+                    if int(a_pkt_idx) != int(packet_index):
+                        continue
+                except (ValueError, TypeError):
+                    continue
+
             # Match found!
             matched_alert_indices.add(idx)
             matched_labels.append({"label": lbl, "alert": alert})
@@ -736,7 +816,12 @@ def evaluate_ground_truth_labels(
             break
 
         if not found:
-            unmatched_labels.append(lbl)
+            if evidence_unemitted and (granularity in ("event", "packet")):
+                reason = f"IDS alerts fired for rule/family but lacked required {granularity} evidence in alert evidence dictionary"
+                unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            else:
+                unmatched_labels.append(lbl)
 
     extra_alerts = [alert for idx, alert in enumerate(alerts) if idx not in matched_alert_indices]
     tp = len(matched_labels)
@@ -1273,7 +1358,7 @@ class PipelineCoordinator:
         from evaluation.replay import create_replay_engine
         import config
 
-        bl_path = os.path.join(_IDS_ROOT, "data", "test_blocklist.txt")
+        bl_path = AUTHORITATIVE_BLOCKLIST_PATH
         if os.path.exists(bl_path):
             blocklist = load_blocklist(bl_path, url=None)
         else:

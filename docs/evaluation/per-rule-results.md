@@ -104,7 +104,7 @@ This report presents per-rule detection accuracy, false positive analysis, and o
 ### Operational Takeaways
 1. **Memory Boundedness:** Across all captures (including the 126 MB Mirai capture), NetGuard's peak resident memory remained strictly under 140 MB, verifying that deterministic LRU bounding (`OrderedDict` and periodic `prune_stale`) prevents unbounded memory growth.
 2. **Throughput Scaling:** Replay throughput scales smoothly up to 1,068 packets per second on high-density flow captures (`iot23_malware_20_1`), with zero unhandled exceptions or thread starvation.
-3. **Evidence-Driven Rule Admission Proven:** `ws_dns_remoteshell` demonstrates that expanding the rule registry from 19 to 21 rules successfully eliminated a severe evasion blind spot without inflating false positives.
+3. **Evidence-Driven Rule Admission Proven:** `ws_dns_remoteshell` and subsequent captures demonstrate that expanding the rule registry from 19 to 23 canonical rules successfully eliminated critical evasion blind spots without inflating false positives.
 
 ---
 

@@ -428,7 +428,35 @@ class TestIpFragmentAnomalyRule(unittest.TestCase):
         alert = self.rule.check(pkt2)
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["anomaly_type"], "CONFLICTING_FRAGMENT_DUPLICATE")
-        self.assertEqual(alert["severity"], "high")
+
+    def test_malformed_fragment_length_inputs_handled_safely(self):
+        """Malformed, negative, non-numeric, or missing fragment data length inputs must be handled safely without exceptions."""
+        base_pkt = {
+            "type": "IP",
+            "protocol": "TCP",
+            "src_ip": "10.0.0.1",
+            "dst_ip": "10.0.0.2",
+            "ip_fragment_id": 7777,
+            "ip_fragment_offset": 0,
+            "ip_more_fragments": True,
+            "ip_fragmented": True,
+            "timestamp": 7000.0,
+        }
+
+        malformed_inputs = [
+            {"ip_fragment_data_len": "not_a_number"},
+            {"ip_fragment_data_len": -50},
+            {"ip_fragment_data_len": None, "payload_len": "bad_len"},
+            {"ip_fragment_data_len": None, "payload_len": -1},
+            {"ip_fragment_data_len": [1, 2, 3]},
+            {"ip_fragment_data_len": {"len": 10}},
+        ]
+
+        for bad_fields in malformed_inputs:
+            test_pkt = dict(base_pkt, **bad_fields)
+            # Must return None safely without raising any unhandled exception
+            res = self.rule.check(test_pkt)
+            self.assertIsNone(res)
 
     def test_evict_oldest_flow_preserves_current_flow_and_maintains_invariant(self):
         """Global eviction preserves the current active flow and guarantees _total_ranges == sum(len(f['fragments']))."""

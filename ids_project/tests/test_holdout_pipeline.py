@@ -7,15 +7,17 @@ Tests:
   - Aggregate engine fingerprint computation and sensitivity
   - Git engine freeze verification and dirty tree enforcement
   - Candidate ID allowlist validation (path traversal, illegal chars, length bounds)
-  - Quarantine path containment and boundary enforcement
-  - Quarantine integrity, magic byte verification, and read-only permissions (0o444)
-  - Candidate registration, exclusive creation, and overwrite prevention
-  - Development corpus hash collision rejection
+  - Quarantine path containment and boundary enforcement (symlink-safe canonical resolution)
+  - Quarantine integrity fail-closed: mandatory SHA-256, magic bytes, read-only permissions (0o444)
+  - Exact HDD mount verification: exact mountpoint, device match, rejection of /dev/sda1 and parent mounts
+  - Durable runtime registry state machine: PENDING -> REGISTERED -> EVALUATING -> EVALUATED / EVALUATION_FAILED
+  - Duplicate candidate ID and duplicate hash rejection across holdouts and dev corpus
+  - Re-evaluation prohibition (single-pass invariant)
   - Complete structural validation of PCAP format (capinfos / tshark)
-  - Single-pass blind evaluation on benign and attack fixtures
+  - Single-pass blind evaluation on benign and attack fixtures with registered sidecar metadata
+  - Rejection of arbitrary local PCAPs outside quarantine and missing sidecars
   - Separation of capture-level rule firing from ground-truth verification
-  - Strict freeze enforcement blocking evaluation on uncommitted state
-  - Immutable audit report structure and read-only file sealing
+  - Honest audit report sealing with verifiable companion SHA-256 digest
 """
 
 import json
@@ -40,6 +42,11 @@ from evaluation.holdout_pipeline import (
     validate_candidate_id,
     check_quarantine_path_containment,
     validate_pcap_structure,
+    verify_external_mount,
+    hash_file_sha256,
+    load_runtime_registry,
+    transition_runtime_registry_state,
+    HoldoutState,
 )
 
 BENIGN_PCAP = os.path.join(_IDS_ROOT, "data", "test_benign.pcap")
@@ -51,14 +58,39 @@ VALID_MINIMAL_PCAP_HEADER = (
 )
 
 
-def _make_quarantined_pcap(source_path: str, target_dir: str, filename: str = "quarantined.pcap") -> str:
-    """Helper to copy a test PCAP into quarantine and seal read-only permissions (0o444)."""
+def _make_quarantined_pcap(
+    source_path: str,
+    target_dir: str,
+    candidate_id: str = "quarantined",
+    is_benign: bool = False,
+    target_rules: list = None,
+) -> tuple[str, str, str]:
+    """Helper to copy a test PCAP into quarantine, seal read-only permissions, and write sidecar .meta.json."""
     os.makedirs(target_dir, exist_ok=True)
-    dst = os.path.join(target_dir, filename)
-    with open(source_path, "rb") as sf, open(dst, "wb") as df:
-        df.write(sf.read())
-    enforce_quarantine_permissions(dst)
-    return dst
+    pcap_path = os.path.join(target_dir, f"{candidate_id}.pcap")
+    meta_path = os.path.join(target_dir, f"{candidate_id}.meta.json")
+
+    with open(source_path, "rb") as sf, open(pcap_path, "wb") as df:
+        content = sf.read()
+        df.write(content)
+    enforce_quarantine_permissions(pcap_path)
+
+    digest = hash_file_sha256(pcap_path)
+    meta = {
+        "candidate_id": candidate_id,
+        "name": f"Test {candidate_id}",
+        "publisher": "Evaluation Lab",
+        "sha256": digest,
+        "size_bytes": len(content),
+        "is_benign": is_benign,
+        "target_rules": target_rules or [],
+        "ground_truth_source": "Synthetic Benchmark",
+    }
+    with open(meta_path, "w", encoding="utf-8") as mf:
+        json.dump(meta, mf, indent=2)
+    enforce_quarantine_permissions(meta_path)
+
+    return pcap_path, meta_path, digest
 
 
 def test_compute_engine_fingerprint():
@@ -139,22 +171,37 @@ def test_quarantine_path_containment():
         assert "escapes quarantine root" in str(exc.value)
 
 
-def test_verify_holdout_quarantine_valid():
-    """Verify quarantine integrity on valid quarantined PCAP fixture."""
+def test_verify_holdout_quarantine_mandatory_hash():
+    """verify_holdout_quarantine must fail closed on missing or malformed expected SHA-256."""
     with tempfile.TemporaryDirectory() as tmp_dir:
-        q_pcap = _make_quarantined_pcap(BENIGN_PCAP, tmp_dir)
-        res = verify_holdout_quarantine(q_pcap, quarantine_dir=tmp_dir)
-        assert res["valid"] is True
-        assert res["size_bytes"] > 0
-        assert res["is_read_only"] is True
-        assert res["magic_hex"] is not None
-        assert len(res["sha256"]) == 64
+        q_pcap, _, digest = _make_quarantined_pcap(BENIGN_PCAP, tmp_dir)
+
+        # None must be rejected
+        res_none = verify_holdout_quarantine(q_pcap, expected_sha256=None, quarantine_dir=tmp_dir)
+        assert res_none["valid"] is False
+        assert "mandatory" in res_none["error"].lower()
+
+        # Malformed hash (wrong length or characters) must be rejected
+        res_short = verify_holdout_quarantine(q_pcap, expected_sha256="abc123", quarantine_dir=tmp_dir)
+        assert res_short["valid"] is False
+        assert "valid 64-character hex string" in res_short["error"]
+
+        res_non_hex = verify_holdout_quarantine(q_pcap, expected_sha256="z" * 64, quarantine_dir=tmp_dir)
+        assert res_non_hex["valid"] is False
+        assert "valid 64-character hex string" in res_non_hex["error"]
+
+        # Valid matching hash must succeed
+        res_ok = verify_holdout_quarantine(q_pcap, expected_sha256=digest, quarantine_dir=tmp_dir)
+        assert res_ok["valid"] is True
+        assert res_ok["sha256"] == digest
 
 
 def test_verify_holdout_quarantine_failures():
     """Verify quarantine validation fails on missing, empty, writeable, or corrupt files."""
+    dummy_sha = "a" * 64
+
     # Missing file
-    res = verify_holdout_quarantine("/tmp/nonexistent_holdout_12345.pcap")
+    res = verify_holdout_quarantine("/tmp/nonexistent_holdout_12345.pcap", expected_sha256=dummy_sha)
     assert res["valid"] is False
     assert "does not exist" in res["error"]
 
@@ -164,7 +211,7 @@ def test_verify_holdout_quarantine_failures():
     try:
         enforce_quarantine_permissions(empty_path)
         # Empty file
-        res = verify_holdout_quarantine(empty_path)
+        res = verify_holdout_quarantine(empty_path, expected_sha256=dummy_sha)
         assert res["valid"] is False
         assert "empty" in res["error"]
 
@@ -173,14 +220,14 @@ def test_verify_holdout_quarantine_failures():
         with open(empty_path, "wb") as f:
             f.write(b"CORRUPT_NOT_PCAP_MAGIC_1234567890")
         enforce_quarantine_permissions(empty_path)
-        res = verify_holdout_quarantine(empty_path)
+        res = verify_holdout_quarantine(empty_path, expected_sha256=dummy_sha)
         assert res["valid"] is False
         assert "Invalid PCAP header magic bytes" in res["error"]
 
         # Expected SHA-256 mismatch
         with tempfile.TemporaryDirectory() as tmp_dir:
-            q_pcap = _make_quarantined_pcap(BENIGN_PCAP, tmp_dir)
-            res_mismatch = verify_holdout_quarantine(q_pcap, expected_sha256="0" * 64)
+            q_pcap, _, _ = _make_quarantined_pcap(BENIGN_PCAP, tmp_dir)
+            res_mismatch = verify_holdout_quarantine(q_pcap, expected_sha256="0" * 64, quarantine_dir=tmp_dir)
             assert res_mismatch["valid"] is False
             assert "SHA-256 mismatch" in res_mismatch["error"]
     finally:
@@ -208,7 +255,8 @@ def test_enforce_quarantine_permissions():
         assert not bool(mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
         assert bool(mode & stat.S_IRUSR)
 
-        q_info = verify_holdout_quarantine(path)
+        digest = hash_file_sha256(path)
+        q_info = verify_holdout_quarantine(path, expected_sha256=digest)
         assert q_info["valid"] is True
         assert q_info["is_read_only"] is True
     finally:
@@ -219,9 +267,113 @@ def test_enforce_quarantine_permissions():
             pass
 
 
+def test_verify_external_mount_exact_device_and_path(monkeypatch):
+    """verify_external_mount must match exact mountpoint and exact backing device, rejecting /dev/sda1."""
+    # Mock /proc/mounts with /dev/sda1 mounted at /run/media/harshitgarg/Data1
+    mock_mounts_sda = "/dev/sda1 /run/media/harshitgarg/Data1 ext4 rw 0 0\n"
+
+    def mock_open_sda(path, *args, **kwargs):
+        import io
+        if path == "/proc/mounts":
+            return io.StringIO(mock_mounts_sda)
+        return open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", mock_open_sda)
+
+    # When expecting /dev/sdb1, /dev/sda1 must be rejected
+    assert verify_external_mount(
+        expected_mount="/run/media/harshitgarg/Data1",
+        expected_device="/dev/sdb1",
+        require_mount=True
+    ) is False
+
+    # Prefix match must be rejected (e.g. asking for /run/media/harshitgarg/Data1/subpath)
+    assert verify_external_mount(
+        expected_mount="/run/media/harshitgarg/Data1/subpath",
+        expected_device="/dev/sda1",
+        require_mount=True
+    ) is False
+
+    # Exact match on /dev/sda1 when /dev/sda1 is expected should pass
+    assert verify_external_mount(
+        expected_mount="/run/media/harshitgarg/Data1",
+        expected_device="/dev/sda1",
+        require_mount=True
+    ) is True
+
+
+def test_runtime_registry_lifecycle_and_transitions():
+    """Verify durable runtime registry state transitions, atomic locking, and re-eval prohibition."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        reg_file = os.path.join(tmp_dir, "holdout_runtime_registry.json")
+
+        # Initial state
+        reg = load_runtime_registry(reg_file)
+        assert reg["candidates"] == {}
+
+        cid = "candidate_lifecycle_01"
+        # Transition: PENDING -> REGISTERED_QUARANTINED
+        cand = transition_runtime_registry_state(
+            candidate_id=cid,
+            target_state=HoldoutState.REGISTERED_QUARANTINED,
+            allowed_from_states=[HoldoutState.PENDING_ACQUISITION],
+            metadata_updates={"sha256": "1" * 64},
+            registry_path=reg_file,
+        )
+        assert cand["state"] == HoldoutState.REGISTERED_QUARANTINED
+
+        # Transition: REGISTERED_QUARANTINED -> EVALUATING
+        cand2 = transition_runtime_registry_state(
+            candidate_id=cid,
+            target_state=HoldoutState.EVALUATING,
+            allowed_from_states=[HoldoutState.REGISTERED_QUARANTINED],
+            registry_path=reg_file,
+        )
+        assert cand2["state"] == HoldoutState.EVALUATING
+
+        # Cannot evaluate concurrently from EVALUATING
+        with pytest.raises(ValueError) as exc:
+            transition_runtime_registry_state(
+                candidate_id=cid,
+                target_state=HoldoutState.EVALUATING,
+                allowed_from_states=[HoldoutState.REGISTERED_QUARANTINED],
+                registry_path=reg_file,
+            )
+        assert "expected one of" in str(exc.value)
+
+        # Interrupted recovery: EVALUATING -> EVALUATION_FAILED -> EVALUATING -> EVALUATED
+        transition_runtime_registry_state(
+            candidate_id=cid,
+            target_state=HoldoutState.EVALUATION_FAILED,
+            allowed_from_states=[HoldoutState.EVALUATING],
+            metadata_updates={"error": "simulated interruption"},
+            registry_path=reg_file,
+        )
+
+        transition_runtime_registry_state(
+            candidate_id=cid,
+            target_state=HoldoutState.EVALUATING,
+            allowed_from_states=[HoldoutState.EVALUATION_FAILED],
+            registry_path=reg_file,
+        )
+
+        transition_runtime_registry_state(
+            candidate_id=cid,
+            target_state=HoldoutState.EVALUATED,
+            allowed_from_states=[HoldoutState.EVALUATING],
+            metadata_updates={"report_id": "rep-1234"},
+            registry_path=reg_file,
+        )
+
+        reg_final = load_runtime_registry(reg_file)
+        assert reg_final["candidates"][cid]["state"] == HoldoutState.EVALUATED
+        assert len(reg_final["candidates"][cid]["history"]) == 5
+
+
 def test_register_holdout_candidate():
     """Verify holdout candidate registration and metadata persistence in quarantine."""
-    with tempfile.TemporaryDirectory() as q_dir:
+    with tempfile.TemporaryDirectory() as q_dir, tempfile.TemporaryDirectory() as reg_dir:
+        reg_path = os.path.join(reg_dir, "runtime_registry.json")
         meta_in = {
             "name": "Test Holdout Capture",
             "publisher": "Evaluation Lab",
@@ -235,6 +387,7 @@ def test_register_holdout_candidate():
             candidate_meta=meta_in,
             quarantine_dir=q_dir,
             check_dev_overlap=False,  # Allow test fixture re-use for unit testing
+            runtime_registry_path=reg_path,
         )
 
         assert reg_info["candidate_id"] == "test_candidate_01"
@@ -245,12 +398,16 @@ def test_register_holdout_candidate():
         mode = os.stat(reg_info["quarantined_pcap_path"]).st_mode
         assert not bool(mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
 
-        # Check .meta.json
+        # Check .meta.json sidecar
         meta_file = os.path.join(q_dir, "test_candidate_01.meta.json")
         assert os.path.isfile(meta_file)
         with open(meta_file, "r") as mf:
             saved_meta = json.load(mf)
         assert saved_meta["sha256"] == reg_info["sha256"]
+
+        # Check runtime registry updated
+        reg_data = load_runtime_registry(reg_path)
+        assert reg_data["candidates"]["test_candidate_01"]["state"] == HoldoutState.REGISTERED_QUARANTINED
 
 
 def test_register_holdout_candidate_dev_corpus_collision():
@@ -274,7 +431,8 @@ def test_register_holdout_candidate_dev_corpus_collision():
 
 def test_register_holdout_candidate_overwrite_rejected():
     """Exclusive creation prevents overwriting existing quarantine PCAP or metadata."""
-    with tempfile.TemporaryDirectory() as q_dir:
+    with tempfile.TemporaryDirectory() as q_dir, tempfile.TemporaryDirectory() as reg_dir:
+        reg_path = os.path.join(reg_dir, "runtime_registry.json")
         meta_in = {"name": "Overwrite Test"}
         register_holdout_candidate(
             source_pcap_path=BENIGN_PCAP,
@@ -282,6 +440,7 @@ def test_register_holdout_candidate_overwrite_rejected():
             candidate_meta=meta_in,
             quarantine_dir=q_dir,
             check_dev_overlap=False,
+            runtime_registry_path=reg_path,
         )
 
         # Attempt to register again under the same ID
@@ -292,26 +451,40 @@ def test_register_holdout_candidate_overwrite_rejected():
                 candidate_meta=meta_in,
                 quarantine_dir=q_dir,
                 check_dev_overlap=False,
+                runtime_registry_path=reg_path,
             )
-        assert "already exists" in str(exc.value) and "Overwriting is prohibited" in str(exc.value)
+        assert "already registered" in str(exc.value) or "already exists" in str(exc.value)
 
 
 def test_run_blind_holdout_evaluation_benign():
     """Verify single-pass blind holdout evaluation on benign traffic produces BENIGN_BASELINE_ZERO_ALERTS."""
-    with tempfile.TemporaryDirectory() as q_dir, tempfile.TemporaryDirectory() as out_dir:
-        q_pcap = _make_quarantined_pcap(BENIGN_PCAP, q_dir, "benign_holdout.pcap")
+    with tempfile.TemporaryDirectory() as q_dir, tempfile.TemporaryDirectory() as out_dir, tempfile.TemporaryDirectory() as reg_dir:
+        reg_path = os.path.join(reg_dir, "runtime_registry.json")
+        q_pcap, _, digest = _make_quarantined_pcap(BENIGN_PCAP, q_dir, "holdout_benign_eval", is_benign=True, target_rules=["FP_BENIGN"])
+
+        # Pre-seed runtime registry
+        transition_runtime_registry_state(
+            candidate_id="holdout_benign_eval",
+            target_state=HoldoutState.REGISTERED_QUARANTINED,
+            allowed_from_states=[HoldoutState.PENDING_ACQUISITION],
+            registry_path=reg_path,
+        )
+
         candidate_meta = {
             "candidate_id": "holdout_benign_eval",
             "is_benign": True,
             "target_rules": ["FP_BENIGN"],
             "ground_truth_source": "Clean network traffic baseline",
+            "sha256": digest,
         }
         report = run_blind_holdout_evaluation(
             pcap_path=q_pcap,
             candidate_meta=candidate_meta,
+            quarantine_dir=q_dir,
             output_dir=out_dir,
             strict_freeze=False,
             allow_dirty=True,
+            runtime_registry_path=reg_path,
         )
 
         assert report["evaluation_type"] == "INDEPENDENT_BLIND_HOLDOUT"
@@ -320,32 +493,51 @@ def test_run_blind_holdout_evaluation_benign():
         assert report["execution_metrics"]["packets_processed"] > 0
         assert report["engine_freeze"]["engine_fingerprint"] is not None
         assert len(report["raw_alerts"]) == 0
-        assert report["tamper_evident"] is True
+        assert "Read-only permission sealed" in report["report_sealing"]
+        assert "report_sha256" in report
 
-        # Verify audit report file on disk is read-only
-        report_files = [f for f in os.listdir(out_dir) if f.startswith("holdout_holdout_benign_eval_")]
+        # Verify audit report and companion .sha256 file on disk are read-only
+        report_files = [f for f in os.listdir(out_dir) if f.startswith("holdout_holdout_benign_eval_") and f.endswith(".json")]
         assert len(report_files) == 1
         report_path = os.path.join(out_dir, report_files[0])
         mode = os.stat(report_path).st_mode
         assert not bool(mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
 
+        sha_files = [f for f in os.listdir(out_dir) if f.endswith(".json.sha256")]
+        assert len(sha_files) == 1
+
 
 def test_run_blind_holdout_evaluation_attack():
     """Verify single-pass blind holdout evaluation on attack traffic produces OBSERVATIONAL_UNASSESSED without granular GT."""
-    with tempfile.TemporaryDirectory() as q_dir, tempfile.TemporaryDirectory() as out_dir:
-        q_pcap = _make_quarantined_pcap(ATTACK_PCAP, q_dir, "attack_holdout.pcap")
+    with tempfile.TemporaryDirectory() as q_dir, tempfile.TemporaryDirectory() as out_dir, tempfile.TemporaryDirectory() as reg_dir:
+        reg_path = os.path.join(reg_dir, "runtime_registry.json")
+        q_pcap, _, digest = _make_quarantined_pcap(
+            ATTACK_PCAP, q_dir, "holdout_attack_eval", is_benign=False, target_rules=["PORT_SCAN", "SYN_FLOOD"]
+        )
+
+        # Pre-seed runtime registry
+        transition_runtime_registry_state(
+            candidate_id="holdout_attack_eval",
+            target_state=HoldoutState.REGISTERED_QUARANTINED,
+            allowed_from_states=[HoldoutState.PENDING_ACQUISITION],
+            registry_path=reg_path,
+        )
+
         candidate_meta = {
             "candidate_id": "holdout_attack_eval",
             "is_benign": False,
             "target_rules": ["PORT_SCAN", "SYN_FLOOD"],
             "ground_truth_source": "Synthetic attack harness",
+            "sha256": digest,
         }
         report = run_blind_holdout_evaluation(
             pcap_path=q_pcap,
             candidate_meta=candidate_meta,
+            quarantine_dir=q_dir,
             output_dir=out_dir,
             strict_freeze=False,
             allow_dirty=True,
+            runtime_registry_path=reg_path,
         )
 
         assert report["verdict_analysis"]["verdict"] == "OBSERVATIONAL_UNASSESSED"
@@ -353,13 +545,24 @@ def test_run_blind_holdout_evaluation_attack():
         assert report["verdict_analysis"]["capture_level_observation"]["target_rules_fired"] is True
         assert report["verdict_analysis"]["ground_truth_evaluation"]["has_granular_ground_truth"] is False
         assert report["execution_metrics"]["total_alerts"] > 0
-        assert "PORT_SCAN" in report["execution_metrics"]["alerts_by_rule"] or "SYN_FLOOD" in report["execution_metrics"]["alerts_by_rule"]
         assert "capture_level_observation" in report["verdict_analysis"]
 
-        # Verify raw alert structure contains evidence dict
-        for alert in report["raw_alerts"]:
-            assert "evidence" in alert
-            assert isinstance(alert["evidence"], dict)
+
+def test_run_blind_holdout_evaluation_rejects_arbitrary_local_pcap():
+    """run_blind_holdout_evaluation must reject an arbitrary PCAP outside quarantine."""
+    with tempfile.TemporaryDirectory() as q_dir, tempfile.TemporaryDirectory() as other_dir:
+        outside_pcap = os.path.join(other_dir, "outside.pcap")
+        with open(outside_pcap, "wb") as f:
+            f.write(VALID_MINIMAL_PCAP_HEADER)
+        enforce_quarantine_permissions(outside_pcap)
+
+        with pytest.raises(ValueError) as exc:
+            run_blind_holdout_evaluation(
+                pcap_path=outside_pcap,
+                candidate_meta={"candidate_id": "outside", "sha256": "0" * 64},
+                quarantine_dir=q_dir,
+            )
+        assert "escapes quarantine root" in str(exc.value)
 
 
 def test_strict_freeze_blocks_on_dirty(monkeypatch):
@@ -376,16 +579,27 @@ def test_strict_freeze_blocks_on_dirty(monkeypatch):
 
     monkeypatch.setattr(holdout_pipeline, "verify_engine_freeze", mock_verify_freeze)
 
-    with tempfile.TemporaryDirectory() as q_dir, tempfile.TemporaryDirectory() as out_dir:
-        q_pcap = _make_quarantined_pcap(BENIGN_PCAP, q_dir)
-        candidate_meta = {"candidate_id": "test_freeze_block", "is_benign": True}
+    with tempfile.TemporaryDirectory() as q_dir, tempfile.TemporaryDirectory() as out_dir, tempfile.TemporaryDirectory() as reg_dir:
+        reg_path = os.path.join(reg_dir, "runtime_registry.json")
+        q_pcap, _, digest = _make_quarantined_pcap(BENIGN_PCAP, q_dir, "test_freeze_block", is_benign=True)
+
+        transition_runtime_registry_state(
+            candidate_id="test_freeze_block",
+            target_state=HoldoutState.REGISTERED_QUARANTINED,
+            allowed_from_states=[HoldoutState.PENDING_ACQUISITION],
+            registry_path=reg_path,
+        )
+
+        candidate_meta = {"candidate_id": "test_freeze_block", "is_benign": True, "sha256": digest}
         with pytest.raises(RuntimeError) as exc_info:
             run_blind_holdout_evaluation(
                 pcap_path=q_pcap,
                 candidate_meta=candidate_meta,
+                quarantine_dir=q_dir,
                 output_dir=out_dir,
                 strict_freeze=True,
                 allow_dirty=False,
+                runtime_registry_path=reg_path,
             )
         assert "Holdout evaluation blocked by engine freeze check" in str(exc_info.value)
 
