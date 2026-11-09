@@ -50,7 +50,7 @@
     "publisher_scan_flows": 3386119,
     "unique_uids_in_trigger": 111214,
     "trigger_evidence_pct": 3.28,
-    "campaign_cooldown_overlap_pct": 100.0,
+    "campaign_cooldown_overlap_pct": 100,
     "per_flow_recall_status": "NOT MEASURABLE at per-flow granularity due to intentional rate-limiting alert aggregation"
   },
   "arp_forensics": {
@@ -107,5 +107,8 @@
       "size_bytes": 57169,
       "sha256": "50ea00c6815464dfa7a13c7c06c6bfcd8aa8c1832205cb66dde063c937522f80"
     }
-  }
+  },
+  "audit_status": "HISTORICAL_SUPERSEDED_BY_V3_1_1_CODE_CORRECTIONS; METRICS_REQUIRE_RERUN",
+  "superseding_document": "docs/evaluation/published-ground-truth-audit-v3-1-1/00_correction_status.md",
+  "metric_caveat": "The 91.11% and 97.45% values are historical Tier-A fractions, not conventional precision. Do not cite as final."
 }
