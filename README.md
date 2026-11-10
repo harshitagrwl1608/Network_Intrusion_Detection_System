@@ -30,6 +30,7 @@
 - [Running Without Root](#-running-without-root)
 - [Security & Privacy Safeguards](#-security--privacy-safeguards)
 - [Development Roadmap](#-development-roadmap)
+  - [Long-Term AI/ML & Autonomous Defense Roadmap (Vision)](docs/AI_ML_AUTONOMOUS_DEFENSE_ROADMAP.md)
 - [Academic Context & Credits](#-academic-context--credits)
 
 ---
@@ -455,6 +456,7 @@ When running and deploying NetGuard, adhere to the following security practices:
 
 ## 🗺️ Development Roadmap
 
+### Completed Foundations
 - [x] **Phase 1: Core Engine & Ingestion**
   - [x] Scapy raw packet sniffer with protocol decoding
   - [x] Normalized packet schema (Ethernet, IP, TCP, UDP, ARP, DNS, Payload)
@@ -473,11 +475,29 @@ When running and deploying NetGuard, adhere to the following security practices:
   - [x] MAC OUI device vendor fingerprinting
   - [x] Analyst True Positive / False Positive feedback tagging system
   - [x] Suricata benchmarking suite (`replay.py`, `compare.py`, `generate_test_pcap.py`)
-- [ ] **Phase 4: Active Defense & Machine Learning (In Progress)**
-  - [ ] **Automated IPS (Intrusion Prevention):** Optional active defense toggle using `iptables` / `ufw` to drop attacking IPs for a configurable quarantine period.
-  - [ ] **Machine Learning Anomaly Detection:** Lightweight Isolation Forest model (`scikit-learn`) to baseline traffic volume and detect zero-day anomalies.
-  - [ ] **External Alerts:** Webhook dispatchers for Discord, Slack, and Telegram notifications on high-severity events.
-  - [ ] **Multi-Interface Sniffing:** Simultaneous capture across multiple physical and wireless network interfaces.
+  - [x] Multi-scenario 22-PCAP ground-truth evaluation runner (`run_ground_truth_benchmark.py`)
+
+### Near-Term Extensions (Planned)
+- [ ] **Phase 4: Active Defense & Machine Learning (Research / Planned)**
+  - [ ] **Automated IPS (Intrusion Prevention):** Optional active defense toggle using `iptables` / `ufw` to drop attacking IPs for a configurable quarantine period. *(Planned)*
+  - [ ] **Machine Learning Anomaly Detection:** Lightweight Isolation Forest model (`scikit-learn`) to baseline traffic volume and detect zero-day anomalies. *(Research / Planned)*
+  - [ ] **External Alerts:** Webhook dispatchers for Discord, Slack, and Telegram notifications on high-severity events. *(Planned)*
+  - [ ] **Multi-Interface Sniffing:** Simultaneous capture across multiple physical and wireless network interfaces. *(Planned)*
+
+### Long-Term AI/ML & Autonomous Defense Vision
+> [!NOTE]
+> NetGuard's long-term architectural evolution from a deterministic rule engine to an intelligent, stateful, and autonomous defense platform is fully specified in our dedicated roadmap:
+> 
+> 📄 **[AI/ML and Autonomous Defense Roadmap (`docs/AI_ML_AUTONOMOUS_DEFENSE_ROADMAP.md`)](docs/AI_ML_AUTONOMOUS_DEFENSE_ROADMAP.md)**
+>
+> **Core Direction:** `Observe → Understand → Correlate → Investigate → Recommend → Respond → Improve`
+> - **Stateful Network Intelligence Layer:** Moving beyond isolated packets to persistent device, role, and host communication graphs ($O(1)$ LRU state bounded).
+> - **Adaptive Baseline & Behaviour Modelling:** Streaming Welford variance, quantile-based thresholds ($P_{95}/P_{99}$), and 7-stage baseline lifecycle with anti-poisoning defenses.
+> - **Machine Learning Detection Layer:** Isolation Forest, multivariate anomaly distance, and behavioral clustering as a complement to deterministic rules.
+> - **Complex Event Correlation Engine:** Synthesizing multi-stage attack chains (Recon $\rightarrow$ Brute Force $\rightarrow$ C2 $\rightarrow$ Exfil) without altering raw forensic packet evidence.
+> - **AI-Assisted Security Analyst Copilot:** Plain-English incident narratives, fact-versus-hypothesis epistemic boundaries, and interactive evidence retrieval.
+> - **Policy-Bounded Autonomous Response (IPS):** Staged 5-tier progression from detection to adaptive orchestration with inviolable allowlists (gateways, DNS, DCs) and emergency kill-switches.
+> - **Phased Roadmap (Phases 0–7):** Disciplined, milestone-driven phases governed by verifiable acceptance criteria rather than arbitrary calendar dates.
 
 ---
 
