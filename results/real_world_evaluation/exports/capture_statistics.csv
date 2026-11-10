@@ -1,0 +1,20 @@
+capture_id,dataset_family,category,attack_type,pcap_filename,pcap_size_bytes,sha256,packet_count,elapsed_seconds,throughput_pps,alert_count,rules_fired
+ciciot_pingsweep,CICIoT2023,attack,ICMP Ping Sweep Reconnaissance,Recon-PingSweep.pcap,7853566,1aaf410fcc6dbfefa48b680b401344f0fa7b6e04c2acc9af427b5b7728b0ee89,22943,8.64,2655.5,9,DATA_EXFIL:1;DNS_ANOMALY:6;ICMP_SWEEP:1;PAYLOAD_HIT:1
+ciciot_sqli,CICIoT2023,attack,SQL Injection Web Exploitation,SqlInjection.pcap,9823016,712750bd64f8250861bd8a76bd1c33a44a4fe8d3dc2f34e2043c208edc19bde7,53462,10.588,5049.3,69,DNS_ANOMALY:23;PAYLOAD_HIT:46
+ciciot_xss,CICIoT2023,attack,Cross-Site Scripting (XSS),XSS.pcap,12571710,62a9d0ca316f3e5eb9c910fc8c21dc169ef76033bafa22d17f85f53e64809bf0,40183,9.42,4265.8,20,DNS_ANOMALY:1;PAYLOAD_HIT:19
+ciciot_cmdinj,CICIoT2023,attack,OS Command Injection,CommandInjection.pcap,28585606,151c761536d530d8432589e35ed09f2162e51c78a28995fc2a7dbeae32082b13,55741,10.219,5454.5,2,NON_DNS_TRAFFIC_ON_DNS_PORT:1;PAYLOAD_HIT:1
+ciciot_upload,CICIoT2023,attack,Malicious File Upload / Web Shell,Uploading_Attack.pcap,3326177,13eb2c9478cb3d54921766436808cc89623f25179565241ece3c20a95ca71ee8,12939,5.471,2365.2,8,PAYLOAD_HIT:8
+ciciot_browserhijack,CICIoT2023,attack,Browser Hijacking / Web Exploit,BrowserHijacking.pcap,35038616,aeac45ba4fdb14575af2e8193d3ef99783e15760eea76696a9155655f5c99138,59821,10.572,5658.3,3,DATA_EXFIL:1;DNS_ANOMALY:1;UDP_FLOOD:1
+ciciot_bruteforce,CICIoT2023,attack,Credential Dictionary Brute Force,DictionaryBruteForce.pcap,39130622,09ad3cfabd139b950da3078fec0f0fd196fe36cd82237d898035437f4c69161b,133138,20.619,6457.1,147,ARP_SPOOF:117;BRUTE_FORCE:21;DATA_EXFIL:5;DNS_ANOMALY:1;PAYLOAD_HIT:2;SYN_FLOOD:1
+benign_iot23_doorlock,CTU-IoT-23,benign,Benign IoT Hardware Operations,iot23_honeypot_4_1.pcap,4594492,3fb775c0391b6ad313a3f7845e634a277b07c3f6377346c2486ba63e1c22e90c,21664,5.691,3807.0,0,
+benign_oisf_modbus,OISF-QA,benign,Benign SCADA Modbus Polling,oisf_modbus.pcap,8701,809e2bbded145ccf3491bbb7a1f7b04b3b296bcc6e98e0fbc08f20dfa85e0a7f,99,3.621,27.3,0,
+benign_ws_http,Wireshark-Sample,benign,Benign Web Browsing,ws_http_browsing.pcap,25803,25a72bdf10339f2c29916920c8b9501d294923108de8f29b19aba7cc001ab60d,43,3.648,11.8,0,
+benign_ws_skype_irc,Wireshark-Sample,benign,Benign Chat & Voice Telemetry,ws_skype_irc.pcap,420869,bac79a9c3413637f871193589d848697af895b7f2700d949022224d59aa6830f,2263,4.609,491.0,0,
+attack_ws_nmap_stealth,Wireshark-Sample,attack,TCP SYN Stealth Scan,ws_nmap_stealth_scan.pcap,157862,2eaca3a56fbdc1c95338ae85f00567fae41daa7d791293133094f544fe869459,2052,3.894,527.0,3,PORT_SCAN:1;SLOW_PORT_SCAN:1;TCP_FLAG_ANOMALY:1
+attack_ws_teardrop,Wireshark-Sample,attack,Overlapping IP Fragment Crash Attack,ws_teardrop.pcap,1828,e8e4193ae426dabf549cc103c9e93e7d93c6ae049ee9259f1ce2ebdb7315a683,17,3.78,4.5,1,IP_FRAGMENT_ANOMALY:1
+attack_ws_dns_remoteshell,Wireshark-Sample,attack,Non-DNS Backdoor on DNS Port 53,ws_dns_remoteshell.pcap,25005,8c89c0d2d5b91695a03d05a451897f583a99d2379afac0822af0d8f390163d95,131,3.948,33.2,3,DNS_ANOMALY:2;NON_DNS_TRAFFIC_ON_DNS_PORT:1
+attack_oisf_sni_anomaly,OISF-QA,attack,TLS SNI Mismatch / Malformed Handshake,oisf_tls_sni_anomaly.pcap,4020,da73184c5cacd3a509f8aaaa8628da19f172f478fae35cbfef45025339d78963,25,4.04,6.2,0,
+attack_oisf_syn_flood,OISF-QA,attack,High-Rate TCP SYN Flood DoS,oisf_syn_flood.pcap,14024,c8e0349e99229bd3b9a3a4dfb2122f0a9a5b6c9d234325fb6beb404197413441,200,3.705,54.0,1,SYN_FLOOD:1
+attack_ws_arp_storm,Wireshark-Sample,attack,ARP Spoofing / Poisoning Storm,ws_arp_storm.pcap,47296,dc101ea9bfda59f56b54bfb949195c3f169032c045b47f98e6952a86933c1b8d,622,3.691,168.5,0,
+attack_iot23_hakai,CTU-IoT-23,attack,Hakai Botnet Scanning & Telnet Brute Force,iot23_malware_8_1.pcap,2098362,80dcc2602519479ddcde889fa902fee19a76696630811452f8df38888af894f2,23623,5.997,3939.0,0,
+attack_foxit_log4shell,Fox-IT,attack,Log4Shell CVE-2021-44228 JNDI Injection,foxit_log4shell.pcap,56278,f328c22f25fa74f59628a2cc5abfaa180d677cdccb5bc3d309c53526fa65d9c0,403,3.722,108.3,1,PAYLOAD_HIT:1

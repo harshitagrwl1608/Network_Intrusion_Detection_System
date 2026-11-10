@@ -72,3 +72,4 @@ stats.log
 .DS_Store?
 ._*
 Thumbs.db
+results/real_world_evaluation/arp_tables/

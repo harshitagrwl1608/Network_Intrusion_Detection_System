@@ -1,0 +1,14 @@
+rule_name,total_alerts,attack_alerts,benign_alerts,captures_fired_count,captures_list
+ARP_SPOOF,117,117,0,1,ciciot_bruteforce
+BRUTE_FORCE,21,21,0,1,ciciot_bruteforce
+DATA_EXFIL,7,7,0,3,ciciot_pingsweep;ciciot_browserhijack;ciciot_bruteforce
+DNS_ANOMALY,34,34,0,6,ciciot_pingsweep;ciciot_sqli;ciciot_xss;ciciot_browserhijack;ciciot_bruteforce;attack_ws_dns_remoteshell
+ICMP_SWEEP,1,1,0,1,ciciot_pingsweep
+IP_FRAGMENT_ANOMALY,1,1,0,1,attack_ws_teardrop
+NON_DNS_TRAFFIC_ON_DNS_PORT,2,2,0,2,ciciot_cmdinj;attack_ws_dns_remoteshell
+PAYLOAD_HIT,78,78,0,7,ciciot_pingsweep;ciciot_sqli;ciciot_xss;ciciot_cmdinj;ciciot_upload;ciciot_bruteforce;attack_foxit_log4shell
+PORT_SCAN,1,1,0,1,attack_ws_nmap_stealth
+SLOW_PORT_SCAN,1,1,0,1,attack_ws_nmap_stealth
+SYN_FLOOD,2,2,0,2,ciciot_bruteforce;attack_oisf_syn_flood
+TCP_FLAG_ANOMALY,1,1,0,1,attack_ws_nmap_stealth
+UDP_FLOOD,1,1,0,1,ciciot_browserhijack
