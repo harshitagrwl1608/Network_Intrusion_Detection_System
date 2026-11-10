@@ -157,7 +157,7 @@ Open your browser and navigate to **`http://127.0.0.1:5000`** to access the SOC 
 
 ## 🔍 The 23 Detection Rules At a Glance
 
-NetGuard inspects every packet across **23 registered detection rules** (no early-exit truncation):
+NetGuard maintains **23 registered detection rules**. For each incoming packet, `RuleEngine` selects protocol-compatible candidate rules via `_rules_by_proto` and executes them sequentially without early exit among the selected candidates (unknown or unclassified protocols fall back to evaluating all 23 rules). For full architectural details, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/DETECTION_ENGINE.md](docs/DETECTION_ENGINE.md):
 
 | Category | Rules | Key Capabilities |
 |---|---|---|
@@ -191,11 +191,18 @@ NetGuard's detection efficacy is verified across multiple empirical tiers:
 1. **Unit & Regression Suite:** **854 passed** tests across 42 modules (`ids_project/tests/`).
 2. **Controlled Synthetic Scenarios:** **42 / 42** attack scenarios detected; **0 false positives** on benign traffic (`run_eval.py`).
 3. **Multi-Dataset Ground-Truth Benchmark (22 PCAPs, 3.24 GiB, 37.5M packets):**
-   - Replay across GeNIS, CICIoT2023, CTU-IoT-23, Wireshark sample captures, and Fox-IT Log4Shell honeypots.
+   - Replay across GeNIS, CICIoT2023, CTU-IoT-23, Wireshark sample captures, and Fox-IT Log4Shell honeypots (582 total alerts reconciled across 156 flow TPs, 137 benign FPs, 26 unscorable, 263 scenario-level, and 0 unmatched).
    - **156 Flow True Positives** verified against published 5-tuple ground-truth labels.
-   - **263 Scenario-Level True Positives** confirmed in capture-level attack scenarios.
+   - **263 scenario-level alerts** occurred in attack-labelled captures. Individual alert-to-ground-truth attribution is unavailable for these captures, so they are not counted as flow-verified true positives.
    - Detailed per-rule confusion matrices and throughput statistics recorded in [docs/EVALUATION_RESULTS.md](docs/EVALUATION_RESULTS.md).
-4. **DPI Hardening Verification:** Reduced false-positive alerts on real-world benign user traffic (`genis_benign_user_activity`) from **8 to 0 (-100% FP elimination)** while preserving 100% of true attack detections across SQLi, XSS, webshells, and Log4Shell.
+4. **DPI Hardening Verification (6 Evaluated Captures):**
+   - **Benign FP Elimination:** Reduced false-positive SQLi alerts in benign email/web browsing (`genis_benign_user_activity`) from **8 to 0 (-100% FP elimination)**.
+   - **Capture-Specific Attack Verification:**
+     - `ciciot_sqli`: **48 alerts** (`PAYLOAD_HIT` SQL injection).
+     - `ciciot_xss`: **19 alerts** (`PAYLOAD_HIT` cross-site scripting).
+     - `ciciot_upload`: **8 alerts** (`PAYLOAD_HIT` webshell upload and path traversal; spurious SQLi eliminated).
+     - `ciciot_cmdinj`: Spurious SQLi removed; attack detection preserved via **`NON_DNS_TRAFFIC_ON_DNS_PORT`**.
+     - `attack_foxit_log4shell`: **1 alert** (`PAYLOAD_HIT` CVE-2021-44228 JNDI/LDAP RCE).
 
 ---
 

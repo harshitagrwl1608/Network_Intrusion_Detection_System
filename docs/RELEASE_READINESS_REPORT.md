@@ -121,7 +121,7 @@ NetGuard's reporting pipeline ([`ids_project/evaluation/reporting/validator.py`]
 - **Flow True Positives (TP):** **156** alerts (verified against 5-tuple ground-truth labels and time intervals).
 - **Benign False Positives (FP):** **137** alerts (observed in benign baseline captures).
 - **Unscorable Incidental:** **26** alerts (incidental traffic or incomplete GT labels).
-- **Scenario-Level Alerts:** **263** alerts (CICIoT2023 web attacks, Wireshark, Fox-IT; presence confirmed on target rules).
+- **Scenario-Level Alerts:** **263** alerts (occurred in attack-labelled captures across CICIoT2023, Wireshark, Fox-IT; individual alert-to-ground-truth attribution is unavailable for these captures, so they are not counted as flow-verified true positives).
 - **Unmatched Attack Alerts:** **0** alerts.
 - **Reconciliation:** $156 + 137 + 26 + 263 + 0 = \mathbf{582}$ alerts (exact 100% reconciliation).
 
