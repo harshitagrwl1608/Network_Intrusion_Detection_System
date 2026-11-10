@@ -488,13 +488,36 @@ def build_per_alert_row(alert_dict: dict, syn_count: int, rec_targets: int,
     ]
 
 
+def match_scan_target(ascan_type: str, asrc: str, adip: str, adport: int,
+                      sip: str, dip: str, dport: int) -> Tuple[bool, Any]:
+    """
+    Explicitly match packet against scan alert boundaries.
+    Rejects missing or invalid scan types explicitly (fails closed).
+    Returns (matches_alert, target_val).
+    """
+    if ascan_type == "vertical":
+        if sip == asrc and dip == adip:
+            return True, dport
+        return False, None
+    elif ascan_type == "horizontal":
+        if sip == asrc and dport == adport:
+            return True, dip
+        return False, None
+    else:
+        # Invalid or missing scan type: reject explicitly, fail closed
+        return False, None
+
+
 def assess_alert_retransmission(aid: int, window_start: float, window_end: float,
                                 threshold: int, matched_flows_for_alert: list,
                                 corroborated_targets_count: int) -> dict:
     """
     Assess retransmission status strictly per-alert using its own matched flows.
-    An alert is an alert-specific retransmission case if its qualifying packets
-    belong to flows initiated prior to window_start (flow_start < window_start <= pkt_ts <= flow_end).
+    A qualifying packet for retransmission must satisfy:
+      1. window_start <= pkt_ts <= window_end (within alert window boundaries)
+      2. flow_start <= pkt_ts <= flow_end (within matched Zeek flow lifetime)
+      3. flow_start < window_start (flow initiated strictly prior to the alert window)
+    Packets outside the alert window or outside the flow lifetime are rejected as invalid attribution evidence.
     """
     if not matched_flows_for_alert:
         return {
@@ -502,17 +525,48 @@ def assess_alert_retransmission(aid: int, window_start: float, window_end: float
             "status": "NO_MATCHED_FLOWS",
             "is_retransmission_case": False,
             "decision": "UNRESOLVED_TIER_D_OR_E",
+            "flows_before_window_count": 0,
+            "flows_in_window_count": 0,
+            "invalid_packets_count": 0,
+            "corroborated_targets_count": corroborated_targets_count,
+            "threshold": threshold,
         }
 
-    # Flow item: (flow_start, flow_end, uid, label, detailed_label, pkt_ts)
-    flows_before_window = [f for f in matched_flows_for_alert if f[0] < window_start]
-    flows_in_window = [f for f in matched_flows_for_alert if f[0] >= window_start]
+    valid_retransmission_flows = []
+    valid_fresh_flows = []
+    invalid_packets = []
 
-    is_retransmission_case = len(flows_before_window) > 0 and len(flows_in_window) == 0
+    for f in matched_flows_for_alert:
+        # Tuple format: (flow_start, flow_end, uid, label, detailed_label, pkt_ts)
+        flow_start, flow_end, uid, label, detailed_label, pkt_ts = f
+
+        # Boundary check 1: Packet must fall within the alert window boundaries [window_start, window_end]
+        if pkt_ts < window_start or pkt_ts > window_end:
+            invalid_packets.append(f)
+            continue
+
+        # Boundary check 2: Packet must fall within the flow's recorded lifetime [flow_start, flow_end]
+        if flow_end is not None and (pkt_ts < flow_start or pkt_ts > flow_end):
+            invalid_packets.append(f)
+            continue
+
+        # Flow started prior to the alert window
+        if flow_start < window_start:
+            valid_retransmission_flows.append(f)
+        else:
+            valid_fresh_flows.append(f)
+
+    # An alert is a genuine retransmission case if all valid in-window packets belong
+    # to flows initiated before window_start (i.e. zero fresh flow starts in the window)
+    is_retransmission_case = len(valid_retransmission_flows) > 0 and len(valid_fresh_flows) == 0
 
     if not is_retransmission_case:
-        status = "NORMAL_FLOW_STARTS_IN_WINDOW" if len(flows_in_window) > 0 else "NO_FLOWS"
-        decision = "NORMAL"
+        if len(valid_fresh_flows) > 0:
+            status = "NORMAL_FLOW_STARTS_IN_WINDOW"
+            decision = "NORMAL"
+        else:
+            status = "NO_VALID_IN_WINDOW_FLOWS"
+            decision = "UNRESOLVED_TIER_D_OR_E"
     else:
         status = "RETRANSMISSION_CASE"
         if threshold is not None and corroborated_targets_count >= threshold:
@@ -526,8 +580,9 @@ def assess_alert_retransmission(aid: int, window_start: float, window_end: float
         "alert_id": aid,
         "status": status,
         "is_retransmission_case": is_retransmission_case,
-        "flows_before_window_count": len(flows_before_window),
-        "flows_in_window_count": len(flows_in_window),
+        "flows_before_window_count": len(valid_retransmission_flows),
+        "flows_in_window_count": len(valid_fresh_flows),
+        "invalid_packets_count": len(invalid_packets),
         "corroborated_targets_count": corroborated_targets_count,
         "threshold": threshold,
         "decision": decision,
@@ -621,15 +676,8 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             except (ValueError, TypeError):
                 pass
         else:
-            # Defensively check both if scan_type is absent
-            try:
-                p = int(dport)
-                if 1 <= p <= 65535 and sip:
-                    target_horizontal_keys.add((sip, p))
-            except (ValueError, TypeError):
-                pass
-            if sip and dip:
-                target_vertical_keys.add((sip, dip))
+            # Explicitly reject missing, unknown, or invalid scan types (fail closed)
+            continue
 
     if not target_horizontal_keys and not target_vertical_keys:
         raise ValueError(
@@ -823,16 +871,9 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
 
             # Check matching alerts
             for wstart, wend, aid, asrc, adip, adport, athr, ascan_type in active_candidates:
-                if ascan_type == "vertical":
-                    matches_alert = (sip == asrc and dip == adip)
-                    target_val = dport
-                elif ascan_type == "horizontal":
-                    matches_alert = (sip == asrc and dport == adport)
-                    target_val = dip
-                else:
-                    # Missing or unknown scan type: fail closed, do not match
-                    matches_alert = False
-                    target_val = None
+                matches_alert, target_val = match_scan_target(
+                    ascan_type, asrc, adip, adport, sip, dip, dport
+                )
 
                 if matches_alert:
                     alert_valid_syn_counts[aid] += 1

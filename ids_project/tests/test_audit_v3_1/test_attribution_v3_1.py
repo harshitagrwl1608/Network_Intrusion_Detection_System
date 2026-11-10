@@ -25,6 +25,7 @@ from scripts.audits.ctu48_1_ground_truth_audit_v3_1 import (
     build_arp_alert_row,
     build_per_alert_row,
     assess_alert_retransmission,
+    match_scan_target,
 )
 
 
@@ -338,6 +339,122 @@ def test_17_per_alert_retransmission_association():
     )
     assert res_normal["is_retransmission_case"] is False
     assert res_normal["decision"] == "NORMAL"
+
+
+def test_17b_retransmission_boundary_conditions():
+    """17b. Test assess_alert_retransmission against packet timestamp and flow lifetime boundaries."""
+    window_start = 1002.0
+    window_end = 1002.2
+
+    # Case 1: Packet before window start (pkt_ts < window_start) -> invalid, rejected
+    flows_before = [
+        (1000.0, 1003.0, "Cbefore", "Malicious", "PartOfAHorizontalPortScan", 1001.99)
+    ]
+    res_before = assess_alert_retransmission(
+        aid=10, window_start=window_start, window_end=window_end,
+        threshold=1, matched_flows_for_alert=flows_before,
+        corroborated_targets_count=1
+    )
+    assert res_before["is_retransmission_case"] is False
+    assert res_before["invalid_packets_count"] == 1
+    assert res_before["status"] == "NO_VALID_IN_WINDOW_FLOWS"
+
+    # Case 2: Packet after window end (pkt_ts > window_end) -> invalid, rejected
+    flows_after = [
+        (1000.0, 1003.0, "Cafter", "Malicious", "PartOfAHorizontalPortScan", 1002.21)
+    ]
+    res_after = assess_alert_retransmission(
+        aid=11, window_start=window_start, window_end=window_end,
+        threshold=1, matched_flows_for_alert=flows_after,
+        corroborated_targets_count=1
+    )
+    assert res_after["is_retransmission_case"] is False
+    assert res_after["invalid_packets_count"] == 1
+    assert res_after["status"] == "NO_VALID_IN_WINDOW_FLOWS"
+
+    # Case 3: Packet outside flow lifetime (pkt_ts < flow_start or pkt_ts > flow_end) -> invalid, rejected
+    flows_outside_lifetime = [
+        (1002.05, 1002.10, "Cexpired", "Malicious", "PartOfAHorizontalPortScan", 1002.15)
+    ]
+    res_expired = assess_alert_retransmission(
+        aid=12, window_start=window_start, window_end=window_end,
+        threshold=1, matched_flows_for_alert=flows_outside_lifetime,
+        corroborated_targets_count=1
+    )
+    assert res_expired["is_retransmission_case"] is False
+    assert res_expired["invalid_packets_count"] == 1
+
+    # Case 4: Packet exactly at window_start boundary (pkt_ts == window_start) -> accepted
+    flows_exact_start = [
+        (1000.0, 1003.0, "Cstart", "Malicious", "PartOfAHorizontalPortScan", 1002.0)
+    ]
+    res_exact_start = assess_alert_retransmission(
+        aid=13, window_start=window_start, window_end=window_end,
+        threshold=1, matched_flows_for_alert=flows_exact_start,
+        corroborated_targets_count=1
+    )
+    assert res_exact_start["is_retransmission_case"] is True
+    assert res_exact_start["flows_before_window_count"] == 1
+    assert res_exact_start["invalid_packets_count"] == 0
+    assert res_exact_start["decision"] == "RESOLVED_TIER_A"
+
+    # Case 5: Packet exactly at window_end boundary (pkt_ts == window_end) -> accepted
+    flows_exact_end = [
+        (1000.0, 1003.0, "Cend", "Malicious", "PartOfAHorizontalPortScan", 1002.2)
+    ]
+    res_exact_end = assess_alert_retransmission(
+        aid=14, window_start=window_start, window_end=window_end,
+        threshold=1, matched_flows_for_alert=flows_exact_end,
+        corroborated_targets_count=1
+    )
+    assert res_exact_end["is_retransmission_case"] is True
+    assert res_exact_end["flows_before_window_count"] == 1
+    assert res_exact_end["invalid_packets_count"] == 0
+    assert res_exact_end["decision"] == "RESOLVED_TIER_A"
+
+    # Case 6: Flow starts before window, but packet timestamp is outside window -> NOT sufficient
+    flows_start_only = [
+        (1000.0, 1005.0, "Cinsufficient", "Malicious", "PartOfAHorizontalPortScan", 1002.25)
+    ]
+    res_insufficient = assess_alert_retransmission(
+        aid=15, window_start=window_start, window_end=window_end,
+        threshold=1, matched_flows_for_alert=flows_start_only,
+        corroborated_targets_count=1
+    )
+    assert res_insufficient["is_retransmission_case"] is False
+    assert res_insufficient["status"] == "NO_VALID_IN_WINDOW_FLOWS"
+
+
+def test_17c_match_scan_target_execution():
+    """17c. Verify horizontal and vertical scan matching via actual helper execution."""
+    asrc = "192.168.1.100"
+    adip = "10.0.0.5"
+    adport = 80
+
+    # Horizontal: matching src and dport -> matches, returns target dip
+    m_h, tgt_h = match_scan_target("horizontal", asrc, adip, adport, asrc, "10.0.0.99", adport)
+    assert m_h is True
+    assert tgt_h == "10.0.0.99"
+
+    # Horizontal: mismatched dport -> does not match
+    m_h_fail, _ = match_scan_target("horizontal", asrc, adip, adport, asrc, "10.0.0.99", 443)
+    assert m_h_fail is False
+
+    # Vertical: matching src and dip -> matches, returns target dport
+    m_v, tgt_v = match_scan_target("vertical", asrc, adip, adport, asrc, adip, 8080)
+    assert m_v is True
+    assert tgt_v == 8080
+
+    # Vertical: mismatched dip -> does not match
+    m_v_fail, _ = match_scan_target("vertical", asrc, adip, adport, asrc, "10.0.0.99", 8080)
+    assert m_v_fail is False
+
+    # Fail closed on missing, empty, or unknown scan types
+    assert match_scan_target(None, asrc, adip, adport, asrc, adip, 80) == (False, None)
+    assert match_scan_target("", asrc, adip, adport, asrc, adip, 80) == (False, None)
+    assert match_scan_target("unknown", asrc, adip, adport, asrc, adip, 80) == (False, None)
+    assert match_scan_target("stealth", asrc, adip, adport, asrc, adip, 80) == (False, None)
+    assert match_scan_target("horizontal_invalid", asrc, adip, adport, asrc, adip, 80) == (False, None)
 
 
 def test_18_concurrent_overlapping_flow_candidates():

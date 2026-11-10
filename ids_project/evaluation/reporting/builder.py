@@ -103,11 +103,13 @@ class ReportBuilder:
 
         # 2. Provenance and Input Verification
         md.append("## 2. Input Provenance & Cryptographic Verification")
-        md.append("| Input Component | File Name | Size (Bytes) | SHA-256 Digest | Status |")
-        md.append("| :--- | :--- | :--- | :--- | :--- |")
-        md.append(f"| **PCAP Capture** | `{p.pcap_file}` | {p.pcap_size_bytes:,} | `{p.pcap_sha256}` | **VERIFIED** |")
-        md.append(f"| **Ground Truth** | `{p.ground_truth_file}` | {p.ground_truth_size_bytes:,} | `{p.ground_truth_sha256}` | **VERIFIED** |")
-        md.append(f"| **Evaluation DB** | `{p.db_file}` | {p.db_size_bytes:,} | `{p.db_sha256}` | **VERIFIED** |")
+        md.append("| Input Component | File Name | Size (Bytes) | SHA-256 Digest (File Integrity) | Recorded Source / Origin | Ground-Truth Correspondence |")
+        md.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
+        md.append(f"| **PCAP Capture** | `{p.pcap_file}` | {p.pcap_size_bytes:,} | `{p.pcap_sha256}` | Official Publisher Capture | Observable Network Packets |")
+        md.append(f"| **Ground Truth** | `{p.ground_truth_file}` | {p.ground_truth_size_bytes:,} | `{p.ground_truth_sha256}` | Official Publisher Flow Logs | Flow-Level Ground Truth |")
+        md.append(f"| **Evaluation DB** | `{p.db_file}` | {p.db_size_bytes:,} | `{p.db_sha256}` | NetGuard Replay Execution | Emitted Alert Records |")
+        md.append("")
+        md.append("> **Cryptographic Integrity & Provenance Distinctions:** SHA-256 digests confirm bit-level file integrity and local uncorrupted persistence on disk. Hashes alone do not authenticate external publisher provenance or independently validate ground-truth correctness.")
         md.append("")
         md.append(f"- **Git Commit:** `{p.git_commit}` (branch `{p.git_branch}`)")
         md.append(f"- **Engine Fingerprint:** `{p.engine_fingerprint}`\n")

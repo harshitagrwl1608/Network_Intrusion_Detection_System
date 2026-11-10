@@ -6,8 +6,13 @@ Exercises the real ReportBuilder and EvaluationValidator against synthetic fixtu
 import csv
 import json
 import os
+import sys
 import tempfile
 import pytest
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from ids_project.evaluation.reporting import (
     UnitOfAnalysis,
@@ -233,3 +238,115 @@ def test_07_export_hashes_updated_after_close(tmp_path):
     assert res.export_files["export.csv"]["sha256"] == expected_hash
     assert res.export_files["export.csv"]["size_bytes"] == len(content.encode("utf-8"))
 
+
+def test_08_missing_csv_directory_fails_closed():
+    """Gate 5: Missing CSV directory when exports are declared must fail closed."""
+    res = EvaluationResult(
+        audit_name="Test Audit",
+        audit_version="1.0",
+        timestamp_utc="2026-11-10T00:00:00Z",
+        provenance=_make_dummy_provenance(),
+        total_alerts=10,
+        tier_counts={"TIER_A": 10},
+        export_files={"missing.csv": {"row_count": 10}},
+    )
+    validator = EvaluationValidator(res)
+    # csv_dir is None
+    passed, errors, _ = validator.validate_all(csv_dir=None)
+    assert not passed
+    assert any("Required export directory is missing" in e for e in errors)
+
+    # csv_dir does not exist
+    passed2, errors2, _ = validator.validate_all(csv_dir="/nonexistent/directory/path")
+    assert not passed2
+    assert any("Required export directory is missing" in e for e in errors2)
+
+
+def test_09_csv_size_and_sha_mismatch_fails(tmp_path):
+    """Gate 5: Mismatched size or SHA-256 hash on disk must fail closed."""
+    csv_file = tmp_path / "alerts.csv"
+    content = "col1,col2\nv1,v2\n"
+    csv_file.write_text(content, encoding="utf-8")
+
+    # Mismatched size
+    res_bad_size = EvaluationResult(
+        audit_name="Test",
+        audit_version="1.0",
+        timestamp_utc="2026-11-10T00:00:00Z",
+        provenance=_make_dummy_provenance(),
+        total_alerts=1,
+        tier_counts={"TIER_A": 1},
+        export_files={"alerts.csv": {"row_count": 1, "size_bytes": 99999}},
+    )
+    v_size = EvaluationValidator(res_bad_size)
+    passed_sz, errors_sz, _ = v_size.validate_all(csv_dir=str(tmp_path))
+    assert not passed_sz
+    assert any("Recorded size (99999) != actual file size" in e for e in errors_sz)
+
+    # Mismatched SHA-256
+    res_bad_sha = EvaluationResult(
+        audit_name="Test",
+        audit_version="1.0",
+        timestamp_utc="2026-11-10T00:00:00Z",
+        provenance=_make_dummy_provenance(),
+        total_alerts=1,
+        tier_counts={"TIER_A": 1},
+        export_files={"alerts.csv": {"row_count": 1, "size_bytes": len(content.encode("utf-8")), "sha256": "0" * 64}},
+    )
+    v_sha = EvaluationValidator(res_bad_sha)
+    passed_sha, errors_sha, _ = v_sha.validate_all(csv_dir=str(tmp_path))
+    assert not passed_sha
+    assert any("Recorded SHA-256" in e for e in errors_sha)
+
+
+def test_10_json_markdown_consistency_validation(tmp_path):
+    """Gate 6: Consistency between canonical JSON and Markdown outputs is validated."""
+    prov = _make_dummy_provenance()
+    res = EvaluationResult(
+        audit_name="Canonical Consistency Test",
+        audit_version="1.0",
+        timestamp_utc="2026-11-10T12:00:00Z",
+        provenance=prov,
+        total_alerts=20,
+        tier_counts={"TIER_A": 15, "TIER_B": 5},
+        verdict=EvaluationVerdict.SUPPORTED_WITH_LIMITATIONS,
+    )
+    builder = ReportBuilder(res)
+    json_path = tmp_path / "summary.json"
+    md_path = tmp_path / "report.md"
+
+    builder.write_json_summary(str(json_path))
+    builder.write_markdown_report(str(md_path))
+
+    validator = EvaluationValidator(res)
+    passed, errors, _ = validator.validate_all(json_path=str(json_path), markdown_path=str(md_path))
+    assert passed
+    assert len(errors) == 0
+
+    # Introduce discrepancy in Markdown (e.g. tamper with verdict)
+    md_tampered = tmp_path / "report_tampered.md"
+    md_tampered.write_text("# Report\nVerdict: INCONCLUSIVE\nTotal: 20\n", encoding="utf-8")
+    passed_t, errors_t, _ = validator.validate_all(json_path=str(json_path), markdown_path=str(md_tampered))
+    assert not passed_t
+    assert any("consistency failure" in e for e in errors_t)
+
+
+def test_11_provenance_distinguishes_hashing_and_no_hardcoded_verified():
+    """Gate 9: Markdown report explicitly distinguishes hashing from provenance without bare VERIFIED."""
+    res = EvaluationResult(
+        audit_name="Provenance Audit",
+        audit_version="1.0",
+        timestamp_utc="2026-11-10T00:00:00Z",
+        provenance=_make_dummy_provenance(),
+        total_alerts=10,
+        tier_counts={"TIER_A": 10},
+    )
+    builder = ReportBuilder(res)
+    md = builder.generate_markdown_report()
+
+    # Must contain provenance distinction note
+    assert "Cryptographic Integrity & Provenance Distinctions" in md
+    assert "SHA-256 digests confirm bit-level file integrity" in md
+
+    # Must not contain bare hardcoded '| **VERIFIED** |' in provenance table
+    assert "| **VERIFIED** |" not in md
