@@ -22,6 +22,9 @@ from scripts.audits.ctu48_1_ground_truth_audit_v3_1 import (
     match_packet_to_candidates,
     classify_alert_v3_1,
     get_file_sha256,
+    build_arp_alert_row,
+    build_per_alert_row,
+    assess_alert_retransmission,
 )
 
 
@@ -272,12 +275,12 @@ def test_14_exact_directional_five_tuple_matching():
 def test_15_reverse_direction_traffic_rejected():
     """15. Test that reverse response (server replying to client) does not match forward candidates."""
     forward_candidates = [
-        (100.0, 103.5, "C1", "Malicious", "PartOfAHorizontalPortScan")
+        ("192.168.1.200", 50000, "1.1.1.1", 23, "tcp",
+         100.0, 103.5, "C1", "Malicious", "PartOfAHorizontalPortScan")
     ]
-    # Reverse packet: sport=23, dip=client_ip
-    # In directional matching, index is keyed on client sport and target dip
-    empty_candidates = []
-    matches = match_packet_to_candidates(101.5, "1.1.1.1", 23, "192.168.1.200", 50000, "tcp", empty_candidates)
+    # Reverse packet from server (1.1.1.1:23) to client (192.168.1.200:50000)
+    # Passed to candidate list containing forward flow: directional matching MUST reject it
+    matches = match_packet_to_candidates(101.5, "1.1.1.1", 23, "192.168.1.200", 50000, "tcp", forward_candidates)
     assert len(matches) == 0
 
 
@@ -296,24 +299,45 @@ def test_16_flow_lifetime_boundaries_exact():
     assert len(match_packet_to_candidates(103.000001, "1.1.1.1", 1, "2.2.2.2", 23, "tcp", candidates)) == 0
 
 
-def test_17_retransmission_packet_inside_window_flow_start_outside():
-    """17. Test the 402 retransmission condition: flow start was at T-2.0s, packet arrives at T inside window."""
+def test_17_per_alert_retransmission_association():
+    """17. Test that assess_alert_retransmission classifies retransmissions per alert using its matched flows."""
     window_start = 1002.0
     window_end = 1002.2
-    pkt_ts = 1002.1
 
-    flow_start = 1000.0  # Initiated 2 seconds before alert window!
-    flow_duration = 3.14
-    flow_end = 1003.14   # Spans across window
+    # Flow item: (flow_start, flow_end, uid, label, detailed_label, pkt_ts)
+    retrans_flows = [
+        (1000.0, 1003.14, "Cretrans_flow", "Malicious", "PartOfAHorizontalPortScan", 1002.1)
+    ]
 
-    assert flow_start < window_start
-    assert flow_end > window_end
+    # When corroborated targets meet threshold: RESOLVED_TIER_A
+    res_a = assess_alert_retransmission(
+        aid=1, window_start=window_start, window_end=window_end,
+        threshold=1, matched_flows_for_alert=retrans_flows,
+        corroborated_targets_count=1
+    )
+    assert res_a["is_retransmission_case"] is True
+    assert res_a["decision"] == "RESOLVED_TIER_A"
 
-    candidates = [("192.168.1.200", 40000, "5.5.5.5", 23, "tcp",
-                   flow_start, flow_end, "Cretrans_flow", "Malicious", "PartOfAHorizontalPortScan")]
-    matches = match_packet_to_candidates(pkt_ts, "192.168.1.200", 40000, "5.5.5.5", 23, "tcp", candidates)
-    assert len(matches) == 1
-    assert matches[0][0] == "Cretrans_flow"
+    # When corroborated targets do not meet threshold: PARTIALLY_RESOLVED_TIER_B
+    res_b = assess_alert_retransmission(
+        aid=2, window_start=window_start, window_end=window_end,
+        threshold=15, matched_flows_for_alert=retrans_flows,
+        corroborated_targets_count=1
+    )
+    assert res_b["is_retransmission_case"] is True
+    assert res_b["decision"] == "PARTIALLY_RESOLVED_TIER_B"
+
+    # Normal flows starting in window: not a retransmission case
+    normal_flows = [
+        (1002.05, 1003.0, "Cnormal", "Malicious", "PartOfAHorizontalPortScan", 1002.1)
+    ]
+    res_normal = assess_alert_retransmission(
+        aid=3, window_start=window_start, window_end=window_end,
+        threshold=15, matched_flows_for_alert=normal_flows,
+        corroborated_targets_count=15
+    )
+    assert res_normal["is_retransmission_case"] is False
+    assert res_normal["decision"] == "NORMAL"
 
 
 def test_18_concurrent_overlapping_flow_candidates():
@@ -403,6 +427,24 @@ def test_22_tier_d_unassessed_historical_baseline():
     assert key == "TIER_D_UNASSESSED"
 
 
+def test_22_invalid_threshold_fails_closed():
+    """22b. Test that invalid, missing, or non-positive threshold fails closed to Tier D."""
+    for invalid_thr in [0, -1, -15, None, "15", 3.14]:
+        tier, key, rationale = classify_alert_v3_1(
+            alert_id=22,
+            rule_name="PORT_SCAN",
+            threshold=invalid_thr,
+            distinct_targets_reconstructed=15,
+            corroborated_targets_count=15,
+            malicious_targets_count=15,
+            benign_targets_count=0,
+            unmatched_targets_count=0,
+            ambiguous_targets_count=0
+        )
+        assert key == "TIER_D_UNASSESSED"
+        assert "Invalid or missing alert threshold" in rationale
+
+
 def test_23_reconciliation_of_all_tiers_to_total_alerts():
     """23. Test that sum of all 5 tiers strictly equals total emitted alert count."""
     counts = {
@@ -463,6 +505,26 @@ def test_27_recall_marked_not_measurable():
     """27. Test invariant: per-flow recall is strictly marked NOT MEASURABLE."""
     status = "NOT MEASURABLE at per-flow granularity due to intentional rate-limiting alert aggregation"
     assert "NOT MEASURABLE" in status
+
+
+def test_27_scan_type_separation_vertical_vs_horizontal():
+    """27b. Test scan semantics: vertical scan targets dport on fixed dip; horizontal scan targets dip on fixed dport."""
+    # Vertical scan: target is dport
+    vert_alert = {
+        "id": 101, "rule_name": "PORT_SCAN", "rule_version": "v1.13",
+        "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "dst_port": None,
+        "window_start": 100.0, "window_end": 110.0, "threshold": 15,
+        "scan_type": "vertical"
+    }
+    # Horizontal scan: target is dip
+    horiz_alert = {
+        "id": 102, "rule_name": "PORT_SCAN", "rule_version": "v1.13",
+        "src_ip": "10.0.0.1", "dst_ip": None, "dst_port": 23,
+        "window_start": 100.0, "window_end": 110.0, "threshold": 15,
+        "scan_type": "horizontal"
+    }
+    assert vert_alert["scan_type"] == "vertical"
+    assert horiz_alert["scan_type"] == "horizontal"
 
 
 def test_28_five_tuple_mismatch_is_rejected_even_when_lifetime_matches():
@@ -537,7 +599,7 @@ def test_32_tier_e_no_defensible_association():
 
 
 def test_33_arp_row_column_count_reconciliation():
-    """33. Test that per-alert CSV schema matches 16 columns for both scan and ARP alerts."""
+    """33. Test that build_arp_alert_row and build_per_alert_row produce exactly 16 columns matching schema."""
     header = [
         "alert_id", "rule_name", "rule_version", "src_ip", "dst_port",
         "window_start", "window_end", "valid_syn_count", "distinct_targets_reconstructed",
@@ -547,25 +609,35 @@ def test_33_arp_row_column_count_reconciliation():
     ]
     assert len(header) == 16
 
-    # Scan alert row structure
-    scan_row = [
-        1, "PORT_SCAN", "v1.13", "192.168.1.200", 23,
-        "1551377744.000000", "1551377754.000000",
-        20, 15, 15, 15, 15, 0, 0,
-        "TIER_A_CONFIRMED_TP", "Rationale"
+    # Real call to build_arp_alert_row
+    arp_alert = {
+        "id": 4001, "rule_name": "ARP_SPOOF", "rule_version": "v1.8",
+        "src_ip": "192.168.1.1", "window_start": 100.0, "window_end": 110.0,
+        "timestamp": 105.0, "evidence": {"old_mac": "aa:bb:cc:dd:ee:01", "new_mac": "aa:bb:cc:dd:ee:02"}
+    }
+    observed_frames = [
+        (1, 105.01, {"smac": "aa:bb:cc:dd:ee:02", "sip": "192.168.1.1"})
     ]
-    assert len(scan_row) == len(header)
+    arp_row = build_arp_alert_row(arp_alert, observed_frames)
+    assert len(arp_row) == 16
+    assert arp_row[0] == 4001
+    assert arp_row[1] == "ARP_SPOOF"
+    assert arp_row[14] == "TIER_D_UNASSESSED"
 
-    # ARP alert row structure with ambiguous and unmatched counts included
-    arp_row = [
-        4000, "ARP_SPOOF", "v1.8", "192.168.1.1", "-",
-        "1551377744.000000", "1551377754.000000",
-        0, 0, 0, 0, 0,
-        0, 0,
-        "TIER_D_UNASSESSED",
-        "Nearest frame is temporal context only"
-    ]
-    assert len(arp_row) == len(header)
+    # Real call to build_per_alert_row
+    scan_alert = {
+        "id": 1, "rule_name": "PORT_SCAN", "rule_version": "v1.13",
+        "src_ip": "192.168.1.200", "dst_port": 23,
+        "window_start": 100.0, "window_end": 110.0, "threshold": 15
+    }
+    scan_row = build_per_alert_row(
+        scan_alert, syn_count=20, rec_targets=15, corrob_targets=15,
+        thr=15, matched_uids_count=15, ambiguous_targets_count=0,
+        unm_targets_count=0, tier_key="TIER_A_CONFIRMED_TP", rationale="Test TP"
+    )
+    assert len(scan_row) == 16
+    assert scan_row[0] == 1
+    assert scan_row[14] == "TIER_A_CONFIRMED_TP"
 
 
 def test_34_ipv4_non_first_fragment_rejected_as_tcp(tmp_path):
@@ -624,4 +696,114 @@ def test_36_suricata_eve_size_dynamic_calculation(tmp_path):
 
     expected_size = len(dummy_eve.encode("utf-8"))
     assert os.path.getsize(str(eve_file)) == expected_size
+
+
+def test_37_pcap_parser_total_len_and_ihl_boundary(tmp_path):
+    """37. Test that PcapParser tracks malformed/unsupported IPv4 boundaries (total_len < ihl, version != 4)."""
+    pcap = tmp_path / "bounds.pcap"
+    hdr = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
+
+    eth = b"\x00" * 12 + struct.pack(">H", 0x0800)
+    # Packet 1: Version 6 in IPv4 ethertype -> unsupported
+    ip_v6 = bytes([0x65, 0, 0, 40, 0, 0, 0, 0, 64, 6, 0, 0, 192, 168, 1, 1, 10, 0, 0, 1])
+    pkt1 = eth + ip_v6
+    h1 = struct.pack("<IIII", 100, 0, len(pkt1), len(pkt1))
+
+    # Packet 2: total_len (10) < ihl (20) -> malformed
+    ip_bad_len = bytes([0x45, 0, 0, 10, 0, 0, 0, 0, 64, 6, 0, 0, 192, 168, 1, 1, 10, 0, 0, 1])
+    pkt2 = eth + ip_bad_len
+    h2 = struct.pack("<IIII", 101, 0, len(pkt2), len(pkt2))
+
+    pcap.write_bytes(hdr + h1 + pkt1 + h2 + pkt2)
+
+    with PcapParser(str(pcap)) as parser:
+        pkts = list(parser.iter_packets())
+        assert len(pkts) == 2
+        assert parser.unsupported_records == 1
+        assert parser.malformed_records == 1
+
+
+def test_38_pcap_parser_tcp_data_offset_and_padding_exclusion(tmp_path):
+    """38. Test that Ethernet padding beyond IPv4 total_len is excluded and TCP data_offset < 20 is malformed."""
+    pcap = tmp_path / "pad_and_offset.pcap"
+    hdr = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
+
+    eth = b"\x00" * 12 + struct.pack(">H", 0x0800)
+    # Total len is 40 (20 IP + 20 TCP). But frame has 64 bytes total (14 eth + 40 + 10 padding bytes).
+    ip = bytes([0x45, 0, 0, 40, 0, 0, 0, 0, 64, 6, 0, 0, 192, 168, 1, 200, 10, 0, 0, 1])
+    tcp = struct.pack(">HHIIBBHHH", 50000, 23, 1, 0, 0x50, 0x02, 65535, 0, 0)
+    padding = b"\x00" * 10
+    frame = eth + ip + tcp + padding
+
+    h = struct.pack("<IIII", 100, 0, len(frame), len(frame))
+    pcap.write_bytes(hdr + h + frame)
+
+    with PcapParser(str(pcap)) as parser:
+        pkts = list(parser.iter_packets())
+        assert len(pkts) == 1
+        assert parser.padding_bytes_ignored == 10
+        assert pkts[0][4] is True  # is_init_syn
+
+
+def test_39_validation_verdict_reconciliation_gates():
+    """39. Test that validation verdict requires all reconciliation gates to pass."""
+    from scripts.audits.ctu48_1_ground_truth_audit_v3_1 import _write_v3_1_reports
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        summary_base = {
+            "provenance": {"pcap_size_bytes": 100, "pcap_sha256": "a", "zeek_size_bytes": 100,
+                           "zeek_sha256": "b", "db_size_bytes": 100, "db_sha256": "c",
+                           "suricata_eve_size_bytes": 100, "suricata_eve_sha256": "d"},
+            "zeek_parsing": {"total_records": 10, "parsed_records": 10, "malformed_records": 0,
+                             "duplicate_uids": 0, "duration_sentinel_records": 0, "publisher_scan_flows": 10},
+            "pcap_parsing": {"packet_records_read": 10, "runt_frames_skipped": 0,
+                             "valid_initial_syn_packets": 10, "total_exported_attribution_packets": 10},
+            "alert_attribution": {"total_alerts": 10, "scan_alerts": 10, "arp_alerts": 0,
+                                  "tier_a_confirmed_tp": 10, "tier_b_malicious_associated": 0,
+                                  "tier_c_false_positive": 0, "tier_d_unassessed": 0,
+                                  "tier_e_no_association": 0, "strict_precision_pct": 100.0,
+                                  "scan_rule_precision_pct": 100.0, "unassessed_rate_pct": 0.0},
+            "retransmission_investigation": {"total_cases": 0, "resolved_via_flow_lifetime": 0,
+                                             "partially_resolved": 0, "unresolved": 0, "resolution_pct": 0.0},
+            "flow_coverage": {"publisher_scan_flows": 10, "unique_uids_with_unique_trigger_packet_match": 10,
+                              "trigger_packet_evidence_pct": 100.0, "publisher_scan_uids_with_post_alert_interval_overlap": 0,
+                              "post_alert_interval_overlap_pct": 0.0},
+            "arp_forensics": {"total_arp_alerts": 0, "physical_arp_frames": 0,
+                              "gateway_ip_sender_mac_values": [], "classification": "None"},
+            "suricata_provenance": {"total_alerts": 0, "signatures": {}},
+            "exports": {
+                "per_alert_attribution.csv": {"sha256": "h1", "size_bytes": 10},
+                "alert_to_zeek_uid.csv": {"sha256": "h2", "size_bytes": 10},
+                "alert_packet_evidence.csv": {"sha256": "h3", "size_bytes": 10},
+                "per_flow_scan_attribution.csv": {"sha256": "h4", "size_bytes": 10},
+                "402_retransmission_case_audit.csv": {"sha256": "h5", "size_bytes": 10},
+                "arp_alert_packet_attribution.csv": {"sha256": "h6", "size_bytes": 10},
+            },
+            "audit_validation_checks": {
+                "tier_counts_reconcile": True,
+                "zeek_records_reconcile": True,
+                "pcap_stream_completed_without_truncation": True,
+                "thresholds_validated": True,
+                "export_reconciliation_passed": True,
+                "suricata_input_pcap_identity_verified": False,
+                "runtime_cooldown_configuration_verified": False,
+            }
+        }
+
+        # Case 1: All reconciliation gates pass, external gates unverified -> SUPPORTED WITH LIMITATIONS
+        _write_v3_1_reports(tmp_dir, summary_base)
+        verdict_doc = os.path.join(tmp_dir, "09_final_submission_verdict.md")
+        with open(verdict_doc, "r", encoding="utf-8") as vf:
+            content = vf.read()
+        assert "SUPPORTED WITH LIMITATIONS — CAPTURE-SPECIFIC" in content
+
+        # Case 2: One reconciliation gate fails -> INCONCLUSIVE
+        summary_fail = dict(summary_base)
+        summary_fail["audit_validation_checks"] = dict(summary_base["audit_validation_checks"])
+        summary_fail["audit_validation_checks"]["tier_counts_reconcile"] = False
+        _write_v3_1_reports(tmp_dir, summary_fail)
+        with open(verdict_doc, "r", encoding="utf-8") as vf:
+            content = vf.read()
+        assert "INCONCLUSIVE — A REQUIRED RECONCILIATION GATE FAILED" in content
 

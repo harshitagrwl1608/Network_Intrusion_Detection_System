@@ -166,6 +166,9 @@ class PcapParser:
         self.packet_records_read = 0
         self.runt_frames = 0
         self.truncated_records = 0
+        self.malformed_records = 0
+        self.unsupported_records = 0
+        self.padding_bytes_ignored = 0
 
     def open(self):
         self.file = open(self.filepath, "rb")
@@ -285,17 +288,34 @@ class PcapParser:
             # IPv4 frame (0x0800)
             if ethertype == 0x0800:
                 if caplen < offset + 20:
+                    self.malformed_records += 1
                     yield (pkt_idx, ts, False, False, False, False, None, 0, None, 0, 0, None)
                     continue
                 ip_hdr = pkt_bytes[offset:offset+20]
                 version = ip_hdr[0] >> 4
                 if version != 4:
+                    self.unsupported_records += 1
                     yield (pkt_idx, ts, False, False, False, False, None, 0, None, 0, 0, None)
                     continue
                 ihl = (ip_hdr[0] & 0x0F) * 4
                 if ihl < 20 or caplen < offset + ihl:
+                    self.malformed_records += 1
                     yield (pkt_idx, ts, False, False, False, False, None, 0, None, 0, 0, None)
                     continue
+
+                total_len = struct.unpack(">H", ip_hdr[2:4])[0]
+                if total_len < ihl:
+                    self.malformed_records += 1
+                    yield (pkt_idx, ts, False, False, False, False, None, 0, None, 0, 0, None)
+                    continue
+
+                # Captured-byte boundaries: exclude Ethernet padding beyond IPv4 total length
+                ip_end = offset + total_len
+                if caplen > ip_end:
+                    self.padding_bytes_ignored += (caplen - ip_end)
+                    effective_caplen = ip_end
+                else:
+                    effective_caplen = caplen
 
                 # Check IPv4 fragmentation: non-first fragments cannot contain a TCP header at offset 0
                 frag_word = struct.unpack(">H", ip_hdr[6:8])[0]
@@ -310,10 +330,17 @@ class PcapParser:
 
                 if proto == 6:  # TCP
                     tcp_offset = offset + ihl
-                    if caplen < tcp_offset + 20:
+                    if effective_caplen < tcp_offset + 20:
+                        self.malformed_records += 1
                         yield (pkt_idx, ts, True, False, False, False, sip, 0, dip, 0, 0, None)
                         continue
                     tcp_hdr = pkt_bytes[tcp_offset:tcp_offset+20]
+                    tcp_data_offset = (tcp_hdr[12] >> 4) * 4
+                    if tcp_data_offset < 20 or effective_caplen < tcp_offset + tcp_data_offset:
+                        self.malformed_records += 1
+                        yield (pkt_idx, ts, True, False, False, False, sip, 0, dip, 0, 0, None)
+                        continue
+
                     sport, dport = struct.unpack(">HH", tcp_hdr[0:4])
                     flags = tcp_hdr[13]
 
@@ -375,6 +402,13 @@ def classify_alert_v3_1(alert_id: int, rule_name: str, threshold: int,
     Tier D: Unassessed or insufficient historical/packet evidence
     Tier E: No defensible packet or flow association
     """
+    # Threshold validation: must be positive integer to qualify for detection
+    if not isinstance(threshold, int) or threshold <= 0:
+        tier = "Tier D (Unassessed / Insufficient Historical Evidence)"
+        tier_key = "TIER_D_UNASSESSED"
+        rationale = f"Invalid or missing alert threshold ({threshold!r}); fails closed"
+        return tier, tier_key, rationale
+
     if distinct_targets_reconstructed >= threshold and corroborated_targets_count >= threshold:
         tier = "Tier A (Confirmed Rule-Specific Detection)"
         tier_key = "TIER_A_CONFIRMED_TP"
@@ -413,6 +447,91 @@ def classify_alert_v3_1(alert_id: int, rule_name: str, threshold: int,
         rationale = "No defensible packet or flow association established"
 
     return tier, tier_key, rationale
+
+
+def build_arp_alert_row(alert_dict: dict, observed_arp_frames: list) -> list:
+    """Build standardized 16-column CSV row for ARP alerts."""
+    aid = alert_dict["id"]
+    ats = alert_dict["timestamp"]
+    ws_str = f"{alert_dict['window_start']:.6f}" if alert_dict.get("window_start") is not None else "-"
+    we_str = f"{alert_dict['window_end']:.6f}" if alert_dict.get("window_end") is not None else "-"
+    nearest_frame = min(observed_arp_frames, key=lambda x: abs(x[1] - ats)) if observed_arp_frames else None
+    nearest_smac = nearest_frame[2]["smac"] if nearest_frame else "-"
+    rationale = (
+        f"Nearest frame ({nearest_smac}) is temporal context only, not a demonstrated alert-to-packet match; "
+        "historical runtime baseline is missing"
+    )
+    return [
+        aid, alert_dict["rule_name"], alert_dict.get("rule_version", "v1.8"), alert_dict.get("src_ip", "-"), "-",
+        ws_str, we_str,
+        0, 0, 0, 0, 0,
+        0, 0,
+        "TIER_D_UNASSESSED",
+        rationale
+    ]
+
+
+def build_per_alert_row(alert_dict: dict, syn_count: int, rec_targets: int,
+                        corrob_targets: int, thr: int, matched_uids_count: int,
+                        ambiguous_targets_count: int, unm_targets_count: int,
+                        tier_key: str, rationale: str) -> list:
+    """Build standardized 16-column CSV row for scan alerts."""
+    ws_str = f"{alert_dict['window_start']:.6f}" if alert_dict.get("window_start") is not None else "-"
+    we_str = f"{alert_dict['window_end']:.6f}" if alert_dict.get("window_end") is not None else "-"
+    return [
+        alert_dict["id"], alert_dict["rule_name"], alert_dict.get("rule_version", "v1.13"),
+        alert_dict["src_ip"], alert_dict.get("dst_port", "-"),
+        ws_str, we_str,
+        syn_count, rec_targets, corrob_targets, thr if thr is not None else "-",
+        matched_uids_count, ambiguous_targets_count, unm_targets_count,
+        tier_key, rationale
+    ]
+
+
+def assess_alert_retransmission(aid: int, window_start: float, window_end: float,
+                                threshold: int, matched_flows_for_alert: list,
+                                corroborated_targets_count: int) -> dict:
+    """
+    Assess retransmission status strictly per-alert using its own matched flows.
+    An alert is an alert-specific retransmission case if its qualifying packets
+    belong to flows initiated prior to window_start (flow_start < window_start <= pkt_ts <= flow_end).
+    """
+    if not matched_flows_for_alert:
+        return {
+            "alert_id": aid,
+            "status": "NO_MATCHED_FLOWS",
+            "is_retransmission_case": False,
+            "decision": "UNRESOLVED_TIER_D_OR_E",
+        }
+
+    # Flow item: (flow_start, flow_end, uid, label, detailed_label, pkt_ts)
+    flows_before_window = [f for f in matched_flows_for_alert if f[0] < window_start]
+    flows_in_window = [f for f in matched_flows_for_alert if f[0] >= window_start]
+
+    is_retransmission_case = len(flows_before_window) > 0 and len(flows_in_window) == 0
+
+    if not is_retransmission_case:
+        status = "NORMAL_FLOW_STARTS_IN_WINDOW" if len(flows_in_window) > 0 else "NO_FLOWS"
+        decision = "NORMAL"
+    else:
+        status = "RETRANSMISSION_CASE"
+        if threshold is not None and corroborated_targets_count >= threshold:
+            decision = "RESOLVED_TIER_A"
+        elif corroborated_targets_count > 0:
+            decision = "PARTIALLY_RESOLVED_TIER_B"
+        else:
+            decision = "UNRESOLVED_TIER_D_OR_E"
+
+    return {
+        "alert_id": aid,
+        "status": status,
+        "is_retransmission_case": is_retransmission_case,
+        "flows_before_window_count": len(flows_before_window),
+        "flows_in_window_count": len(flows_in_window),
+        "corroborated_targets_count": corroborated_targets_count,
+        "threshold": threshold,
+        "decision": decision,
+    }
 
 
 # =============================================================================
@@ -481,10 +600,26 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     detailed_label_dist = Counter()
 
     # Dynamically extract target (src_ip, dst_port) pairs from alert database to index relevant scan flows
-    cur.execute("SELECT DISTINCT src_ip, dst_port FROM alerts WHERE dst_port IS NOT NULL")
-    target_scan_keys = {(r[0], int(r[1])) for r in cur.fetchall()}
+    cur.execute("""
+        SELECT DISTINCT src_ip, dst_port
+        FROM alerts
+        WHERE rule_name IN ('PORT_SCAN', 'SLOW_PORT_SCAN')
+          AND dst_port IS NOT NULL
+    """)
+    target_scan_keys = set()
+    for sip, dport in cur.fetchall():
+        try:
+            p = int(dport)
+            if 1 <= p <= 65535 and sip:
+                target_scan_keys.add((sip, p))
+        except (ValueError, TypeError):
+            continue
+
     if not target_scan_keys:
-        target_scan_keys = {("192.168.1.200", 23)}
+        raise ValueError(
+            "Validation failure: No eligible scan alert keys (src_ip, dst_port) found in evaluation database; "
+            "cannot infer scan targets without alert evidence"
+        )
 
     # Index: (orig_h, orig_p, resp_h, resp_p, proto) -> list of (orig_h, orig_p, resp_h, resp_p, proto, ts, end_ts, uid, label, detailed_label)
     # Stored for TCP traffic matching alert (src_ip, dst_port) pairs
@@ -564,7 +699,13 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     for r in alerts_rows:
         aid, ts, rname, rver, sip, dip, sport, dport, proto, wstart, wend, ev_json = r
         ev = json.loads(ev_json) if ev_json else {}
-        thr = ev.get("threshold", 15 if rname == "PORT_SCAN" else 30)
+        # Defensively preserve raw threshold for strict fail-closed classification
+        raw_thr = ev.get("threshold")
+        if raw_thr is None:
+            thr = 15 if rname == "PORT_SCAN" else 30
+        else:
+            thr = raw_thr
+        scan_type = ev.get("scan_type", "horizontal")
         item = {
             "id": aid,
             "timestamp": ts,
@@ -578,6 +719,7 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             "window_start": wstart,
             "window_end": wend,
             "threshold": thr,
+            "scan_type": scan_type,
             "evidence": ev,
         }
         if rname in ("PORT_SCAN", "SLOW_PORT_SCAN"):
@@ -606,6 +748,8 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     alert_matched_uids = defaultdict(set)
     alert_scan_flow_uids = defaultdict(set)
     alert_ambiguous_targets = defaultdict(set)
+    # alert_id -> list of matched flow metadata for per-alert retransmission audit
+    alert_matched_flows = defaultdict(list)
     # alert_id -> list of packet metadata tuples for export
     # Alert packet count counter
     alert_valid_syn_counts = Counter()
@@ -627,7 +771,7 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     # Build active alert intervals list for fast sliding window search
     # Since alerts are ordered by timestamp:
     scan_windows = [
-        (a["window_start"], a["window_end"], a["id"], a["src_ip"], a["dst_port"], a["threshold"])
+        (a["window_start"], a["window_end"], a["id"], a["src_ip"], a["dst_ip"], a["dst_port"], a["threshold"], a["scan_type"])
         for a in scan_alerts
     ]
     scan_windows.sort(key=lambda x: x[0])
@@ -665,10 +809,17 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
                 continue
 
             # Check matching alerts
-            for wstart, wend, aid, asrc, adport, athr in active_candidates:
-                if sip == asrc and dport == adport:
+            for wstart, wend, aid, asrc, adip, adport, athr, ascan_type in active_candidates:
+                if ascan_type == "vertical":
+                    matches_alert = (sip == asrc and dip == adip)
+                    target_val = dport
+                else:
+                    matches_alert = (sip == asrc and dport == adport)
+                    target_val = dip
+
+                if matches_alert:
                     alert_valid_syn_counts[aid] += 1
-                    alert_syn_targets[aid].add(dip)
+                    alert_syn_targets[aid].add(target_val)
 
                     # 5-tuple flow matching against indexed Zeek records
                     flow_key = (sip, sport, dip, dport, "tcp")
@@ -686,24 +837,27 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
                     m_dlbl = "-"
 
                     if len(matched) == 1:
-                        m_uid, m_lbl, m_dlbl, _, _ = matched[0]
+                        m_uid, m_lbl, m_dlbl, flow_ts, flow_end_ts = matched[0]
                         matched_uids_text = m_uid
                         match_status = "UNIQUE"
                         alert_matched_uids[aid].add(m_uid)
+                        alert_matched_flows[aid].append((flow_ts, flow_end_ts, m_uid, m_lbl, m_dlbl, ts))
                         if m_dlbl == "PartOfAHorizontalPortScan":
-                            alert_corroborated_targets[aid].add(dip)
+                            alert_corroborated_targets[aid].add(target_val)
                             alert_scan_flow_uids[aid].add(m_uid)
                         elif m_lbl == "Malicious":
-                            alert_malicious_targets[aid].add(dip)
+                            alert_malicious_targets[aid].add(target_val)
                         elif m_lbl == "Benign":
-                            alert_benign_targets[aid].add(dip)
+                            alert_benign_targets[aid].add(target_val)
                     elif len(matched) > 1:
                         match_status = "AMBIGUOUS"
                         matched_uids_text = ";".join(sorted(m[0] for m in matched))
-                        alert_ambiguous_targets[aid].add(dip)
+                        alert_ambiguous_targets[aid].add(target_val)
                         alert_matched_uids[aid].update(m[0] for m in matched)
+                        for m in matched:
+                            alert_matched_flows[aid].append((m[3], m[4], m[0], m[1], m[2], ts))
                         if any(m[1] == "Malicious" or m[2] == "PartOfAHorizontalPortScan" for m in matched):
-                            alert_malicious_targets[aid].add(dip)
+                            alert_malicious_targets[aid].add(target_val)
                         m_lbl = "AMBIGUOUS"
                         m_dlbl = "AMBIGUOUS"
                     else:
@@ -726,52 +880,43 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     print(f"  Streamed {total_exported_packets:,} Packet Attribution Rows (Uncapped)")
 
     # -------------------------------------------------------------------------
-    # PHASE 5: Dedicated Audit of All 402 Retransmission Cases
+    # PHASE 5: Dedicated Audit of All Retransmission Cases
     # -------------------------------------------------------------------------
-    print("\n[Phase 5] Investigating All 402 Retransmission Cases Individually...")
-    # Find scan alerts where zero flow initiation timestamps (ts) occurred inside [window_start, window_end]
+    print("\n[Phase 5] Investigating Retransmission Cases Per Alert...")
     retrans_cases_resolved = 0
     retrans_cases_partially_resolved = 0
     retrans_cases_unresolved = 0
     retrans_export_rows = []
+    retrans_alerts_audited = []
 
-    alerts_zero_flow_start = []
     for a in scan_alerts:
-        ws = a["window_start"]
-        we = a["window_end"]
-        left = bisect.bisect_left(scan_flow_start_timestamps, ws)
-        right = bisect.bisect_right(scan_flow_start_timestamps, we)
-        if left == right:
-            alerts_zero_flow_start.append(a)
-
-    print(f"  Alerts with ZERO Zeek flow-starts in trigger window: {len(alerts_zero_flow_start):,}")
-
-    for a in alerts_zero_flow_start:
         aid = a["id"]
         ws = a["window_start"]
         we = a["window_end"]
         thr = a["threshold"]
-        reconstructed_targets = len(alert_syn_targets.get(aid, set()))
-        corroborated_targets = len(alert_corroborated_targets.get(aid, set()))
+        corrob_targets = len(alert_corroborated_targets.get(aid, set()))
+        matched_flows = alert_matched_flows.get(aid, [])
 
-        if corroborated_targets >= thr:
-            status = "RESOLVED_TIER_A"
-            retrans_cases_resolved += 1
-        elif corroborated_targets > 0:
-            status = "PARTIALLY_RESOLVED_TIER_B"
-            retrans_cases_partially_resolved += 1
-        else:
-            status = "UNRESOLVED_TIER_D_OR_E"
-            retrans_cases_unresolved += 1
+        res = assess_alert_retransmission(aid, ws, we, thr, matched_flows, corrob_targets)
+        if res["is_retransmission_case"]:
+            retrans_alerts_audited.append(a)
+            status = res["decision"]
+            if status == "RESOLVED_TIER_A":
+                retrans_cases_resolved += 1
+            elif status == "PARTIALLY_RESOLVED_TIER_B":
+                retrans_cases_partially_resolved += 1
+            else:
+                retrans_cases_unresolved += 1
 
-        retrans_export_rows.append([
-            aid, a["rule_name"], f"{ws:.6f}", f"{we:.6f}", f"{we-ws:.6f}",
-            alert_valid_syn_counts[aid], reconstructed_targets, corroborated_targets, thr,
-            len(alert_matched_uids[aid]), status
-        ])
+            retrans_export_rows.append([
+                aid, a["rule_name"], f"{ws:.6f}", f"{we:.6f}", f"{we-ws:.6f}",
+                alert_valid_syn_counts[aid], len(alert_syn_targets.get(aid, set())),
+                corrob_targets, thr,
+                len(alert_matched_uids[aid]), status
+            ])
 
-    pct_res = round((retrans_cases_resolved / max(1, len(alerts_zero_flow_start))) * 100.0, 2)
-    print(f"  Retransmission Investigation: {retrans_cases_resolved} / {len(alerts_zero_flow_start)} Cases Fully Resolved ({pct_res:.2f}%)")
+    pct_res = round((retrans_cases_resolved / max(1, len(retrans_alerts_audited))) * 100.0, 2)
+    print(f"  Retransmission Investigation: {retrans_cases_resolved} / {len(retrans_alerts_audited)} Cases Fully Resolved ({pct_res:.2f}%)")
 
     # Export 402_retransmission_case_audit.csv
     retrans_csv_path = os.path.join(exports_dir, "402_retransmission_case_audit.csv")
@@ -857,29 +1002,18 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
         )
         tier_counts[tier_key] += 1
 
-        per_alert_rows.append([
-            aid, rname, a["rule_version"], a["src_ip"], a["dst_port"],
-            f"{a['window_start']:.6f}", f"{a['window_end']:.6f}",
-            alert_valid_syn_counts[aid], rec_targets, corrob_targets, thr,
+        per_alert_rows.append(build_per_alert_row(
+            a, alert_valid_syn_counts[aid], rec_targets, corrob_targets, thr,
             len(alert_matched_uids.get(aid, set())), ambiguous_targets, unm_targets,
             tier_key, rationale
-        ])
+        ))
 
         for uid in alert_matched_uids.get(aid, set()):
             alert_to_uid_rows.append([aid, rname, uid])
 
     for a in arp_alerts:
         tier_counts["TIER_D_UNASSESSED"] += 1
-        ws_str = f"{a['window_start']:.6f}" if a.get("window_start") is not None else "-"
-        we_str = f"{a['window_end']:.6f}" if a.get("window_end") is not None else "-"
-        per_alert_rows.append([
-            a["id"], a["rule_name"], a["rule_version"], a["src_ip"], "-",
-            ws_str, we_str,
-            0, 0, 0, 0, 0,
-            0, 0,
-            "TIER_D_UNASSESSED",
-            "Nearest frame is temporal context only, not a demonstrated alert-to-packet match; historical runtime baseline is missing"
-        ])
+        per_alert_rows.append(build_arp_alert_row(a, observed_arp_frames))
 
     # Reconcile counts
     total_emitted = len(alerts_rows)
@@ -1116,7 +1250,15 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
                 and malformed_zeek_records == 0
                 and duplicate_uids_count == 0
             ),
-            "pcap_stream_completed_without_truncation": parser.truncated_records == 0,
+            "pcap_stream_completed_without_truncation": parser.truncated_records == 0 and parser.malformed_records == 0,
+            "thresholds_validated": all(
+                isinstance(a.get("threshold"), int) and a["threshold"] > 0
+                for a in scan_alerts
+            ),
+            "export_reconciliation_passed": all(
+                item["size_bytes"] > 0 and item["sha256"] != "-"
+                for item in export_ledger.values()
+            ),
             "suricata_input_pcap_identity_verified": False,
             "runtime_cooldown_configuration_verified": False,
         },
@@ -1144,12 +1286,12 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
             "unassessed_rate_pct": unassessed_rate_pct,
         },
         "retransmission_investigation": {
-            "total_cases": len(alerts_zero_flow_start),
+            "total_cases": len(retrans_alerts_audited),
             "resolved_via_flow_lifetime": retrans_cases_resolved,
             "partially_resolved": retrans_cases_partially_resolved,
             "unresolved": retrans_cases_unresolved,
             "resolution_pct": round(
-                retrans_cases_resolved / max(1, len(alerts_zero_flow_start)) * 100.0, 2
+                retrans_cases_resolved / max(1, len(retrans_alerts_audited)) * 100.0, 2
             ),
         },
         "flow_coverage": {
@@ -1213,13 +1355,24 @@ def _write_v3_1_reports(docs_dir: str, s: dict):
     sur = s["suricata_provenance"]
     exp = s["exports"]
     checks = s["audit_validation_checks"]
-    submission_verdict = (
-        "SUPPORTED WITH LIMITATIONS — CAPTURE-SPECIFIC"
-        if checks["tier_counts_reconcile"]
-        and checks["zeek_records_reconcile"]
-        and checks["pcap_stream_completed_without_truncation"]
-        else "INCONCLUSIVE — A REQUIRED RECONCILIATION GATE FAILED"
-    )
+    reconciliation_gates = [
+        checks.get("tier_counts_reconcile", False),
+        checks.get("zeek_records_reconcile", False),
+        checks.get("pcap_stream_completed_without_truncation", False),
+        checks.get("thresholds_validated", False),
+        checks.get("export_reconciliation_passed", False),
+    ]
+    external_gates = [
+        checks.get("suricata_input_pcap_identity_verified", False),
+        checks.get("runtime_cooldown_configuration_verified", False),
+    ]
+
+    if all(reconciliation_gates) and all(external_gates):
+        submission_verdict = "CERTIFIED — FULL GROUND-TRUTH ALIGNMENT"
+    elif all(reconciliation_gates):
+        submission_verdict = "SUPPORTED WITH LIMITATIONS — CAPTURE-SPECIFIC"
+    else:
+        submission_verdict = "INCONCLUSIVE — A REQUIRED RECONCILIATION GATE FAILED"
 
     # 01_provenance_and_integrity.md
     with open(os.path.join(docs_dir, "01_provenance_and_integrity.md"), "w", encoding="utf-8") as f:
@@ -1362,6 +1515,9 @@ NetGuard's scan alerts are evaluated against publisher-labelled traffic using th
 - Alert classifications reconcile: **{s['audit_validation_checks']['tier_counts_reconcile']}**.
 - Zeek records reconcile with zero malformed/duplicate UIDs: **{s['audit_validation_checks']['zeek_records_reconcile']}**.
 - PCAP stream completed without truncated records: **{s['audit_validation_checks']['pcap_stream_completed_without_truncation']}**.
+- Alert thresholds validated: **{s['audit_validation_checks']['thresholds_validated']}**.
+- Generated exports reconciled: **{s['audit_validation_checks']['export_reconciliation_passed']}**.
+- Suricata input-PCAP identity verified: **{s['audit_validation_checks']['suricata_input_pcap_identity_verified']}**.
 
 ### Established Limitations
 1. The 262 ARP alerts ({a['unassessed_rate_pct']:.2f}%) are classified as **Tier D (Unassessed due to missing historical baseline)**.
