@@ -817,5 +817,87 @@ class TestPayloadRule(unittest.TestCase):
             self.assertNotIn("LOG4SHELL", sigs)
 
 
+    def test_benign_mime_multipart_boundaries_do_not_fire_sqli(self):
+        """Verifies that RFC 2046 MIME closing boundaries (--boundary--\r\n) do not trigger SQL_INJECTION."""
+        rule = PayloadRule()
+        # 1. SMTP mail body on port 587 with MIME closing boundary
+        smtp_pkt = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.168.1.105", "dst_ip": "212.55.154.44",
+            "src_port": 54120, "dst_port": 587,
+            "payload": b"Content-Type: multipart/mixed; boundary=\"_004_abc_\"\r\n\r\n--_004_abc_\r\nHello\r\n--_004_abc_--\r\n",
+            "timestamp": 400.0,
+        }
+        alert = rule.check(smtp_pkt)
+        self.assertIsNone(alert, "Benign MIME multipart closing boundary on SMTP must not trigger alert")
+
+        # 2. HTTP multipart file upload on port 80 with boundary ending in --\r\n
+        http_upload_pkt = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.168.1.105", "dst_ip": "192.168.1.200",
+            "src_port": 54122, "dst_port": 80,
+            "payload": (
+                b"POST /upload HTTP/1.1\r\nHost: target\r\nContent-Type: multipart/form-data; boundary=---------------------------12345\r\n\r\n"
+                b"-----------------------------12345\r\nContent-Disposition: form-data; name=\"file\"; filename=\"photo.jpg\"\r\n\r\n"
+                b"IMAGE_BYTES\r\n"
+                b"-----------------------------12345--\r\n"
+            ),
+            "timestamp": 401.0,
+        }
+        alert2 = rule.check(http_upload_pkt)
+        if alert2:
+            sigs = [hit["signature"] for hit in alert2["evidence"]["hits"]]
+            self.assertNotIn("SQL_INJECTION", sigs, "Multipart form boundary must not trigger SQL_INJECTION")
+
+    def test_http_response_direction_suppresses_injection_alerts(self):
+        """Verifies that HTTP server responses (reflected text, JS libraries) do not trigger client injection alerts."""
+        rule = PayloadRule()
+        resp_pkt = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.168.1.200", "dst_ip": "192.168.1.105",
+            "src_port": 80, "dst_port": 54122,
+            "payload": (
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                b"<html>Search results for: &lt;script&gt;alert(1)&lt;/script&gt; "
+                b"SQL: SELECT * FROM products WHERE category = 'books'</html>"
+            ),
+            "timestamp": 402.0,
+        }
+        alert = rule.check(resp_pkt)
+        self.assertIsNone(alert, "HTTP server responses must be suppressed to prevent reflection false positives")
+
+    def test_credential_redaction_in_evidence(self):
+        """Verifies that sensitive credentials matched in evidence are redacted."""
+        rule = PayloadRule()
+        pkt = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.168.1.5", "dst_ip": "192.168.1.1",
+            "src_port": 54321, "dst_port": 80,
+            "payload": b"POST /login HTTP/1.1\r\n\r\nusername=admin&password=SuperSecretPassword123!\r\n",
+            "timestamp": 403.0,
+        }
+        alert = rule.check(pkt)
+        self.assertIsNotNone(alert)
+        cred_hits = [hit for hit in alert["evidence"]["hits"] if hit["signature"] == "CREDENTIAL_LEAK"]
+        self.assertTrue(len(cred_hits) > 0)
+        for hit in cred_hits:
+            match_str = hit.get("matched", "")
+            self.assertNotIn("SuperSecretPassword123!", match_str)
+            self.assertIn("[REDACTED]", match_str)
+
+    def test_mail_protocol_context_excludes_web_sqli_xss(self):
+        """Verifies that raw non-HTTP SMTP traffic on mail ports does not evaluate web SQLi/XSS."""
+        rule = PayloadRule()
+        mail_pkt = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.168.1.50", "dst_ip": "212.55.154.44",
+            "src_port": 45000, "dst_port": 587,
+            "payload": b"Subject: Meeting Notes\r\n\r\nHere is the report: <script> alert </script> ' OR '1'='1 --\r\n",
+            "timestamp": 404.0,
+        }
+        alert = rule.check(mail_pkt)
+        self.assertIsNone(alert, "Non-HTTP mail body should not evaluate web SQLi or XSS")
+
+
 if __name__ == "__main__":
     unittest.main()

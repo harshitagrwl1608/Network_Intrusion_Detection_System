@@ -108,6 +108,33 @@ import logging
 from urllib.parse import unquote_to_bytes
 from collections import defaultdict, Counter, deque, OrderedDict
 
+try:
+    from engine.http_parser import (
+        HttpParser,
+        HttpMessage,
+        HttpDirection,
+        InspectionContext,
+        HTTP_PORTS as _HTTP_PORTS_SET,
+        DB_PORTS as _DB_PORTS_SET,
+        MAIL_PORTS as _MAIL_PORTS_SET,
+        CMD_PORTS as _CMD_PORTS_SET,
+        ICS_PORTS as _ICS_PORTS_SET,
+        redact_sensitive_evidence,
+    )
+except ImportError:
+    from ids_project.engine.http_parser import (
+        HttpParser,
+        HttpMessage,
+        HttpDirection,
+        InspectionContext,
+        HTTP_PORTS as _HTTP_PORTS_SET,
+        DB_PORTS as _DB_PORTS_SET,
+        MAIL_PORTS as _MAIL_PORTS_SET,
+        CMD_PORTS as _CMD_PORTS_SET,
+        ICS_PORTS as _ICS_PORTS_SET,
+        redact_sensitive_evidence,
+    )
+
 logger = logging.getLogger(__name__)
 
 
@@ -2072,7 +2099,7 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
             # value. Only accept a MySQL comment after a SQL-like value or
             # whitespace; exclude assignment values such as `bgColor=#` and
             # punctuation in binary data while retaining line-ending comments.
-            rb"|--.{0,2}(?:\r?\n|$)|(?:(?<=[\w'\")\]])|(?<=\s))#[ \t]*(?:\r?\n|$)"
+            rb"|(?<!-)(?:(?<=[\x27\x22`\)\]])\s*--(?:[ \t\r\n+\-]|$)|(?<=\s)--(?:[ \t]+.*|[ \t]*)(?:\r?\n|$)|(?:(?<=[\w\x27\x22`\)\]])|(?<=\s))#[ \t]*(?:\r?\n|$))"
             rb"|sleep\s*\(\s*\d+|benchmark\s*\(\s*\d+|waitfor\s+delay\s+\x27"
             rb"|exec\s+(?:xp_cmdshell|sp_executesql)|xp_cmdshell"
             rb"|load_file\s*\(|into\s+(?:outfile|dumpfile)\s+[\x27\x22]"
@@ -2792,9 +2819,53 @@ class PayloadRule:
                     samples.append((comment_normalized, "comment_normalized", truncated))
                     seen_representations.add(comment_normalized)
 
+        # Determine protocol context and parse application layer
+        primary_sample = (
+            stream_sample
+            if (stream_sample and stream_sample != packet_sample)
+            else packet_sample
+        )
+        http_msg = HttpParser.parse(primary_sample, src_port=src_port, dst_port=dst_port)
+
+        # 1. HTTP Response suppression:
+        # Never flag server responses as client injection attacks.
+        # This eliminates false alarms from reflected user input, documentation,
+        # and static JS libraries (e.g., document.write, alert).
+        if http_msg.direction == HttpDirection.RESPONSE:
+            return None
+
+        # 2. Protocol-specific signature scoping:
+        if http_msg.direction == HttpDirection.REQUEST:
+            # Client HTTP request: evaluate web application and server-side signatures
+            allowed_signatures = {s[0] for s in _PAYLOAD_SIGNATURES if s[0] != "ICS_TRISTATION_EXPLOIT"}
+        elif dst_port in _MAIL_PORTS_SET:
+            # Mail protocols (SMTP/IMAP/POP3) when not an HTTP request: web SQLi/XSS/Traversal/SSRF/XXE/SSTI do not apply.
+            allowed_signatures = {"LOG4SHELL", "CMD_INJECTION", "REVERSE_SHELL_CRADLE", "CREDENTIAL_LEAK"}
+        elif dst_port in _DB_PORTS_SET:
+            # Database protocols (MSSQL, MySQL, Postgres, MongoDB, Elasticsearch)
+            allowed_signatures = {"SQL_INJECTION", "LOG4SHELL", "CREDENTIAL_LEAK"}
+        elif dst_port in _CMD_PORTS_SET:
+            # Command / management protocols (FTP, Telnet, Redis, Memcached, ActiveMQ)
+            allowed_signatures = {"CMD_INJECTION", "REVERSE_SHELL_CRADLE", "CREDENTIAL_LEAK", "LOG4SHELL"}
+        elif dst_port in _ICS_PORTS_SET:
+            # ICS/SCADA protocol (TriStation 1131 on UDP 1502)
+            allowed_signatures = {"ICS_TRISTATION_EXPLOIT"}
+        else:
+            # Standard HTTP / application traffic: all signatures except ICS exploit
+            allowed_signatures = {s[0] for s in _PAYLOAD_SIGNATURES if s[0] != "ICS_TRISTATION_EXPLOIT"}
+
+        # If HTTP request has extracted form parameters, include clean parameter values
+        if http_msg.direction == HttpDirection.REQUEST and http_msg.form_params:
+            for _, param_val in http_msg.form_params:
+                if param_val and param_val not in seen_representations:
+                    samples.append((param_val, "form_body_param", len(param_val) >= self.max_bytes))
+                    seen_representations.add(param_val)
+
         # Collect ALL matching signatures (§3.4 — do not return on first match)
         hits: list[dict] = []
         for label, pattern, confidence in _PAYLOAD_SIGNATURES:
+            if allowed_signatures is not None and label not in allowed_signatures:
+                continue
             match = None
             for sample, source, truncated in samples:
                 for found in pattern.finditer(sample):
@@ -2819,9 +2890,44 @@ class PayloadRule:
                     matched_str = matched_bytes.decode("utf-8", errors="replace")
                 except Exception:
                     matched_str = repr(matched_bytes)
-                hits.append({"signature": label, "matched": matched_str,
-                             "confidence": confidence,
-                             "representation": representation})
+
+                # Scrub credentials from alert evidence
+                if label == "CREDENTIAL_LEAK":
+                    matched_str = redact_sensitive_evidence(label, matched_str)
+
+                # Context attribution
+                if http_msg.direction == HttpDirection.REQUEST:
+                    if label in ("SCANNER_PROBE", "HEADER_INJECTION", "SHELLSHOCK"):
+                        context = "http_request_header"
+                    elif label in ("HTTP_METHOD_TAMPERING", "SENSITIVE_FILE_PROBE"):
+                        context = "http_request_line"
+                    elif label == "PATH_TRAVERSAL" and http_msg.path and pattern.search(http_msg.path):
+                        context = "http_request_path"
+                    elif http_msg.query_string and pattern.search(http_msg.query_string):
+                        context = "http_query_param"
+                    elif http_msg.body and pattern.search(http_msg.body):
+                        context = "http_request_body"
+                    else:
+                        context = "http_request"
+                elif dst_port in _DB_PORTS_SET or src_port in _DB_PORTS_SET:
+                    context = "db_payload"
+                elif dst_port in _MAIL_PORTS_SET or src_port in _MAIL_PORTS_SET:
+                    context = "mail_payload"
+                elif dst_port in _CMD_PORTS_SET or src_port in _CMD_PORTS_SET:
+                    context = "command_service"
+                elif dst_port in _ICS_PORTS_SET or src_port in _ICS_PORTS_SET:
+                    context = "ics_payload"
+                else:
+                    context = "raw_stream"
+
+                hits.append({
+                    "signature": label,
+                    "matched": matched_str,
+                    "confidence": confidence,
+                    "representation": representation,
+                    "context": context,
+                    "direction": http_msg.direction.value,
+                })
 
         if hits and self.alert_cooldown > 0:
             src_ip = record.get("src_ip")
