@@ -23,45 +23,45 @@ from engine.rules import (
 class TestFiniteRuleTimestamps(unittest.TestCase):
     def test_invalid_event_timestamps_do_not_mutate_rate_rule_state(self):
         cases = (
-            ("UDP_FLOOD", "1.9", lambda: UdpFloodRule(threshold=1), {
+            ("UDP_FLOOD", "1.10", lambda: UdpFloodRule(threshold=1), {
                 "type": "IP", "protocol": "UDP", "src_ip": "198.51.100.10",
                 "dst_ip": "203.0.113.10", "src_port": 50000, "dst_port": 5060,
             }, ("_history", "_cooldown")),
-            ("TCP_STEALTH_SCAN", "1.7", lambda: TcpStealthScanRule(threshold=1), {
+            ("TCP_STEALTH_SCAN", "1.8", lambda: TcpStealthScanRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.11",
                 "dst_ip": "203.0.113.11", "src_port": 50000, "dst_port": 22,
                 "tcp_flags": 0x01,
             }, ("_probes", "_fired")),
-            ("TCP_FLAG_ANOMALY", "1.8", TcpFlagAnomalyRule, {
+            ("TCP_FLAG_ANOMALY", "1.9", TcpFlagAnomalyRule, {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.12",
                 "dst_ip": "203.0.113.12", "src_port": 50000, "dst_port": 22,
                 "tcp_flags": 0x03,
             }, ("_cooldown",)),
-            ("DISTRIBUTED_SYN_FLOOD", "1.8", lambda: DistributedSynFloodRule(
+            ("DISTRIBUTED_SYN_FLOOD", "1.9", lambda: DistributedSynFloodRule(
                 threshold=1, min_sources=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.13",
                 "dst_ip": "203.0.113.13", "src_port": 50000, "dst_port": 80,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_history", "_cooldown")),
-            ("ICMP_SWEEP", "1.7", lambda: IcmpSweepRule(threshold=1), {
+            ("ICMP_SWEEP", "1.8", lambda: IcmpSweepRule(threshold=1), {
                 "type": "IP", "protocol": "ICMP", "src_ip": "198.51.100.14",
                 "dst_ip": "203.0.113.14", "icmp_type": 8, "icmp_code": 0,
             }, ("_history", "_fired")),
-            ("ICMP_FLOOD", "1.7", lambda: IcmpFloodRule(threshold=1), {
+            ("ICMP_FLOOD", "1.8", lambda: IcmpFloodRule(threshold=1), {
                 "type": "IP", "protocol": "ICMP", "src_ip": "198.51.100.15",
                 "dst_ip": "203.0.113.15", "icmp_type": 8, "icmp_code": 0,
             }, ("_history", "_cooldown")),
-            ("BRUTE_FORCE", "1.11", lambda: BruteForceRule(threshold=1), {
+            ("BRUTE_FORCE", "1.12", lambda: BruteForceRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.16",
                 "dst_ip": "203.0.113.16", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_history", "_cooldown", "_seen_syns")),
-            ("SLOW_PORT_SCAN", "1.10", lambda: SlowPortScanRule(threshold=1), {
+            ("SLOW_PORT_SCAN", "1.11", lambda: SlowPortScanRule(threshold=1), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.17",
                 "dst_ip": "203.0.113.17", "src_port": 50000, "dst_port": 22,
                 "initial_syn": True, "tcp_flags": 0x02,
             }, ("_vert", "_horiz", "_alert_cooldown")),
-            ("CLEAR_HTTP_ON_TLS_PORT", "1.10", lambda: CleartextHttpOnTlsPortRule(
+            ("CLEAR_HTTP_ON_TLS_PORT", "1.11", lambda: CleartextHttpOnTlsPortRule(
                 min_requests=2), {
                 "type": "IP", "protocol": "TCP", "src_ip": "198.51.100.18",
                 "dst_ip": "203.0.113.18", "src_port": 50000, "dst_port": 443,
@@ -143,7 +143,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
             "src_port": "54321", "dst_port": "443", "protocol": "TCP",
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.3")
+        self.assertEqual(alert["rule_version"], "1.4")
         self.assertEqual(alert["src_port"], 54321)
         self.assertEqual(alert["dst_port"], 443)
 
@@ -156,7 +156,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
             "tcp_flags": 0x03, "timestamp": 100.0,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.8")
+        self.assertEqual(alert["rule_version"], "1.9")
         self.assertEqual(alert["src_port"], 50000)
         self.assertEqual(alert["dst_port"], 80)
 
@@ -174,7 +174,7 @@ class TestFiniteRuleTimestamps(unittest.TestCase):
             "tcp_flags": 0x01, "timestamp": 101.0,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.7")
+        self.assertEqual(alert["rule_version"], "1.8")
         self.assertEqual(alert["src_port"], 50001)
         self.assertEqual(alert["dst_port"], 23)
 

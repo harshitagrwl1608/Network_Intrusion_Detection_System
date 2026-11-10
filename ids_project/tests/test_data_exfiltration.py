@@ -286,7 +286,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNone(rule.check(late_old_syn))
         alert = rule.check(self._tcp_payload_pkt(payload, 1001, 103.0))
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.19")
+        self.assertEqual(alert["rule_version"], "1.20")
         self.assertEqual(alert["evidence"]["bytes_transferred"], 1200)
 
     def test_tcp_connection_generation_state_is_bounded(self):
@@ -554,7 +554,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["evidence"]["sub_type"], "SIGNATURE_EXFIL")
         self.assertIn("ZIP", alert["detail"])
-        self.assertEqual(alert["rule_version"], "1.19")
+        self.assertEqual(alert["rule_version"], "1.20")
 
     def test_split_signature_is_not_joined_across_tcp_sequence_gap(self):
         rule = DataExfiltrationRule(byte_threshold=5000, window=30)
@@ -619,7 +619,7 @@ class TestDataExfiltrationRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["src_port"], 50000)
         self.assertEqual(alert["dst_port"], 8080)
-        self.assertEqual(alert["rule_version"], "1.19")
+        self.assertEqual(alert["rule_version"], "1.20")
 
     def test_elf_and_binary_signatures_exfil_triggers_alert(self):
         # Linux ELF executable, Java class, and Mach-O exfiltration
@@ -638,10 +638,59 @@ class TestDataExfiltrationRule(unittest.TestCase):
                 alert = rule.check(pkt)
                 self.assertIsNotNone(alert)
                 self.assertEqual(alert["rule_name"], "DATA_EXFIL")
-                self.assertEqual(alert["rule_version"], "1.19")
+                self.assertEqual(alert["rule_version"], "1.20")
                 self.assertEqual(alert["evidence"]["sub_type"], "SIGNATURE_EXFIL")
                 self.assertIn(expected_desc, alert["detail"])
 
+
+
+    def test_private_key_exfil_triggers_alert(self):
+        # Cleartext private key export exfiltration to external internet host
+        for magic, expected_desc in (
+            (b"-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE...", "OpenSSH"),
+            (b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...", "RSA"),
+            (b"-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEI...", "EC"),
+            (b"-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASC...", "PKCS#8"),
+        ):
+            with self.subTest(key_type=expected_desc):
+                rule = DataExfiltrationRule(byte_threshold=50000, window=30)
+                pkt = self._pkt("192.168.1.50", "203.0.113.10", payload=magic, ts=100.0)
+                alert = rule.check(pkt)
+                self.assertIsNotNone(alert)
+                self.assertEqual(alert["rule_name"], "DATA_EXFIL")
+                self.assertEqual(alert["rule_version"], "1.20")
+                self.assertEqual(alert["evidence"]["sub_type"], "SIGNATURE_EXFIL")
+                self.assertIn(expected_desc, alert["detail"])
+
+    def test_data_exfil_prune_stale_clears_future_drift_and_orphaned_saturated(self):
+        rule = DataExfiltrationRule(byte_threshold=5000, window=30)
+        flow_key = ("192.168.1.50", "203.0.113.10", 9001, "TCP")
+        orphaned_key = ("192.168.1.99", "203.0.113.99", 9001, "TCP")
+
+        # Plant orphaned saturated key
+        rule._flow_saturated.add(orphaned_key)
+
+        # Plant future-drifted cooldown timestamp
+        rule._cooldown[flow_key] = 200.0
+
+        # Send packets at t=90, 95, 100 within window [70, 100]
+        rule.check(self._pkt("192.168.1.50", "203.0.113.10", payload=b"A" * 2000, ts=90.0))
+        rule.check(self._pkt("192.168.1.50", "203.0.113.10", payload=b"B" * 2000, ts=95.0))
+        rule.check(self._pkt("192.168.1.50", "203.0.113.10", payload=b"C" * 2000, ts=100.0))
+
+        # At t=100, flow total is 6000 >= 5000, so flow_key is in _flow_saturated
+        self.assertIn(flow_key, rule._flow_saturated)
+        self.assertIn(orphaned_key, rule._flow_saturated)
+        self.assertIn(flow_key, rule._cooldown)
+
+        # Prune with now=100.0:
+        # 1. Orphaned key should be pruned from _flow_saturated
+        # 2. Cooldown timestamp at 200.0 (> now) should be cleared
+        rule.prune_stale(now=100.0)
+
+        self.assertNotIn(orphaned_key, rule._flow_saturated)
+        self.assertNotIn(flow_key, rule._cooldown)
+        self.assertIn(flow_key, rule._flow_saturated)
 
 
 if __name__ == "__main__":

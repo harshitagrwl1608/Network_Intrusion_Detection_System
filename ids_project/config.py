@@ -122,6 +122,10 @@ CLEAR_HTTP_TLS_COOLDOWN_S = _detection_float("CLEAR_HTTP_TLS_COOLDOWN_S", 600.0)
 CLEAR_HTTP_TLS_WINDOW_S = _detection_float("CLEAR_HTTP_TLS_WINDOW_S", 600.0)
 CLEAR_HTTP_TLS_MIN_REQUESTS = _detection_int("CLEAR_HTTP_TLS_MIN_REQUESTS", 2)
 
+# --- IP Fragmentation Anomaly (IpFragmentAnomalyRule) ---
+IP_FRAGMENT_ANOMALY_COOLDOWN_S = _detection_float("IP_FRAGMENT_ANOMALY_COOLDOWN_S", 60.0)
+IP_FRAGMENT_REASSEMBLY_TIMEOUT_S = _detection_float("IP_FRAGMENT_REASSEMBLY_TIMEOUT_S", 30.0)
+
 # --- Analysis ---
 ANALYSIS_INTERVAL = int(os.getenv("ANALYSIS_INTERVAL", 30))       # seconds between runs
 
@@ -172,3 +176,20 @@ TCP_ZERO_WINDOW_WINDOW    = _detection_int("TCP_ZERO_WINDOW_WINDOW", 10)     # s
 TCP_ZERO_WINDOW_COOLDOWN  = _detection_float("TCP_ZERO_WINDOW_COOLDOWN", 60.0)  # per-pair cooldown seconds
 TCP_ZERO_WINDOW_MIN_FLOWS = _detection_int("TCP_ZERO_WINDOW_MIN_FLOWS", 3)  # multi-flow corroboration
 PAYLOAD_ALERT_COOLDOWN_S = _detection_float("PAYLOAD_ALERT_COOLDOWN_S", 60.0)
+
+# --- Non-DNS Traffic on Port 53 (NonDnsTrafficOnDnsPortRule) ---
+NON_DNS_ON_DNS_PORT_COOLDOWN_S = _detection_float("NON_DNS_ON_DNS_PORT_COOLDOWN_S", 60.0)
+
+# --- ICMP Covert Tunnel & Shell Detection (IcmpTunnelRule) ---
+ICMP_TUNNEL_ENTROPY_THRESHOLD  = _detection_float("ICMP_TUNNEL_ENTROPY_THRESHOLD", 4.5)
+ICMP_TUNNEL_MIN_BYTES          = _detection_int("ICMP_TUNNEL_MIN_BYTES", 64)
+ICMP_TUNNEL_COOLDOWN_S         = _detection_float("ICMP_TUNNEL_COOLDOWN_S", 60.0)
+
+# --- IRC-Based Botnet C2 Beaconing Detection (IrcC2BeaconingRule) ---
+# Detects repeated TCP connections to IRC ports (6667, 6697, 194, 6660-6669)
+# and IRC protocol verb signatures (PING/PONG/NICK/USER/JOIN/PRIVMSG).
+IRC_BEACONING_THRESHOLD    = _detection_int("IRC_BEACONING_THRESHOLD", 5)    # SYN count in window
+IRC_BEACONING_WINDOW       = _detection_int("IRC_BEACONING_WINDOW", 300)      # seconds (5 min)
+IRC_BEACONING_COOLDOWN_S   = _detection_float("IRC_BEACONING_COOLDOWN_S", 300.0)  # per-pair cooldown
+IRC_BEACONING_MAX_SOURCES  = _detection_int("IRC_BEACONING_MAX_SOURCES", 2048)    # LRU state cap
+

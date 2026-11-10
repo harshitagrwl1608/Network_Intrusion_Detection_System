@@ -88,10 +88,21 @@ def _read_alerts(db_path: str) -> list:
     conn.row_factory = sqlite3.Row
     try:
         rows = [dict(r) for r in conn.execute(
-            "SELECT rule_name, src_ip, dst_ip, src_port, dst_port, "
-            "protocol, detail, severity, confidence, timestamp "
+            "SELECT rule_name, rule_version, src_ip, dst_ip, src_port, dst_port, "
+            "protocol, detail, severity, confidence, evidence_json, timestamp "
             "FROM alerts ORDER BY timestamp"
         ).fetchall()]
+        for r in rows:
+            raw_ev = r.get("evidence_json")
+            if isinstance(raw_ev, str):
+                try:
+                    r["evidence"] = json.loads(raw_ev)
+                except Exception:
+                    r["evidence"] = {}
+            elif isinstance(raw_ev, dict):
+                r["evidence"] = raw_ev
+            else:
+                r["evidence"] = {}
     except Exception as e:
         logger.warning(f"Could not read alerts from {db_path}: {e}")
         rows = []
@@ -114,22 +125,8 @@ def _load_labels(path: str) -> list:
     if missing:
         logger.error(f"Labels CSV missing required columns: {missing}")
         sys.exit(2)
-    from engine.rules import (
-        ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
-        IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
-        TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
-        TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
-        TlsAnomalyRule, TcpZeroWindowRule, CleartextHttpOnTlsPortRule,
-    )
-    known_rules = {
-        rule.name for rule in (
-            ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
-            IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
-            TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
-            TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
-            TlsAnomalyRule, TcpZeroWindowRule, CleartextHttpOnTlsPortRule,
-        )
-    }
+    from engine.rules import REGISTERED_RULE_NAMES
+    known_rules = REGISTERED_RULE_NAMES
     protocols = {"TCP", "UDP", "ICMP", "ICMPV6", "ARP"}
     seen_ids = set()
     for line_number, row in enumerate(rows, start=2):
@@ -164,21 +161,9 @@ def _load_labels(path: str) -> list:
 def _run_metadata() -> dict:
     """Return reproducibility metadata without serializing secrets or host IPs."""
     import config
-    from engine.rules import (
-        ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
-        IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
-        TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
-        TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
-        TlsAnomalyRule, TcpZeroWindowRule, CleartextHttpOnTlsPortRule,
-    )
+    from engine.rules import ALL_RULE_CLASSES
 
-    rules = (
-        ArpSpoofRule, BlocklistRule, DistributedSynFloodRule, DnsRule,
-        IcmpSweepRule, PayloadRule, PortScanRule, SynFloodRule,
-        TcpStealthScanRule, UdpScanRule, BruteForceRule, SlowPortScanRule,
-        TcpFlagAnomalyRule, IcmpFloodRule, DataExfiltrationRule, UdpFloodRule,
-        TlsAnomalyRule, TcpZeroWindowRule, CleartextHttpOnTlsPortRule,
-    )
+    rules = ALL_RULE_CLASSES
     setting_names = (
         "PORT_SCAN_THRESHOLD", "UDP_SCAN_THRESHOLD", "UDP_FLOOD_THRESHOLD", "UDP_FLOOD_WINDOW",
         "TCP_STEALTH_SCAN_THRESHOLD",
@@ -197,6 +182,11 @@ def _run_metadata() -> dict:
         "TCP_ZERO_WINDOW_THRESHOLD", "TCP_ZERO_WINDOW_WINDOW",
         "TCP_ZERO_WINDOW_MIN_FLOWS",
         "PAYLOAD_INSPECTION", "PAYLOAD_MAX_BYTES", "PAYLOAD_ALERT_COOLDOWN_S",
+        "NON_DNS_ON_DNS_PORT_COOLDOWN_S",
+        "ICMP_TUNNEL_ENTROPY_THRESHOLD", "ICMP_TUNNEL_MIN_BYTES", "ICMP_TUNNEL_COOLDOWN_S",
+        "IP_FRAGMENT_ANOMALY_COOLDOWN_S", "IP_FRAGMENT_REASSEMBLY_TIMEOUT_S",
+        "IRC_BEACONING_THRESHOLD", "IRC_BEACONING_WINDOW", "IRC_BEACONING_COOLDOWN_S",
+        "IRC_BEACONING_MAX_SOURCES",
     )
     return {
         "schema_version": 1,
@@ -474,6 +464,18 @@ def _report(attack_pcap, benign_pcap, labels_path, scenarios,
                   f"  {str(a.get('detail',''))[:40]}")
     print()
 
+    rule_versions = {}
+    for _, a in tp:
+        rname = a.get("rule_name")
+        rver = a.get("rule_version")
+        if rname and rver and rname not in rule_versions:
+            rule_versions[rname] = rver
+    for a in fp_attack + benign_alerts:
+        rname = a.get("rule_name")
+        rver = a.get("rule_version")
+        if rname and rver and rname not in rule_versions:
+            rule_versions[rname] = rver
+
     return {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "note": "All metrics are from SYNTHETIC test scenarios only.",
@@ -484,6 +486,7 @@ def _report(attack_pcap, benign_pcap, labels_path, scenarios,
         "precision": round(prec, 4), "recall": round(rec, 4), "f1": round(f1, 4),
         "benign_fp_by_rule": benign_by_rule,
         "per_rule": {r: dict(c) for r, c in rule_stats.items()},
+        "rule_versions": rule_versions,
     }
 
 

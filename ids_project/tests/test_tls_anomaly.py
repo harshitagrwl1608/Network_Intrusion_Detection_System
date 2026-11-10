@@ -96,7 +96,7 @@ class TestTlsAnomalyRule(unittest.TestCase):
         alert = self.rule.check(self._pkt(payload=payload, ts=100.0))
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "TLS_ANOMALY")
-        self.assertEqual(alert["rule_version"], "1.12")
+        self.assertEqual(alert["rule_version"], "1.13")
         self.assertEqual(alert["severity"], "high")
         self.assertEqual(alert["confidence"], "high")
         self.assertEqual(alert["evidence"]["anomaly_type"], "DIRECT_IP_SNI")
@@ -114,7 +114,7 @@ class TestTlsAnomalyRule(unittest.TestCase):
                 self.assertEqual(rule._hello_prefixes, {})
                 alert = rule.check(self._pkt(payload=payload, ts=100.0))
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.12")
+                self.assertEqual(alert["rule_version"], "1.13")
 
     def test_suspicious_tunnel_sni_triggers_alert(self):
         for i, domain in enumerate(("c2-node.ngrok-free.app", "beacon.duckdns.org", "tunnel.localtunnel.me", "drop.serveo.net")):
@@ -122,7 +122,7 @@ class TestTlsAnomalyRule(unittest.TestCase):
             alert = self.rule.check(self._pkt(dst=f"203.0.113.{100 + i}", payload=payload, ts=100.0))
             self.assertIsNotNone(alert, f"Expected alert for suspicious SNI {domain}")
             self.assertEqual(alert["rule_name"], "TLS_ANOMALY")
-            self.assertEqual(alert["rule_version"], "1.12")
+            self.assertEqual(alert["rule_version"], "1.13")
             self.assertEqual(alert["severity"], "medium")
             self.assertEqual(alert["confidence"], "heuristic")
             self.assertEqual(alert["evidence"]["anomaly_type"], "SUSPICIOUS_TUNNEL_SNI")
@@ -135,7 +135,7 @@ class TestTlsAnomalyRule(unittest.TestCase):
                 payload = make_tls_client_hello(domain)
                 alert = self.rule.check(self._pkt(dst=f"203.0.113.{150 + i}", payload=payload, ts=100.0))
                 self.assertIsNotNone(alert, f"Expected alert for {domain}")
-                self.assertEqual(alert["rule_version"], "1.12")
+                self.assertEqual(alert["rule_version"], "1.13")
                 self.assertEqual(alert["evidence"]["anomaly_type"], "SUSPICIOUS_TUNNEL_SNI")
 
     def test_legitimate_domain_sni_does_not_fire(self):
@@ -214,6 +214,27 @@ class TestTlsAnomalyRule(unittest.TestCase):
         self.assertIsNotNone(alert)
         self.assertEqual(alert["src_port"], 54321)
         self.assertIsInstance(alert["src_port"], int)
+
+
+    def test_literal_ipv6_sni_and_prune_stale_optional_now(self):
+        rule = TlsAnomalyRule(cooldown=60.0)
+        # Literal IPv6 in SNI
+        payload = make_tls_client_hello("2001:db8::1")
+        alert = rule.check(self._pkt(payload=payload, ts=100.0))
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["evidence"]["anomaly_type"], "DIRECT_IP_SNI")
+        self.assertEqual(alert["rule_version"], "1.13")
+
+        # Future-drifted entry in _seen
+        seen_key = ("192.168.1.1", "198.51.100.42", "DIRECT_IP_SNI")
+        rule._seen[seen_key] = 500.0  # future drift relative to now=200
+
+        # prune_stale at now=200 should clear future-drifted entry
+        rule.prune_stale(now=200.0)
+        self.assertNotIn(seen_key, rule._seen)
+
+        # prune_stale without explicit now (defaults to time.time())
+        rule.prune_stale()
 
 
 if __name__ == "__main__":

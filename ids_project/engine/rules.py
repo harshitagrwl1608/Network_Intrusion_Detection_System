@@ -1,100 +1,83 @@
 """
 engine/rules.py
 ---------------
-All detection rules + the RuleEngine orchestrator.
+All 23 detection rules + the RuleEngine orchestrator for NetGuard IDS.
 
-Rules are stateful and maintain short-term sliding-window memory.
-Each rule's check() method receives a normalised packet record dict and
-returns an alert dict (or None).  Multiple rules may fire on the same
-packet — the engine never exits early.
+Rules are stateful and maintain short-term sliding-window memory bounded by
+OrderedDict LRU caches and prune_stale(now) expiration.
 
-Alert schema (§5.2 of roadmap):
-  rule_name        str   — rule identifier
+Each rule's check() method receives a normalized packet record dict and
+returns a single alert dict (or None). The RuleEngine selects protocol-specific
+candidate rules via `_rules_by_proto` and executes them sequentially. No candidate
+rule exits early — a single packet may legitimately trigger multiple rules.
+
+Alert schema:
+  rule_name        str   — rule identifier (e.g. PORT_SCAN, PAYLOAD_HIT)
   rule_version     str   — "major.minor" for tracking changes
-  event_timestamp  float — from packet capture (preserved through sniffer)
-  src_ip, dst_ip   str
-  src_port, dst_port int
-  protocol         str
-  severity         str   — "high" | "medium" | "low"
-  confidence       str   — "high" | "heuristic" | "low"
-  detail           str   — human-readable summary
-  evidence         dict  — structured, JSON-serialisable facts
-  window_start     float — start of the detection window (stateful rules)
-  window_end       float — end of the detection window (stateful rules)
+  src_ip, dst_ip   str   — endpoint IP addresses
+  src_port, dst_port int — transport ports (1-65535 or None)
+  protocol         str   — "TCP" | "UDP" | "ICMP" | "ARP"
+  severity         str   — "critical" | "high" | "medium" | "low"
+  confidence       str   — "high" | "medium" | "low" | "heuristic"
+  detail           str   — human-readable incident narrative
+  evidence         dict  — structured, JSON-serializable facts (serialized to evidence_json by RuleEngine)
+  window_start     float — start of detection window (stateful rules or None)
+  window_end       float — end of detection window (stateful rules or None)
+  (timestamp, evidence_json, idempotency_key are assigned by RuleEngine on alert receipt)
 
-RuleEngine execution order (all rules run; no early exit):
-  1.  BlocklistRule          — known-malicious IP lookup
-  2.  TcpFlagAnomalyRule     — malformed or suspicious TCP flag combinations
-  3.  PortScanRule           — vertical + horizontal TCP scan
-  4.  UdpScanRule            — vertical + horizontal UDP scan
-  5.  UdpFloodRule           — UDP packet-rate flood
-  6.  TcpStealthScanRule     — FIN/NULL/Xmas vertical TCP scan
-  7.  SynFloodRule           — SYN burst + RST flood rate per source/destination
-  8.  DistributedSynFloodRule — SYN burst per destination across many sources
-  9.  IcmpSweepRule          — ICMP echo target sweep by source
- 10.  IcmpFloodRule          — ICMP echo-request flood
- 11.  ArpSpoofRule           — persistent IP→MAC mapping change
- 12.  PayloadRule (v1.18)    — bounded TCP stream DPI + regex signatures (all matches)
-     Signatures:
-       SQL_INJECTION        — UNION/SELECT, BENCHMARK, LOAD_FILE, INTO OUTFILE, quote-OR bypass
-       XSS                  — script/event handlers + SVG/img/iframe/body bypass vectors
-       CREDENTIAL_LEAK      — password=, Basic auth, Bearer (min 24 chars), X-API-Key
-       CMD_INJECTION        — /bin/sh, reverse shells, interpreter one-liners (python/perl/ruby)
-       PATH_TRAVERSAL       — ../ sequences, /etc/passwd, /proc/self, Windows paths
-       SSRF                 — file/dict/gopher schemes, cloud metadata IPs, IPv6 internal
-       LOG4SHELL            — ${jndi:} + nested lower/upper/:-: obfuscation variants
-       XXE                  — <!ENTITY SYSTEM/PUBLIC> declarations
-       SSTI                 — Jinja2 introspection/arithmetic, Freemarker ?new(), Spring EL
-       SHELLSHOCK           — bash function export CVE-2014-6271 patterns
-       DESERIALIZATION      — Java (0xaced), PHP, Python pickle gadget markers
-       HEADER_INJECTION     — CRLF-encoded Set-Cookie/Location injection
-       SCANNER_PROBE        — sqlmap/nikto/gobuster/zgrab/ZmEu/hydra/medusa User-Agents
-       SENSITIVE_FILE_PROBE — .env/.git/.htpasswd/phpinfo/server-status/backup.sql probes
-       REVERSE_SHELL_CRADLE — curl|sh, wget|sh, PowerShell cradles, socat exec shells
-       HTTP_METHOD_TAMPERING — TRACE/TRACK/DEBUG/WebDAV methods
-       WEBSHELL_INJECTION   — PHP/JSP/ASP/Python web shell execution markers
- 13.  DnsRule (v1.16)       — Shannon entropy + length + frequency + subdomain exfil
-                              + hex/base64/base32 DNS tunnel chunk detection
-                              mDNS (port 5353) and LLMNR (port 5355) are explicitly exempt.
- 14.  BruteForceRule        — repeated auth-port SYNs per (src,dst,port); covers SSH,
-                              RDP, VNC, MySQL, Redis, Elasticsearch, Tomcat/8080/8443
- 15.  SlowPortScanRule      — low-and-slow vertical/horizontal TCP scan (120s window)
- 16.  DataExfiltrationRule  — outbound payload-volume threshold
- 17.  TlsAnomalyRule        — TLS ClientHello/SNI anomalies
- 18.  CleartextHttpOnTlsPortRule — repeated cleartext HTTP on a TLS service port
- 19.  TcpZeroWindowRule     — repeated TCP zero-window advertisements
+Authoritative Rule Inventory (23 registered engine rules):
+  1.  BlocklistRule (v1.4)               — known-malicious IP and CIDR set lookup (Feodo Tracker)
+  2.  TcpFlagAnomalyRule (v1.9)          — malformed or contradictory TCP flags (SYN+FIN, SYN+RST, etc.)
+  3.  PortScanRule (v1.13)               — vertical + horizontal TCP port and host scan
+  4.  UdpScanRule (v1.4)                 — vertical + horizontal UDP port and host scan
+  5.  UdpFloodRule (v1.10)               — UDP packet flood with QUIC/web port 443 threshold
+  6.  TcpStealthScanRule (v1.8)          — FIN, NULL, and Xmas stealth TCP scans
+  7.  SynFloodRule (v1.13)               — initial SYN burst + closed-port grace RST flood
+  8.  DistributedSynFloodRule (v1.9)     — aggregate SYN flood per victim across multiple sources
+  9.  IcmpSweepRule (v1.8)               — ICMP echo target sweep by source
+ 10.  IcmpFloodRule (v1.8)               — ICMP echo-request flood
+ 11.  ArpSpoofRule (v1.8)                — persistent IP→MAC mapping change detection
+ 12.  PayloadRule (v1.24)                — application-aware DPI (HttpParser) + 18 regex signatures
+     Internal DPI Signatures:
+       SQL_INJECTION         — UNION SELECT, error-based, stacked queries, comment bypasses
+       XSS                   — <script>, javascript:, event handlers, SVG/img/iframe vectors
+       CREDENTIAL_LEAK       — passwords, tokens, API keys (scrubbed with [REDACTED] in evidence)
+       CMD_INJECTION         — shell command concatenation, interpreter one-liners, pipe chains
+       PATH_TRAVERSAL        — ../, %2e%2e, absolute system paths (/etc/passwd, win.ini)
+       SSRF                  — loopback, link-local, and cloud metadata (169.254.169.254) targets
+       LOG4SHELL             — ${jndi:} and nested lower/upper obfuscation variants (CVE-2021-44228)
+       XXE                   — <!ENTITY SYSTEM/PUBLIC> XML external entity declarations
+       SSTI                  — Jinja2, Freemarker, Spring EL template injection expressions
+       SHELLSHOCK            — bash function export CVE-2014-6271 patterns in HTTP headers
+       DESERIALIZATION       — Java (0xaced), PHP, Python pickle gadget markers
+       HEADER_INJECTION      — CRLF-encoded Set-Cookie/Location HTTP header splitting
+       SCANNER_PROBE         — sqlmap, nikto, nuclei, masscan, wpscan User-Agents
+       SENSITIVE_FILE_PROBE  — .env, .git/config, id_rsa, wp-config.php access attempts
+       REVERSE_SHELL_CRADLE  — curl|sh, bash -i /dev/tcp, socat, PowerShell cradles
+       HTTP_METHOD_TAMPERING — TRACE, TRACK, WebDAV methods (PROPFIND, SEARCH)
+       WEBSHELL_INJECTION    — PHP/JSP/ASP/Python web shell execution markers (eval, system)
+       ICS_TRISTATION_EXPLOIT— Schneider Electric Triconex TriStation 1131 injection (UDP 1502)
+ 13.  DnsRule (v1.24)                    — Shannon entropy DGA, label length, parent frequency,
+                                           subdomain exfiltration, and hex/base64 chunk tunneling
+ 14.  BruteForceRule (v1.12)             — repeated auth-port SYNs (SSH, FTP, RDP, SMB, MySQL, etc.)
+ 15.  SlowPortScanRule (v1.11)           — low-and-slow horizontal/vertical TCP scan (120s window)
+ 16.  DataExfiltrationRule (v1.20)       — outbound payload volume threshold with web port distinction
+ 17.  TlsAnomalyRule (v1.13)             — TLS ClientHello parsing: direct-IP SNI, obsolete TLS versions
+ 18.  CleartextHttpOnTlsPortRule (v1.11) — repeated cleartext HTTP request verbs on TLS ports (443/8443)
+ 19.  TcpZeroWindowRule (v1.10)          — persistent TCP zero-window (win=0) persist-timer exhaustion
+ 20.  NonDnsTrafficOnDnsPortRule (v1.1)  — non-DNS traffic or interactive command shells on port 53
+ 21.  IcmpTunnelRule (v1.1)              — high-entropy, oversized ICMP echo payload covert channels
+ 22.  IpFragmentAnomalyRule (v1.3)       — Teardrop overlapping fragments and fragment buffer overflows
+ 23.  IrcC2BeaconingRule (v1.3)          — IRC protocol commands and periodic SYN beaconing to IRC ports
 
-MITRE ATT&CK identifiers are not currently part of the alert schema or rule
-configuration. Do not infer a technique mapping from the rule name alone.
-
-False Positive Mitigations:
-  - PortScanRule: ignores hosts whose SOURCE port is a well-known service
-    (servers replying to clients, not scanners).
-  - PortScanRule: only counts SYN packets (new connection attempts).
-  - PortScanRule: severity scales with scan breadth (medium at threshold, high at 2× threshold).
-  - SynFloodRule: only fires on service destination ports (≤ 49151) for SYN floods.
-  - SynFloodRule: RST flood checks aggregate all RSTs from src→dst; fires on very high rates.
-  - Configurable TRUSTED_HOSTS whitelist for TCP/UDP scans, SYN-flood rules,
-    and ICMP sweeps.
-  - Configurable WELL_KNOWN_SERVICE_PORTS set.
-  - DnsRule: whitelists common high-entropy-but-legit CDN patterns (entropy check only).
-  - DnsRule: mDNS (5353) and LLMNR (5355) traffic explicitly excluded.
-  - DnsRule: subdomain exfiltration requires ≥ distinct_subdomain_threshold unique
-    subdomains under one parent domain in a short window; repeated same subdomain not counted.
-  - DnsRule: base64/base32 chunks require mixed case + digits (excludes plain words/UUIDs).
-  - SSTI: requires introspection object access or arithmetic operator (excludes ${VAR} shell env).
-  - CREDENTIAL_LEAK: Bearer token minimum 24 chars (excludes short benign tokens).
-  - BruteForceRule: only fires on known authentication ports; tunable thresholds per-port.
-  - SlowPortScanRule: longer window (default 120s) and higher port threshold to avoid FPs
-    from normal slow browsing patterns.
-  - Stateful rules protect their mutable state with a per-rule lock (§3.8).
-
-Thread safety:
-  Each stateful rule guards its mutable history/table/stream state with a
-  per-rule threading.Lock or threading.RLock so the capture thread (check)
-  and GC thread (prune_stale) cannot race.
+Dispatch & Execution Model:
+  RuleEngine pre-groups candidate rules into `self._rules_by_proto` ("TCP", "UDP", "ICMP", "ICMPV6", "ARP").
+  For each incoming packet, candidate rules are executed sequentially.
+  Generated alerts are enqueued non-blocking to `self._alert_queue` and drained asynchronously
+  by `self._alert_writer` to SQLite or PostgreSQL, with backpressure disk spooling (`AlertSpool`).
 """
 
+import bisect
 import json
 import hashlib
 import math
@@ -106,6 +89,33 @@ import ipaddress
 import logging
 from urllib.parse import unquote_to_bytes
 from collections import defaultdict, Counter, deque, OrderedDict
+
+try:
+    from engine.http_parser import (
+        HttpParser,
+        HttpMessage,
+        HttpDirection,
+        InspectionContext,
+        HTTP_PORTS as _HTTP_PORTS_SET,
+        DB_PORTS as _DB_PORTS_SET,
+        MAIL_PORTS as _MAIL_PORTS_SET,
+        CMD_PORTS as _CMD_PORTS_SET,
+        ICS_PORTS as _ICS_PORTS_SET,
+        redact_sensitive_evidence,
+    )
+except ImportError:
+    from ids_project.engine.http_parser import (
+        HttpParser,
+        HttpMessage,
+        HttpDirection,
+        InspectionContext,
+        HTTP_PORTS as _HTTP_PORTS_SET,
+        DB_PORTS as _DB_PORTS_SET,
+        MAIL_PORTS as _MAIL_PORTS_SET,
+        CMD_PORTS as _CMD_PORTS_SET,
+        ICS_PORTS as _ICS_PORTS_SET,
+        redact_sensitive_evidence,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -222,45 +232,81 @@ WELL_KNOWN_SERVICE_PORTS = {
 # Trusted hosts/IPs that should never be flagged by scan, SYN-flood, or ICMP rules.
 # Add your gateway, DNS server, trusted CDN IPs here.
 TRUSTED_HOSTS: set = set()  # populated from config by RuleEngine
-_TRUSTED_NETWORKS_CACHE_LOCK = threading.Lock()
-_TRUSTED_NETWORKS_CACHE_STATE: tuple[frozenset[str] | None, tuple] = (None, ())
+_TRUSTED_STATE_LOCK = threading.Lock()
+_CACHED_ENTRIES_KEY: frozenset[str] | None = None
+_CACHED_EXACT_IPS: frozenset[str] = frozenset()
+_CACHED_CIDR_NETWORKS: tuple = ()
+_IS_TRUSTED_LRU: dict[str, bool] = {}
+_IS_TRUSTED_LRU_MAX: int = 4096
+
+
+def _refresh_trusted_cache(entries: frozenset[str]):
+    global _CACHED_ENTRIES_KEY, _CACHED_EXACT_IPS, _CACHED_CIDR_NETWORKS, _IS_TRUSTED_LRU
+    exact_ips = set()
+    cidr_nets = []
+    for entry in entries:
+        if "/" in entry:
+            try:
+                cidr_nets.append(ipaddress.ip_network(entry, strict=False))
+            except (TypeError, ValueError):
+                continue
+        else:
+            exact_ips.add(entry)
+    _CACHED_EXACT_IPS = frozenset(exact_ips)
+    _CACHED_CIDR_NETWORKS = tuple(cidr_nets)
+    _CACHED_ENTRIES_KEY = entries
+    _IS_TRUSTED_LRU.clear()
 
 
 def _trusted_networks(entries: frozenset[str]) -> tuple:
     """Compile configured CIDRs once, refreshing when the trusted set changes."""
-    global _TRUSTED_NETWORKS_CACHE_STATE
-    cached_key, networks = _TRUSTED_NETWORKS_CACHE_STATE
-    if entries == cached_key:
-        return networks
-    with _TRUSTED_NETWORKS_CACHE_LOCK:
-        cached_key, networks = _TRUSTED_NETWORKS_CACHE_STATE
-        if entries != cached_key:
-            compiled = []
-            for entry in entries:
-                try:
-                    compiled.append(ipaddress.ip_network(entry, strict=False))
-                except (TypeError, ValueError):
-                    continue
-            networks = tuple(compiled)
-            _TRUSTED_NETWORKS_CACHE_STATE = (entries, networks)
-    return networks
+    global _CACHED_ENTRIES_KEY
+    if entries != _CACHED_ENTRIES_KEY:
+        with _TRUSTED_STATE_LOCK:
+            if entries != _CACHED_ENTRIES_KEY:
+                _refresh_trusted_cache(entries)
+    return _CACHED_CIDR_NETWORKS
 
 
 def _is_trusted(ip: str) -> bool:
     """Return True if ip matches any trusted host or CIDR range."""
-    if not TRUSTED_HOSTS:
+    if not TRUSTED_HOSTS or not ip:
         return False
     try:
         if ip in TRUSTED_HOSTS:
             return True
     except TypeError:
         return False
+
     entries = frozenset(TRUSTED_HOSTS)
+    if entries != _CACHED_ENTRIES_KEY:
+        with _TRUSTED_STATE_LOCK:
+            if entries != _CACHED_ENTRIES_KEY:
+                _refresh_trusted_cache(entries)
+
+    # Fast check: If ip is in the exact IP set
+    if ip in _CACHED_EXACT_IPS:
+        return True
+
+    # If no CIDR subnets are configured, no need for expensive IP parsing
+    if not _CACHED_CIDR_NETWORKS:
+        return False
+
+    # Check small LRU cache for recent CIDR evaluation
+    cached = _IS_TRUSTED_LRU.get(ip)
+    if cached is not None:
+        return cached
+
     try:
         address = ipaddress.ip_address(ip)
     except (TypeError, ValueError):
         return False
-    return any(address in network for network in _trusted_networks(entries))
+
+    matched = any(address in network for network in _CACHED_CIDR_NETWORKS)
+    if len(_IS_TRUSTED_LRU) >= _IS_TRUSTED_LRU_MAX:
+        _IS_TRUSTED_LRU.pop(next(iter(_IS_TRUSTED_LRU)))
+    _IS_TRUSTED_LRU[ip] = matched
+    return matched
 
 
 _INTERNAL_NETWORKS = (
@@ -290,7 +336,8 @@ def _is_internal(ip: str) -> bool:
 
 class BlocklistRule:
     name = "BLOCKLIST"
-    rule_version = "1.3"
+    rule_version = "1.4"
+    MAX_CACHE_ENTRIES = 4096
 
     def __init__(self, blocklist):
         """
@@ -305,26 +352,54 @@ class BlocklistRule:
             # Legacy: plain set of IP strings — no CIDR support
             self._exact = set(blocklist)
             self._networks = []
+        self._v4_networks = [n for n in self._networks if getattr(n, "version", 4) == 4]
+        self._v6_networks = [n for n in self._networks if getattr(n, "version", 6) == 6]
+        self._cache: OrderedDict[str, bool] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def prune_stale(self, now: float = None):
+        """Bounded cache maintenance for blocklist lookups."""
+        with self._lock:
+            while len(self._cache) > self.MAX_CACHE_ENTRIES // 2:
+                self._cache.popitem(last=False)
 
     def _in_blocklist(self, ip: str) -> bool:
         """Check exact set then CIDR networks.
         Normalises the observed IP before exact matching so that
         equivalent IPv6 spellings (e.g. ::1 vs ::0:1) resolve correctly.
+        Caches recent lookups in a bounded LRU dictionary for fast O(1) matching.
         """
         if not ip or not isinstance(ip, str):
             return False
         ip = ip.strip()
+
+        with self._lock:
+            cached = self._cache.get(ip)
+            if cached is not None:
+                self._cache.move_to_end(ip)
+                return cached
+
         try:
             addr = ipaddress.ip_address(ip)
             canon = str(addr)
         except ValueError:
             addr = None
             canon = ip  # not a valid IP — try raw string
+
+        matched = False
         if canon in self._exact:
-            return True
-        if addr is not None and self._networks:
-            return any(addr in net for net in self._networks)
-        return False
+            matched = True
+        elif addr is not None and self._networks:
+            nets = self._v4_networks if addr.version == 4 else self._v6_networks
+            matched = any(addr in net for net in nets)
+
+        with self._lock:
+            if ip not in self._cache and len(self._cache) >= self.MAX_CACHE_ENTRIES:
+                self._cache.popitem(last=False)
+            self._cache[ip] = matched
+            self._cache.move_to_end(ip)
+
+        return matched
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP":
@@ -374,7 +449,7 @@ class BlocklistRule:
 
 class PortScanRule:
     name = "PORT_SCAN"
-    rule_version = "1.12"
+    rule_version = "1.13"
 
     def __init__(self, threshold: int = 15, window: int = 10, protocol: str = "TCP",
                  max_states: int = 10_000):
@@ -405,7 +480,9 @@ class PortScanRule:
         # Re-fire cooldown = one full window (avoids alerting every packet once over threshold)
         self._alert_cooldown: float = float(self.window)
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         with self._lock:
             for d in (self._vert, self._horiz):
@@ -426,10 +503,12 @@ class PortScanRule:
                             self._vert_saturated.discard(key)
                         else:
                             self._horiz_saturated.discard(key)
-            # Evict stale cooldown entries
+            self._vert_saturated.intersection_update(self._vert)
+            self._horiz_saturated.intersection_update(self._horiz)
+            # Evict stale cooldown entries and future-drifted anomalies
             for fired in (self._vert_fired, self._horiz_fired):
                 for key in list(fired):
-                    if fired[key] < cutoff:
+                    if fired[key] < (now - self._alert_cooldown) or fired[key] > now:
                         del fired[key]
 
     def check(self, record: dict) -> dict | None:
@@ -474,9 +553,18 @@ class PortScanRule:
         with self._lock:
             vertical = self._vert.get(vkey)
             horizontal = self._horiz.get(hkey)
-            if (vertical and now < next(reversed(vertical.values()))) or \
-               (horizontal and now < next(reversed(horizontal.values()))):
-                return None  # don't let late events skew an active window
+            if vertical:
+                latest_v = next(reversed(vertical.values()))
+                if latest_v - now > self.window:
+                    vertical.clear()
+                elif now < latest_v:
+                    return None
+            if horizontal:
+                latest_h = next(reversed(horizontal.values()))
+                if latest_h - now > self.window:
+                    horizontal.clear()
+                elif now < latest_h:
+                    return None
             # Always update BOTH vertical and horizontal histories first,
             # then check thresholds. This ensures a packet contributes to
             # both scan dimensions even when one threshold fires. (P2 §4)
@@ -627,7 +715,7 @@ class UdpScanRule(PortScanRule):
     """UDP scan detector sharing the TCP scanner's vertical/horizontal logic."""
 
     name = "UDP_SCAN"
-    rule_version = "1.3"
+    rule_version = "1.4"
 
     def __init__(self, threshold: int = 15, window: int = 10,
                  max_states: int = 10_000):
@@ -649,17 +737,20 @@ class UdpFloodRule:
     """
 
     name = "UDP_FLOOD"
-    rule_version = "1.9"
+    rule_version = "1.10"
     ALERT_COOLDOWN_S: float = 60.0
     _EXEMPT_SRC_PORTS: set[int] = {53, 67, 68, 123, 5353}
+    _CORE_SERVICE_PORTS: set[int] = {53, 67, 68, 123, 5353}
 
     def __init__(self, threshold: int = 50, window: int = 5,
                  max_flows: int = 4096, cooldown: float = 60.0,
-                 web_threshold: int = 500):
+                 web_threshold: int = 500, service_threshold: int = 250):
         self.threshold = _positive_setting(
             threshold, 50, "UDP_FLOOD_THRESHOLD")
         self.web_threshold = max(self.threshold, _positive_setting(
             web_threshold, 500, "UDP_FLOOD_WEB_THRESHOLD"))
+        self.service_threshold = max(self.threshold, _positive_setting(
+            service_threshold, 250, "UDP_FLOOD_SERVICE_THRESHOLD"))
         self.window = _positive_setting(window, 5, "UDP_FLOOD_WINDOW")
         self.max_flows = _positive_setting(max_flows, 4096, "UDP_FLOOD_MAX_FLOWS")
         self.cooldown = _nonnegative_float_setting(
@@ -670,7 +761,9 @@ class UdpFloodRule:
         # (src_ip, dst_ip) → last_alert_time
         self._cooldown: OrderedDict[tuple, float] = OrderedDict()
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         cutoff_cd = now - self.cooldown
         with self._lock:
@@ -711,9 +804,12 @@ class UdpFloodRule:
             return None
         if src_port is not None and not (1 <= src_port <= 65535):
             return None
-        effective_threshold = (
-            self.web_threshold if (src_port == 443 or dst_port == 443) else self.threshold
-        )
+        if src_port == 443 or dst_port == 443:
+            effective_threshold = self.web_threshold
+        elif dst_port in self._CORE_SERVICE_PORTS:
+            effective_threshold = self.service_threshold
+        else:
+            effective_threshold = self.threshold
 
         now = _finite_record_timestamp(record)
         if now is None:
@@ -730,8 +826,12 @@ class UdpFloodRule:
                 self._history.popitem(last=False)
 
             history = self._history.get(key, [])
-            if history and now < history[-1]:
-                return None
+            if history:
+                latest = history[-1]
+                if latest - now > self.window:
+                    history = []
+                elif now < latest:
+                    return None
             history = [t for t in history if 0 <= now - t <= self.window]
             history.append(now)
             self._history[key] = history
@@ -781,7 +881,7 @@ class TcpStealthScanRule:
     """Detect vertical FIN, NULL, and Xmas TCP probes."""
 
     name = "TCP_STEALTH_SCAN"
-    rule_version = "1.7"
+    rule_version = "1.8"
     _FIN, _SYN, _RST, _PSH, _ACK, _URG, _ECE, _CWR = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80
     _XMAS_FLAGS = _FIN | _PSH | _URG
     _DISALLOWED_FLAGS = _SYN | _RST | _ACK | _ECE | _CWR
@@ -794,7 +894,7 @@ class TcpStealthScanRule:
         self.max_states = _positive_setting(
             max_states, 10_000, "TCP_STEALTH_SCAN_MAX_STATES")
         self._lock = threading.RLock()
-        self._probes: dict[tuple, list[tuple[float, int, str]]] = {}
+        self._probes: OrderedDict[tuple, list[tuple[float, int, str]]] = OrderedDict()
         self._fired: OrderedDict[tuple, float] = OrderedDict()
         self._alert_cooldown = float(self.window)
 
@@ -836,15 +936,20 @@ class TcpStealthScanRule:
         cutoff = now - self.window
         with self._lock:
             history = self._probes.get(key, [])
-            if history and now < history[-1][0]:
-                return None
+            if history:
+                latest = history[-1][0]
+                if latest - now > self.window:
+                    history = []
+                elif now < latest:
+                    return None
             active = [(ts, port, kind) for ts, port, kind in history
                       if cutoff <= ts <= now and port != dst_port]
             active.append((now, dst_port, probe_type))
             if key not in self._probes and len(self._probes) >= self.max_states:
-                self._probes.pop(next(iter(self._probes)))
+                self._probes.popitem(last=False)
             self._probes.pop(key, None)
             self._probes[key] = active
+            self._probes.move_to_end(key)
             distinct_ports = len(active)
             if distinct_ports < self.threshold:
                 return None
@@ -891,7 +996,9 @@ class TcpStealthScanRule:
                 "window_end": now,
             }
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         with self._lock:
             for key in list(self._probes):
@@ -900,10 +1007,10 @@ class TcpStealthScanRule:
                 if active:
                     self._probes[key] = active
                 else:
-                    del self._probes[key]
+                    self._probes.pop(key, None)
             for key, fired_at in list(self._fired.items()):
                 if fired_at <= cutoff or fired_at > now:
-                    del self._fired[key]
+                    self._fired.pop(key, None)
 
 
 # =============================================================================
@@ -930,7 +1037,7 @@ class TcpFlagAnomalyRule:
     """
 
     name = "TCP_FLAG_ANOMALY"
-    rule_version = "1.8"
+    rule_version = "1.9"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, cooldown: float = 60.0, max_states: int = 5000):
@@ -942,7 +1049,9 @@ class TcpFlagAnomalyRule:
         # (src_ip, anomaly_type) → last_alert_timestamp
         self._cooldown: OrderedDict[tuple, float] = OrderedDict()
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.cooldown
         with self._lock:
             for key in list(self._cooldown):
@@ -1314,8 +1423,12 @@ class SynFloodRule:
                 self._history.pop(evicted)
                 self._syn_cooldown.pop(evicted, None)
             history = self._history.get(key, [])
-            if history and now < history[-1]:
-                return None  # ignore reordered events; they cannot be in this window
+            if history:
+                latest = history[-1]
+                if latest - now > self.window:
+                    history = []
+                elif now < latest:
+                    return None
             history = [t for t in history if 0 <= now - t <= self.window]
             history.append(now)
             count = len(history)
@@ -1376,7 +1489,7 @@ class DistributedSynFloodRule:
     """Detect high-volume initial-SYN bursts to one service from many sources."""
 
     name = "DISTRIBUTED_SYN_FLOOD"
-    rule_version = "1.8"
+    rule_version = "1.9"
     ALERT_COOLDOWN_S = 60.0
 
     def __init__(self, threshold: int = 500, min_sources: int = 20,
@@ -1395,26 +1508,28 @@ class DistributedSynFloodRule:
         # that many events; if they do not, no older event can restore it.
         # Keeping the most recently active `min_sources` sources is enough to
         # decide the distinct-source predicate without retaining every packet.
-        self._history: dict[tuple, tuple[deque[float], dict[str, float]]] = {}
-        self._cooldown: dict[tuple, float] = {}
+        self._history: OrderedDict[tuple, tuple[deque[float], OrderedDict[str, float]]] = OrderedDict()
+        self._cooldown: OrderedDict[tuple, float] = OrderedDict()
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         with self._lock:
             for key in list(self._history):
                 packet_times, sources = self._history[key]
                 packet_times = deque(ts for ts in packet_times if cutoff <= ts <= now)
-                sources = {src: ts for src, ts in sources.items()
-                           if cutoff <= ts <= now}
+                sources = OrderedDict((src, ts) for src, ts in sources.items()
+                                      if cutoff <= ts <= now)
                 if packet_times:
                     self._history.pop(key, None)
                     self._history[key] = (packet_times, sources)
                 else:
-                    del self._history[key]
+                    self._history.pop(key, None)
             cooldown_cutoff = now - self.ALERT_COOLDOWN_S
             for key, last_alert in list(self._cooldown.items()):
                 if last_alert < cooldown_cutoff or last_alert > now:
-                    del self._cooldown[key]
+                    self._cooldown.pop(key, None)
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP" or record.get("protocol") != "TCP":
@@ -1438,29 +1553,30 @@ class DistributedSynFloodRule:
             state = self._history.get(key)
             if state is None:
                 if len(self._history) >= self.max_targets:
-                    evicted = next(iter(self._history))
-                    self._history.pop(evicted)
+                    evicted, _ = self._history.popitem(last=False)
                     self._cooldown.pop(evicted, None)
-                packet_times, sources = deque(), {}
+                packet_times, sources = deque(), OrderedDict()
             else:
                 packet_times, sources = state
             if packet_times and now < packet_times[-1]:
                 return None
             packet_times = deque(ts for ts in packet_times
                                  if 0 <= now - ts <= self.window)
-            sources = {host: ts for host, ts in sources.items()
-                       if 0 <= now - ts <= self.window}
+            sources = OrderedDict((host, ts) for host, ts in sources.items()
+                                  if 0 <= now - ts <= self.window)
             packet_times.append(now)
             if len(packet_times) > self.threshold:
                 packet_times.popleft()
             sources.pop(src, None)
             sources[src] = now
+            sources.move_to_end(src)
             if len(sources) > self.min_sources:
-                sources.pop(next(iter(sources)))
+                sources.popitem(last=False)
             source_count = len(sources)
             if len(packet_times) < self.threshold or source_count < self.min_sources:
                 self._history.pop(key, None)
                 self._history[key] = (packet_times, sources)
+                self._history.move_to_end(key)
                 return None
             window_start = packet_times[0]
             packet_count = len(packet_times)
@@ -1469,10 +1585,17 @@ class DistributedSynFloodRule:
                     and now - last_alert < self.ALERT_COOLDOWN_S):
                 self._history.pop(key, None)
                 self._history[key] = (packet_times, sources)
+                self._history.move_to_end(key)
+                self._cooldown.move_to_end(key)
                 return None
+            if key not in self._cooldown and len(self._cooldown) >= self.max_targets:
+                self._cooldown.popitem(last=False)
+            self._cooldown.pop(key, None)
             self._cooldown[key] = now
+            self._cooldown.move_to_end(key)
             self._history.pop(key, None)
             self._history[key] = (packet_times, sources)
+            self._history.move_to_end(key)
 
         return {
             "rule_name": self.name,
@@ -1513,7 +1636,7 @@ class IcmpSweepRule:
     """Detect a source probing distinct IPv4/IPv6 destinations with echo requests."""
 
     name = "ICMP_SWEEP"
-    rule_version = "1.7"
+    rule_version = "1.8"
 
     def __init__(self, threshold: int = 12, window: int = 10,
                  max_sources: int = 4096):
@@ -1522,10 +1645,12 @@ class IcmpSweepRule:
         self.max_sources = _positive_setting(
             max_sources, 4096, "ICMP_SWEEP_MAX_SOURCES")
         self._lock = threading.RLock()
-        self._history: dict[str, list[tuple[float, str]]] = defaultdict(list)
-        self._fired: dict[str, float] = {}
+        self._history: OrderedDict[str, list[tuple[float, str]]] = OrderedDict()
+        self._fired: OrderedDict[str, float] = OrderedDict()
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         with self._lock:
             for src in list(self._history):
@@ -1534,10 +1659,10 @@ class IcmpSweepRule:
                 if active:
                     self._history[src] = active
                 else:
-                    del self._history[src]
+                    self._history.pop(src, None)
             for src, fired_at in list(self._fired.items()):
                 if now - fired_at >= self.window or fired_at > now:
-                    del self._fired[src]
+                    self._fired.pop(src, None)
 
     def check(self, record: dict) -> dict | None:
         protocol = record.get("protocol")
@@ -1562,28 +1687,34 @@ class IcmpSweepRule:
         if now is None:
             return None
         with self._lock:
-            # PCAPs are expected to be ordered; reject a late/reordered event
-            # instead of letting it erase newer window state.
             history = self._history.get(src, [])
-            if history and now < history[-1][0]:
-                return None
+            if history:
+                latest = history[-1][0]
+                if latest - now > self.window:
+                    history = []
+                elif now < latest:
+                    return None
             history = [(ts, host) for ts, host in history
                        if 0 <= now - ts <= self.window and host != dst]
             history.append((now, dst))
+            if src not in self._history and len(self._history) >= self.max_sources:
+                self._history.popitem(last=False)
             self._history.pop(src, None)
-            if len(self._history) >= self.max_sources:
-                self._history.pop(next(iter(self._history)))
             self._history[src] = history
+            self._history.move_to_end(src)
             if len(history) < self.threshold:
                 return None
             targets = sorted(host for _, host in history)
             last_alert = self._fired.get(src)
             self._history.pop(src, None)
             if last_alert is not None and now - last_alert < self.window:
+                self._fired.move_to_end(src)
                 return None
             if src not in self._fired and len(self._fired) >= self.max_sources:
-                self._fired.pop(next(iter(self._fired)))
+                self._fired.popitem(last=False)
+            self._fired.pop(src, None)
             self._fired[src] = now
+            self._fired.move_to_end(src)
             window_start = history[0][0]
 
         return {
@@ -1630,7 +1761,7 @@ class IcmpFloodRule:
     """
 
     name = "ICMP_FLOOD"
-    rule_version = "1.7"
+    rule_version = "1.8"
     ALERT_COOLDOWN_S: float = 60.0
 
     def __init__(self, threshold: int = 50, window: int = 5,
@@ -1643,11 +1774,13 @@ class IcmpFloodRule:
             cooldown, 60.0, "ICMP_FLOOD_COOLDOWN")
         self._lock = threading.RLock()
         # (src_ip, dst_ip) → list of timestamps
-        self._history: dict[tuple, list[float]] = {}
+        self._history: OrderedDict[tuple, list[float]] = OrderedDict()
         # (src_ip, dst_ip) → last_alert_time
         self._cooldown: OrderedDict[tuple, float] = OrderedDict()
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         cutoff_cd = now - self.cooldown
         with self._lock:
@@ -1656,10 +1789,10 @@ class IcmpFloodRule:
                 if active:
                     self._history[key] = active
                 else:
-                    del self._history[key]
+                    self._history.pop(key, None)
             for key in list(self._cooldown):
                 if self._cooldown[key] < cutoff_cd or self._cooldown[key] > now:
-                    del self._cooldown[key]
+                    self._cooldown.pop(key, None)
 
     def check(self, record: dict) -> dict | None:
         proto = record.get("protocol", "")
@@ -1696,15 +1829,20 @@ class IcmpFloodRule:
                 return None
 
             if key not in self._history and len(self._history) >= self.max_flows:
-                self._history.pop(next(iter(self._history)))
+                self._history.popitem(last=False)
 
             history = self._history.get(key, [])
-            if history and now < history[-1]:
-                return None  # reject out-of-order timestamps
+            if history:
+                latest = history[-1]
+                if latest - now > self.window:
+                    history = []
+                elif now < latest:
+                    return None
             history = [t for t in history if 0 <= now - t <= self.window]
             history.append(now)
             self._history.pop(key, None)
             self._history[key] = history
+            self._history.move_to_end(key)
 
             count = len(history)
             window_start = history[0]
@@ -1935,7 +2073,7 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
     (
         "SQL_INJECTION",
         re.compile(
-            rb"(?i)(union\s+(?:all\s+)?select|select\s+(?:\*|null|@@version|user\s*\()|drop\s+table|drop\s+database"
+            rb"(?i)(union(?:\s+|\()+(?:all(?:\s+|\()+)?select|select(?:\s+|\()+(?:\*|null|@@version|user\s*\()|drop\s+table|drop\s+database"
             rb"|insert\s+into|update\s+\w+\s+set"
             rb"|or\s+[\x27\x22]?\s*[\w]+\s*=\s*[\x27\x22]?\s*[\w]"
             rb"|or\s+1\s*=\s*1|or\s+\x27\w+\x27\s*=\s*\x27\w+\x27"
@@ -1943,7 +2081,7 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
             # value. Only accept a MySQL comment after a SQL-like value or
             # whitespace; exclude assignment values such as `bgColor=#` and
             # punctuation in binary data while retaining line-ending comments.
-            rb"|--.{0,2}(?:\r?\n|$)|(?:(?<=[\w'\")\]])|(?<=\s))#[ \t]*(?:\r?\n|$)"
+            rb"|(?<!-)(?:(?<=[\x27\x22`\)\]])\s*--(?:[ \t\r\n+\-]|$)|(?<=\s)--(?:[ \t]+.*|[ \t]*)(?:\r?\n|$)|(?:(?<=[\w\x27\x22`\)\]])|(?<=\s))#[ \t]*(?:\r?\n|$))"
             rb"|sleep\s*\(\s*\d+|benchmark\s*\(\s*\d+|waitfor\s+delay\s+\x27"
             rb"|exec\s+(?:xp_cmdshell|sp_executesql)|xp_cmdshell"
             rb"|load_file\s*\(|into\s+(?:outfile|dumpfile)\s+[\x27\x22]"
@@ -2026,8 +2164,8 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
             # NOTE: %252e%252e (double URL-encoded) handled by multi-pass URL decoder
             # URL-encoded backslash traversal: ..%5c..%5c (Windows)
             rb"|\.\.%5[cC]|%2[eE]%2[eE]%5[cC]"
-            # Overlong UTF-8 encoding: %c0%ae = '.', %c1%9c = '\'
-            rb"|%c0%[aA][eE]%c0%[aA][eE]|%c1%9[cC]"
+            # Overlong UTF-8 encoding: %c0%ae = '.', %c0%af = '/', %c1%9c = '\'
+            rb"|%c0%[aA][eE]%c0%[aA][eE]|%c0%[aA][fF]|%c1%9[cC]"
             # Fullwidth slash bypass: \uFF0F (HTML entity / URL %ef%bc%8f)
             rb"|%[eE][fF]%[bB][cC]%8[fF]"
             # Nginx/Tomcat specific: /..;/ bypass
@@ -2072,10 +2210,11 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
         re.compile(
             rb"(?i)(\$\{jndi:"
             rb"|\$\{\$\{lower:j\}|\$\{\$\{upper:j\}"
-            rb"|\$\{\$\{::-j\}\$\{::-n\}\$\{::-d\}\$\{::-i\}:"
-            rb"|j\$\{::-n\}di:|j\$\{lower:n\}di:|\$\{j\$\{:\:-n\}di:"
+            rb"|\$\{\$\{:?:-j\}\$\{:?:-n\}\$\{:?:-d\}\$\{:?:-i\}:"
+            rb"|j\$\{:?:-n\}di:|j\$\{lower:n\}di:|\$\{j\$\{:?:-n\}di:"
             rb"|\$\{\$\{env:NaN}:|-j\}ndi:|\$\{jn\$\{\w*:\}di:"
-            rb"|\$\{j\$\{lower:nd\}i:|\$\{::-j\}\$\{::-n\}\$\{::-d\})"
+            rb"|\$\{j\$\{lower:nd\}i:|\$\{:?:-j\}\$\{:?:-n\}\$\{:?:-d\}"
+            rb"|\$\{\$\{:?:-j\}ndi:)"
         ),
         "high",
     ),
@@ -2236,13 +2375,13 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
     (
         "HTTP_METHOD_TAMPERING",
         re.compile(
-            rb"(?i)(?:^|\r\n)\s*(TRACE|TRACK|DEBUG|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK|SEARCH)\s+/[^\r\n]*\s+HTTP/[0-9.]+|Translate:\s*f\b"
+            rb"(?i)(?:^|[\r\n])\s*(TRACE|TRACK|DEBUG|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK|SEARCH)\s+/[^\r\n]*\s+HTTP/[0-9.]+|Translate:\s*f\b"
             # CONNECT to internal IPs (proxy abuse for internal SSRF tunneling)
-            rb"|(?:^|\r\n)\s*CONNECT\s+(?:localhost|127\.0\.0\.1|192\.168\.|10\.|172\.1[6-9]\.|172\.2\d\.|172\.3[01]\.)"
+            rb"|(?:^|[\r\n])\s*CONNECT\s+(?:localhost|127\.0\.0\.1|192\.168\.|10\.|172\.1[6-9]\.|172\.2\d\.|172\.3[01]\.)"
             # DELETE/PATCH on management paths.  Generic REST user endpoints
             # are common application traffic and do not by themselves imply
             # method tampering.
-            rb"|(?:^|\r\n)\s*(?:DELETE|PATCH)\s+/(?:admin|api/(?:v[0-9]+/)?(?:admin|config)|config|actuator|manage)(?=[/?\s])[^\r\n]*\s+HTTP/",
+            rb"|(?:^|[\r\n])\s*(?:DELETE|PATCH)\s+/(?:admin|api/(?:v[0-9]+/)?(?:admin|config)|config|actuator|manage)(?=[/?\s])[^\r\n]*\s+HTTP/",
         ),
         "high",
     ),
@@ -2265,6 +2404,16 @@ _PAYLOAD_SIGNATURES: list[tuple[str, re.Pattern, str]] = [
             rb"Server\.CreateObject\s*\(\s*[\x27\x22](?:WScript\.Shell|Scripting\.FileSystemObject)|"
             # Generic base64-encoded cmd execution markers
             rb"(?:fromCharCode|atob)\s*\([^)]{10,}\)\s*\))"
+        ),
+        "high",
+    ),
+    # ICS / SCADA Safety System Exploitation — TRITON/TRISIS malware targeting Schneider Electric
+    # Triconex TriStation 1131 protocol (UDP port 1502).
+    # Detects unauthorized firmware program injection (Function Code 0x42) and program execution (0x37).
+    (
+        "ICS_TRISTATION_EXPLOIT",
+        re.compile(
+            rb"(?s)^\x05\x00.{4}[\x42\x37]"
         ),
         "high",
     ),
@@ -2299,6 +2448,7 @@ _DPI_PORTS: set[int] = {
     9090,           # Prometheus / Cockpit
     7547,           # TR-069 (CPE WAN management — Mirai target)
     8291,           # Winbox (MikroTik — routerOS exploits)
+    1502,           # Triconex TriStation 1131 (ICS/SCADA safety controller — TRITON/TRISIS)
 }
 
 
@@ -2320,7 +2470,7 @@ def _multi_unquote(data: bytes, max_passes: int = 3) -> bytes:
 
 class PayloadRule:
     name = "PAYLOAD_HIT"
-    rule_version = "1.23"
+    rule_version = "1.24"
 
     def __init__(self, max_bytes: int = 512, enabled: bool = True,
                  stream_timeout: int = 30, max_streams: int = 2048,
@@ -2347,7 +2497,9 @@ class PayloadRule:
         self._alerted: OrderedDict[tuple, float] = OrderedDict()
         self._max_alert_states = max(1024, self.max_streams * 32)
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.stream_timeout
         with self._stream_lock:
             for key in list(self._streams):
@@ -2649,9 +2801,53 @@ class PayloadRule:
                     samples.append((comment_normalized, "comment_normalized", truncated))
                     seen_representations.add(comment_normalized)
 
+        # Determine protocol context and parse application layer
+        primary_sample = (
+            stream_sample
+            if (stream_sample and stream_sample != packet_sample)
+            else packet_sample
+        )
+        http_msg = HttpParser.parse(primary_sample, src_port=src_port, dst_port=dst_port)
+
+        # 1. HTTP Response suppression:
+        # Never flag server responses as client injection attacks.
+        # This eliminates false alarms from reflected user input, documentation,
+        # and static JS libraries (e.g., document.write, alert).
+        if http_msg.direction == HttpDirection.RESPONSE:
+            return None
+
+        # 2. Protocol-specific signature scoping:
+        if http_msg.direction == HttpDirection.REQUEST:
+            # Client HTTP request: evaluate web application and server-side signatures
+            allowed_signatures = {s[0] for s in _PAYLOAD_SIGNATURES if s[0] != "ICS_TRISTATION_EXPLOIT"}
+        elif dst_port in _MAIL_PORTS_SET:
+            # Mail protocols (SMTP/IMAP/POP3) when not an HTTP request: web SQLi/XSS/Traversal/SSRF/XXE/SSTI do not apply.
+            allowed_signatures = {"LOG4SHELL", "CMD_INJECTION", "REVERSE_SHELL_CRADLE", "CREDENTIAL_LEAK"}
+        elif dst_port in _DB_PORTS_SET:
+            # Database protocols (MSSQL, MySQL, Postgres, MongoDB, Elasticsearch)
+            allowed_signatures = {"SQL_INJECTION", "LOG4SHELL", "CREDENTIAL_LEAK"}
+        elif dst_port in _CMD_PORTS_SET:
+            # Command / management protocols (FTP, Telnet, Redis, Memcached, ActiveMQ)
+            allowed_signatures = {"CMD_INJECTION", "REVERSE_SHELL_CRADLE", "CREDENTIAL_LEAK", "LOG4SHELL"}
+        elif dst_port in _ICS_PORTS_SET:
+            # ICS/SCADA protocol (TriStation 1131 on UDP 1502)
+            allowed_signatures = {"ICS_TRISTATION_EXPLOIT"}
+        else:
+            # Standard HTTP / application traffic: all signatures except ICS exploit
+            allowed_signatures = {s[0] for s in _PAYLOAD_SIGNATURES if s[0] != "ICS_TRISTATION_EXPLOIT"}
+
+        # If HTTP request has extracted form parameters, include clean parameter values
+        if http_msg.direction == HttpDirection.REQUEST and http_msg.form_params:
+            for _, param_val in http_msg.form_params:
+                if param_val and param_val not in seen_representations:
+                    samples.append((param_val, "form_body_param", len(param_val) >= self.max_bytes))
+                    seen_representations.add(param_val)
+
         # Collect ALL matching signatures (§3.4 — do not return on first match)
         hits: list[dict] = []
         for label, pattern, confidence in _PAYLOAD_SIGNATURES:
+            if allowed_signatures is not None and label not in allowed_signatures:
+                continue
             match = None
             for sample, source, truncated in samples:
                 for found in pattern.finditer(sample):
@@ -2676,9 +2872,44 @@ class PayloadRule:
                     matched_str = matched_bytes.decode("utf-8", errors="replace")
                 except Exception:
                     matched_str = repr(matched_bytes)
-                hits.append({"signature": label, "matched": matched_str,
-                             "confidence": confidence,
-                             "representation": representation})
+
+                # Scrub credentials from alert evidence
+                if label == "CREDENTIAL_LEAK":
+                    matched_str = redact_sensitive_evidence(label, matched_str)
+
+                # Context attribution
+                if http_msg.direction == HttpDirection.REQUEST:
+                    if label in ("SCANNER_PROBE", "HEADER_INJECTION", "SHELLSHOCK"):
+                        context = "http_request_header"
+                    elif label in ("HTTP_METHOD_TAMPERING", "SENSITIVE_FILE_PROBE"):
+                        context = "http_request_line"
+                    elif label == "PATH_TRAVERSAL" and http_msg.path and pattern.search(http_msg.path):
+                        context = "http_request_path"
+                    elif http_msg.query_string and pattern.search(http_msg.query_string):
+                        context = "http_query_param"
+                    elif http_msg.body and pattern.search(http_msg.body):
+                        context = "http_request_body"
+                    else:
+                        context = "http_request"
+                elif dst_port in _DB_PORTS_SET or src_port in _DB_PORTS_SET:
+                    context = "db_payload"
+                elif dst_port in _MAIL_PORTS_SET or src_port in _MAIL_PORTS_SET:
+                    context = "mail_payload"
+                elif dst_port in _CMD_PORTS_SET or src_port in _CMD_PORTS_SET:
+                    context = "command_service"
+                elif dst_port in _ICS_PORTS_SET or src_port in _ICS_PORTS_SET:
+                    context = "ics_payload"
+                else:
+                    context = "raw_stream"
+
+                hits.append({
+                    "signature": label,
+                    "matched": matched_str,
+                    "confidence": confidence,
+                    "representation": representation,
+                    "context": context,
+                    "direction": http_msg.direction.value,
+                })
 
         if hits and self.alert_cooldown > 0:
             src_ip = record.get("src_ip")
@@ -2804,7 +3035,12 @@ _DGA_WHITELIST_SUFFIXES: tuple[str, ...] = (
 
 def _shannon_entropy(s: str) -> float:
     """Return Shannon entropy in bits/character for string s."""
-    if not s:
+    if not s or not isinstance(s, str):
+        return 0.0
+    # Strip IDN punycode prefix 'xn--' if present so artificial prefix doesn't skew metric
+    if s.startswith("xn--"):
+        s = s[4:]
+    if len(s) <= 1:
         return 0.0
     freq = Counter(s)
     n = len(s)
@@ -2851,7 +3087,7 @@ _COMMON_MULTI_LABEL_CC_SUFFIXES = frozenset({
 
 class DnsRule:
     name = "DNS_ANOMALY"
-    rule_version = "1.23"
+    rule_version = "1.24"
 
     # Alert dedup cooldown — class-level default; overridable via __init__
     ALERT_COOLDOWN_S = 60
@@ -2924,13 +3160,64 @@ class DnsRule:
             return ".".join(labels[-3:])
         return ".".join(labels[-2:]) if len(labels) >= 2 else domain
 
+    @staticmethod
+    def _is_valid_reverse_mapping(domain_lower: str) -> bool:
+        """Validate that reverse mapping queries conform to RFC 1035 / RFC 3596 reverse PTR syntax.
+
+        Prevents adversaries from tunneling alphanumeric exfiltration payloads under .in-addr.arpa or .ip6.arpa.
+        """
+        try:
+            if domain_lower.endswith(".in-addr.arpa"):
+                prefix = domain_lower[:-len(".in-addr.arpa")].strip(".")
+                labels = [l for l in prefix.split(".") if l]
+                return bool(labels) and all(
+                    1 <= len(label) <= 3
+                    and all(c in "0123456789" for c in label)
+                    and 0 <= int(label) <= 255
+                    for label in labels
+                )
+            elif domain_lower.endswith(".ip6.arpa"):
+                prefix = domain_lower[:-len(".ip6.arpa")].strip(".")
+                labels = [l for l in prefix.split(".") if l]
+                return bool(labels) and len(labels) <= 32 and all(
+                    len(label) == 1 and label in "0123456789abcdef" for label in labels
+                )
+        except (ValueError, TypeError, OverflowError):
+            return False
+        return False
+
+    def _calc_entropy(self, label: str) -> float:
+        """Calculate effective DGA entropy for a label.
+
+        Compound hyphenated hostnames (e.g. 'student-halls-boddington-pc125-169')
+        falsely inflate standard Shannon entropy because concatenating multiple
+        natural words and numbers separated by hyphens yields an artificially broad
+        character distribution. Real-world DGAs generate randomized tokens without
+        hyphens, or position random tokens inside sub-components.
+
+        When a label contains hyphens, we require at least one hyphen-separated
+        segment of length >= 8 to independently exhibit DGA-level randomness
+        (entropy >= entropy_threshold). If none does, the effective DGA entropy
+        is bounded by the maximum segment entropy, suppressing false positives on
+        compound hostnames while preserving attack recall.
+        """
+        base_ent = _shannon_entropy(label)
+        if "-" in label:
+            segments = [seg for seg in label.split("-") if seg]
+            seg_ents = [_shannon_entropy(seg) for seg in segments if len(seg) >= 8]
+            if not seg_ents or max(seg_ents) < self.entropy_threshold:
+                return max([_shannon_entropy(seg) for seg in segments], default=0.0)
+        return base_ent
+
     def _prune_seen(self, now: float):
         cutoff = now - 120
         for key, seen_at in list(self._seen.items()):
             if seen_at <= cutoff or seen_at > now:
                 del self._seen[key]
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff_freq = now - self._freq_window
         cutoff_sd = now - self._subdomain_window
         with self._lock:
@@ -2950,8 +3237,7 @@ class DnsRule:
             for key, timestamp in list(self._seen_queries.items()):
                 if timestamp < retry_cutoff or timestamp > now:
                     del self._seen_queries[key]
-            if len(self._seen) > 5000:
-                self._prune_seen(now)
+            self._prune_seen(now)
 
     def check(self, record: dict) -> dict | None:
         if record.get("type") != "IP":
@@ -2966,8 +3252,15 @@ class DnsRule:
         if dst_port != 53 and src_port != 53:
             return None
 
-        domain: str | None = record.get("dns_query")
+        domain = record.get("dns_query")
         if not domain:
+            return None
+        if isinstance(domain, (bytes, bytearray)):
+            try:
+                domain = bytes(domain).decode("utf-8", errors="replace")
+            except Exception:
+                return None
+        elif not isinstance(domain, str):
             return None
 
         # DNS labels are case-insensitive; canonicalize before deriving the
@@ -3003,12 +3296,12 @@ class DnsRule:
         # measuring public-suffix labels such as "co" or "uk".
         entropy_labels = labels[:registrable_index + 1]
         entropy_candidates = [
-            (label, _shannon_entropy(label))
+            (label, self._calc_entropy(label))
             for label in entropy_labels if len(label) >= 8
         ]
         entropy_label, entropy = max(
             entropy_candidates, key=lambda item: item[1],
-            default=(subdomain, _shannon_entropy(subdomain)),
+            default=(subdomain, self._calc_entropy(subdomain)),
         )
         # Total QNAME length includes every dot and the registered domain,
         # which makes ordinary multi-label hostnames exceed modest settings.
@@ -3061,10 +3354,15 @@ class DnsRule:
         # reached, larger exact counts do not change the detection decision.
         # This bounds a single hot domain even when queries arrive at line rate.
         # A disabled frequency rule must not allocate or retain per-domain state.
+        # Reverse DNS lookup infrastructure zones (RFC 1035 / RFC 3596) map IP addresses
+        # to PTR records; diverse queries under in-addr.arpa or ip6.arpa are standard reverse
+        # lookups, not repeated beaconing or exfiltration under an attacker-controlled domain.
+        # Strict syntax validation prevents covert exfiltration tunneled under .arpa.
+        is_reverse_mapping = self._is_valid_reverse_mapping(dl)
         query_count = 0
         freq_window_start = None
         query_count_saturated = False
-        if has_valid_time and self._freq_threshold > 0:
+        if has_valid_time and self._freq_threshold > 0 and not is_reverse_mapping:
             query_identity = None
             try:
                 dns_id = int(record["dns_id"])
@@ -3084,8 +3382,12 @@ class DnsRule:
             with self._lock:
                 fkey = (src, parent)
                 history = self._freq.get(fkey, [])
-                if history and now < history[-1]:
-                    return None  # ignore late observations instead of corrupting the window
+                if history:
+                    latest = history[-1]
+                    if latest - now > self._freq_window:
+                        history = []
+                    elif now < latest:
+                        return None
                 history = [
                     t for t in history if 0 <= now - t <= self._freq_window
                 ]
@@ -3108,7 +3410,7 @@ class DnsRule:
                     if len(history) >= self._freq_threshold:
                         query_count_saturated = True
                         history = history[-(self._freq_threshold - 1):] if self._freq_threshold > 1 else []
-                    history.append(now)
+                    bisect.insort(history, now)
                     self._freq.pop(fkey, None)
                     self._freq[fkey] = history
                 query_count = len(history)
@@ -3124,7 +3426,7 @@ class DnsRule:
         subdomain_count = 0
         subdomain_count_saturated = False
         subdomain_window_start = None
-        if has_valid_time and self._subdomain_threshold > 0:
+        if has_valid_time and self._subdomain_threshold > 0 and not is_reverse_mapping:
             with self._lock:
                 sdkey = (src, parent)
                 if sdkey not in self._subdomain_freq and len(self._subdomain_freq) >= self._max_frequency_keys:
@@ -3312,7 +3614,7 @@ class BruteForceRule:
     """
 
     name = "BRUTE_FORCE"
-    rule_version = "1.11"
+    rule_version = "1.12"
 
     # Per-(src, dst, port) cooldown after firing. Prevents re-alerting for the
     # same ongoing brute-force burst; renewed bursts after the cooldown will fire.
@@ -3361,7 +3663,9 @@ class BruteForceRule:
         self._saturated_history.discard(key)
         self._cooldown.pop(key, None)
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         with self._lock:
             for key in list(self._history):
@@ -3373,6 +3677,7 @@ class BruteForceRule:
                 else:
                     del self._history[key]
                     self._saturated_history.discard(key)
+            self._saturated_history.intersection_update(self._history)
             cooldown_cutoff = now - self.ALERT_COOLDOWN_S
             for key, last_alert in list(self._cooldown.items()):
                 if last_alert <= cooldown_cutoff or last_alert > now:
@@ -3401,6 +3706,8 @@ class BruteForceRule:
             return None
 
         src_port = _normalize_port(record.get("src_port"))
+        if src_port is not None and not (1 <= src_port <= 65535):
+            src_port = None
         now = _finite_record_timestamp(record)
         if now is None:
             return None
@@ -3427,8 +3734,6 @@ class BruteForceRule:
             if key not in self._history and len(self._history) >= self.max_states:
                 self._evict_history_key(next(iter(self._history)))
             history = self._history.get(key, [])
-            if history and now < history[-1]:
-                return None  # reject reordered events
             if syn_identity is not None:
                 first_seen = self._seen_syns.get(syn_identity)
                 if first_seen is not None and 0 <= now - first_seen <= self.window:
@@ -3438,10 +3743,10 @@ class BruteForceRule:
                 self._seen_syns.move_to_end(syn_identity)
                 while len(self._seen_syns) > self._max_seen_syns:
                     self._seen_syns.popitem(last=False)
-            history = [t for t in history if 0 <= now - t <= self.window]
+            history = [t for t in history if t <= now + 5.0 and 0 <= now - t <= self.window]
             if len(history) < self.threshold:
                 self._saturated_history.discard(key)
-            history.append(now)
+            bisect.insort(history, now)
             if len(history) > self.threshold:
                 history = history[-self.threshold:]
                 self._saturated_history.add(key)
@@ -3536,7 +3841,7 @@ class SlowPortScanRule:
     """
 
     name = "SLOW_PORT_SCAN"
-    rule_version = "1.10"
+    rule_version = "1.11"
 
     def __init__(self, threshold: int = 30, window: int = 120,
                  max_states: int = 5000, cooldown: float | None = None):
@@ -3551,14 +3856,16 @@ class SlowPortScanRule:
             cooldown_default, "SLOW_PORT_SCAN_COOLDOWN")
         self._lock = threading.RLock()
         # Vertical scan: (src_ip, dst_ip) → [(ts, dst_port)]
-        self._vert: dict[tuple, list] = {}
+        self._vert: OrderedDict[tuple, list] = OrderedDict()
         # Horizontal scan: (src_ip, dst_port) → [(ts, dst_ip)]
-        self._horiz: dict[tuple, list] = {}
+        self._horiz: OrderedDict[tuple, list] = OrderedDict()
         # Rate-limit alerts per scanning source and scan direction. The same
         # campaign can cross hundreds of destination keys in one capture.
         self._alert_cooldown: OrderedDict[tuple[str, str], float] = OrderedDict()
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         with self._lock:
             for d in (self._vert, self._horiz):
@@ -3600,6 +3907,8 @@ class SlowPortScanRule:
         if not dst_ip:
             return None
         src_port = _normalize_port(record.get("src_port"))
+        if src_port is not None and not (1 <= src_port <= 65535):
+            src_port = None
         dst_port = _normalize_port(record.get("dst_port"))
         if dst_port is None or not 1 <= dst_port <= 65535:
             return None
@@ -3611,31 +3920,40 @@ class SlowPortScanRule:
         hkey = (src, dst_port)
 
         with self._lock:
-            # Reject late events
-            if (self._vert.get(vkey) and now < self._vert[vkey][-1][0]) or \
-               (self._horiz.get(hkey) and now < self._horiz[hkey][-1][0]):
-                return None
-
             # Capacity eviction
             if vkey not in self._vert and len(self._vert) >= self.max_states:
-                self._vert.pop(next(iter(self._vert)))
+                self._vert.popitem(last=False)
             if hkey not in self._horiz and len(self._horiz) >= self.max_states:
-                self._horiz.pop(next(iter(self._horiz)))
+                self._horiz.popitem(last=False)
 
-            # Vertical history update (deduplicate per port)
-            vertical = [(t, p) for t, p in self._vert.get(vkey, [])
-                        if 0 <= now - t <= self.window and p != dst_port]
-            vertical.append((now, dst_port))
-            self._vert.pop(vkey, None)
-            self._vert[vkey] = vertical
+            # Vertical history update (deduplicate per port, prune future drift)
+            hist = self._vert.get(vkey)
+            if hist is None:
+                vertical = [(now, dst_port)]
+                self._vert[vkey] = vertical
+            else:
+                cutoff = now - self.window
+                vertical = [e for e in hist if cutoff <= e[0] <= now + 5.0 and e[1] != dst_port]
+                vertical.append((now, dst_port))
+                if len(vertical) > 1 and vertical[-1][0] < vertical[-2][0]:
+                    vertical.sort(key=lambda x: x[0])
+                self._vert[vkey] = vertical
+                self._vert.move_to_end(vkey)
             distinct_ports = len(vertical)
 
-            # Horizontal history update (deduplicate per host)
-            horizontal = [(t, ip) for t, ip in self._horiz.get(hkey, [])
-                          if 0 <= now - t <= self.window and ip != dst_ip]
-            horizontal.append((now, dst_ip))
-            self._horiz.pop(hkey, None)
-            self._horiz[hkey] = horizontal
+            # Horizontal history update (deduplicate per host, prune future drift)
+            h_hist = self._horiz.get(hkey)
+            if h_hist is None:
+                horizontal = [(now, dst_ip)]
+                self._horiz[hkey] = horizontal
+            else:
+                cutoff = now - self.window
+                horizontal = [e for e in h_hist if cutoff <= e[0] <= now + 5.0 and e[1] != dst_ip]
+                horizontal.append((now, dst_ip))
+                if len(horizontal) > 1 and horizontal[-1][0] < horizontal[-2][0]:
+                    horizontal.sort(key=lambda x: x[0])
+                self._horiz[hkey] = horizontal
+                self._horiz.move_to_end(hkey)
             distinct_hosts = len(horizontal)
 
             vert_fired  = distinct_ports >= self.threshold
@@ -3734,7 +4052,7 @@ class DataExfiltrationRule:
     - Configured TRUSTED_HOSTS.
     """
     name = "DATA_EXFIL"
-    rule_version = "1.19"
+    rule_version = "1.20"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 5000
     MAX_TRACKED_FLOW_EVENTS = 1_000_000
@@ -3747,7 +4065,7 @@ class DataExfiltrationRule:
 
     # Archive / DB file signatures: (magic_bytes, format_name)
     # Extended with common exfiltration file types (Suricata ET POLICY / ET HUNTING):
-    # executables, office documents, PDFs, and additional compressed archives.
+    # executables, office documents, PDFs, private key exports, and compressed archives.
     _EXFIL_SIGNATURES: list[tuple[bytes, str]] = [
         (b"SQLite format 3\x00", "SQLite database file dump"),
         (b"PK\x03\x04", "ZIP archive"),
@@ -3781,6 +4099,11 @@ class DataExfiltrationRule:
         # PCAP / PCAP-NG: network traffic capture exfiltration
         (b"\xd4\xc3\xb2\xa1", "PCAP network traffic capture"),
         (b"\n\r\r\n", "PCAP-NG network traffic capture"),
+        # Private key exports: critical credential exfiltration (Suricata ET POLICY / ET HUNTING)
+        (b"-----BEGIN OPENSSH PRIVATE KEY-----", "OpenSSH private key export"),
+        (b"-----BEGIN RSA PRIVATE KEY-----", "RSA private key export"),
+        (b"-----BEGIN EC PRIVATE KEY-----", "EC private key export"),
+        (b"-----BEGIN PRIVATE KEY-----", "PKCS#8 private key export"),
     ]
 
     def __init__(self, byte_threshold: int = 50000, window: int = 30,
@@ -3897,26 +4220,32 @@ class DataExfiltrationRule:
         with self._lock:
             for key in list(self._flows):
                 dq = self._flows[key]
-                expired_events = 0
-                while dq and dq[0][0] < cutoff:
-                    _, expired_bytes = dq.popleft()
-                    self._flow_totals[key] -= expired_bytes
-                    expired_events += 1
-                self._flow_event_count -= expired_events
-                if not dq:
+                initial_count = len(dq)
+                active_events = []
+                active_bytes = 0
+                while dq:
+                    ts, size = dq.popleft()
+                    if cutoff <= ts <= now:
+                        active_events.append((ts, size))
+                        active_bytes += size
+                self._flow_event_count -= (initial_count - len(active_events))
+                if not active_events:
                     del self._flows[key]
                     self._flow_totals.pop(key, None)
                     self._flow_saturated.discard(key)
                 else:
+                    self._flows[key] = deque(active_events)
+                    self._flow_totals[key] = active_bytes
                     flow_threshold = (
                         self.web_byte_threshold if key[2] in self.COMMON_WEB_PORTS
                         else self.byte_threshold
                     )
-                    if self._flow_totals[key] < flow_threshold:
+                    if active_bytes < flow_threshold:
                         self._flow_saturated.discard(key)
+            self._flow_saturated.intersection_update(self._flows)
             cooldown_cutoff = now - self.ALERT_COOLDOWN_S
             for key in list(self._cooldown):
-                if self._cooldown[key] < cooldown_cutoff:
+                if self._cooldown[key] < cooldown_cutoff or self._cooldown[key] > now:
                     del self._cooldown[key]
             for key, (_, _, timestamp) in list(self._fragment_ports.items()):
                 if timestamp < cutoff or timestamp > now:
@@ -4312,14 +4641,19 @@ class CleartextHttpOnTlsPortRule:
     """Flag repeated plaintext HTTP requests sent to conventional TLS ports."""
 
     name = "CLEAR_HTTP_ON_TLS_PORT"
-    rule_version = "1.10"
+    rule_version = "1.11"
     MAX_REQUEST_LINE_BYTES = 2064
     STREAM_TIMEOUT_S = 30.0
     MAX_SEEN_REQUEST_IDENTITIES = 32_768
-    _METHOD_PREFIXES = (b"GET ", b"POST ", b"PUT ", b"DELETE ",
-                        b"PATCH ", b"OPTIONS ", b"HEAD ", b"CONNECT ", b"TRACE ")
+    TLS_PORTS = frozenset({443, 8443, 4443, 9443})
+    _METHOD_PREFIXES = (
+        b"GET ", b"POST ", b"PUT ", b"DELETE ",
+        b"PATCH ", b"OPTIONS ", b"HEAD ", b"CONNECT ", b"TRACE ",
+        b"PRI ", b"PROPFIND ", b"PROPPATCH ", b"MKCOL ", b"COPY ",
+        b"MOVE ", b"LOCK ", b"UNLOCK ",
+    )
     _REQUEST_LINE = re.compile(
-        rb"(?i)^(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD|CONNECT|TRACE)\s+[^\r\n]{1,2048}\s+HTTP/1\.[01]\r?\n"
+        rb"(?i)^(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD|CONNECT|TRACE|PRI|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK)\s+[^\r\n]{1,2048}\s+HTTP/(?:1\.[01]|2\.0)\r?\n"
     )
 
     def __init__(self, cooldown: float = 600.0, window: float = 600.0,
@@ -4360,7 +4694,7 @@ class CleartextHttpOnTlsPortRule:
                         self._tcp_prefixes.pop(direct_key, None)
             return match.group(0).strip()
 
-        if not src or not dst or src_port is None or dst_port not in (443, 8443) or not (1 <= src_port <= 65535):
+        if not src or not dst or src_port is None or dst_port not in self.TLS_PORTS or not (1 <= src_port <= 65535):
             return None
         seq = record.get("tcp_payload_seq")
         if seq is None:
@@ -4442,7 +4776,9 @@ class CleartextHttpOnTlsPortRule:
                 self._tcp_prefixes.move_to_end(key)
         return None
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.cooldown
         history_cutoff = now - self.window
         with self._lock:
@@ -4459,6 +4795,7 @@ class CleartextHttpOnTlsPortRule:
                 else:
                     del self._history[key]
                     self._saturated.discard(key)
+            self._saturated.intersection_update(self._history)
             for key, seen_at in list(self._seen_requests.items()):
                 if seen_at < history_cutoff or seen_at > now:
                     del self._seen_requests[key]
@@ -4472,7 +4809,7 @@ class CleartextHttpOnTlsPortRule:
         src, dst = record.get("src_ip"), record.get("dst_ip")
         src_port = _normalize_port(record.get("src_port"))
         dst_port = _normalize_port(record.get("dst_port"))
-        if not src or not dst or dst_port not in (443, 8443) or _is_trusted(src):
+        if not src or not dst or dst_port not in self.TLS_PORTS or _is_trusted(src):
             return None
         payload = record.get("payload", b"")
         if not isinstance(payload, bytes):
@@ -4684,7 +5021,7 @@ class TlsAnomalyRule:
     Port expansion covers: XMPP-SSL (5223), MQTT-TLS (8083), alternative HTTPS C2 (4443, 9443).
     """
     name = "TLS_ANOMALY"
-    rule_version = "1.12"
+    rule_version = "1.13"
     ALERT_COOLDOWN_S = 60.0
     MAX_TRACKED_FLOWS = 4096
     MAX_CLIENT_HELLO_BYTES = 16_389
@@ -4806,11 +5143,13 @@ class TlsAnomalyRule:
                 self._hello_prefixes.move_to_end(key)
         return None
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.cooldown
         with self._lock:
             for k in list(self._seen):
-                if self._seen[k] < cutoff:
+                if self._seen[k] < cutoff or self._seen[k] > now:
                     del self._seen[k]
             stream_cutoff = now - self.STREAM_TIMEOUT_S
             for key, (_, _, _, last_seen, _) in list(self._hello_prefixes.items()):
@@ -4849,7 +5188,15 @@ class TlsAnomalyRule:
         detail = ""
 
         # Check 1: Literal IP in SNI (RFC 6066 prohibits literal IPs in HostName)
-        if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", sni_clean) or ":" in sni_clean:
+        is_literal_ip = False
+        try:
+            ipaddress.ip_address(sni_clean.strip("[]"))
+            is_literal_ip = True
+        except ValueError:
+            if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", sni_clean) or ":" in sni_clean:
+                is_literal_ip = True
+
+        if is_literal_ip:
             anomaly_type = "DIRECT_IP_SNI"
             detail = (
                 f"{src_ip} sent TLS Client Hello to {dst_ip}:{dst_port} with literal IP "
@@ -4954,7 +5301,9 @@ class TcpZeroWindowRule:
             return None
         return tuple(sorted((source, destination)))
 
-    def prune_stale(self, now: float):
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
         cutoff = now - self.window
         cooldown_cutoff = now - self.cooldown
         handshake_cutoff = now - self._handshake_ttl
@@ -5123,8 +5472,831 @@ class TcpZeroWindowRule:
 
 
 # =============================================================================
-# Alert Spool & Rule Engine Orchestrator
+# Rule 20: Non-DNS Traffic on DNS Port 53 Detection
 # =============================================================================
+
+class NonDnsTrafficOnDnsPortRule:
+    """
+    Detects non-DNS protocols, reverse shells, interactive command prompts,
+    and cleartext HTTP traffic targeting or originating from DNS port 53 (TCP/UDP).
+
+    Standard DNS uses port 53. Threat actors frequently bind reverse shells or
+    tunnel non-DNS traffic over port 53 to bypass restrictive outbound perimeter
+    egress firewalls that permit DNS.
+
+    Key Indicators:
+    - Interactive shell / command prompt banners (e.g. Windows cmd.exe, /bin/sh, PowerShell)
+    - Cleartext HTTP methods (GET, POST, HEAD, PUT, OPTIONS, CONNECT) on port 53
+    - High-ratio printable ASCII command streams on port 53 that fail DNS message parsing
+    """
+    name = "NON_DNS_TRAFFIC_ON_DNS_PORT"
+    rule_version = "1.1"
+    DNS_PORT = 53
+    MAX_TRACKED_FLOWS = 4096
+
+    # Shell and prompt signatures
+    SHELL_SIGNATURES: tuple[bytes, ...] = (
+        b"Microsoft Windows",
+        b"Windows XP",
+        b"cmd.exe",
+        b"powershell",
+        b"C:\\",
+        b"C:>",
+        b"/bin/sh",
+        b"/bin/bash",
+        b"root@",
+        b"admin@",
+        b"Linux ",
+        b"uid=",
+        b"gid=",
+        b"whoami",
+        b"dir\r",
+        b"dir\n",
+        b"ls -l",
+    )
+
+    # HTTP method signatures
+    HTTP_METHODS: tuple[bytes, ...] = (
+        b"GET ",
+        b"POST ",
+        b"HEAD ",
+        b"PUT ",
+        b"OPTIONS ",
+        b"CONNECT ",
+        b"DELETE ",
+        b"HTTP/1.",
+        b"HTTP/2.",
+    )
+
+    def __init__(self, cooldown: float = 60.0, enabled: bool = True):
+        self.cooldown = _nonnegative_float_setting(
+            cooldown, 60.0, "NON_DNS_ON_DNS_PORT_COOLDOWN_S"
+        )
+        self.enabled = bool(enabled)
+        self._lock = threading.Lock()
+        # Key: (min_ip, max_ip, anomaly_type) -> float (last alert timestamp)
+        self._seen: OrderedDict[tuple, float] = OrderedDict()
+
+    @staticmethod
+    def _is_valid_dns_message(payload: bytes, is_tcp: bool) -> bool:
+        offset = 0
+        if is_tcp:
+            if len(payload) < 14:
+                return False
+            msg_len = int.from_bytes(payload[:2], "big")
+            if msg_len == 0 or msg_len > 65535:
+                return False
+            dns_header = payload[2:14]
+            offset = 14
+        else:
+            if len(payload) < 12:
+                return False
+            dns_header = payload[:12]
+            offset = 12
+
+        flags = int.from_bytes(dns_header[2:4], "big")
+        opcode = (flags >> 11) & 0x0F
+        rcode = flags & 0x0F
+        qdcount = int.from_bytes(dns_header[4:6], "big")
+        ancount = int.from_bytes(dns_header[6:8], "big")
+        nscount = int.from_bytes(dns_header[8:10], "big")
+        arcount = int.from_bytes(dns_header[10:12], "big")
+
+        if opcode not in (0, 1, 2, 4, 5):
+            return False
+        if rcode > 10:
+            return False
+        if qdcount > 100 or ancount > 500 or nscount > 100 or arcount > 500:
+            return False
+        if qdcount == 0 and ancount == 0 and nscount == 0 and arcount == 0:
+            return False
+
+        # RFC 1035 §4.1.2 Question section QNAME validation
+        if qdcount > 0:
+            p_len = len(payload)
+            curr = offset
+            for _ in range(qdcount):
+                if curr >= p_len:
+                    return False
+                labels_read = 0
+                while curr < p_len:
+                    lbl_len = payload[curr]
+                    if lbl_len == 0:
+                        curr += 1
+                        break
+                    # Compression pointer in Question section (RFC 1035 §4.1.4)
+                    if (lbl_len & 0xC0) == 0xC0:
+                        curr += 2
+                        break
+                    if lbl_len > 63 or curr + 1 + lbl_len > p_len:
+                        return False
+                    curr += 1 + lbl_len
+                    labels_read += 1
+                    if labels_read > 128:
+                        return False
+                # 2 bytes QTYPE + 2 bytes QCLASS
+                if curr + 4 > p_len:
+                    return False
+                curr += 4
+        return True
+
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
+        cutoff = now - self.cooldown
+        with self._lock:
+            for k in list(self._seen):
+                if self._seen[k] < cutoff or self._seen[k] > now:
+                    del self._seen[k]
+
+    def check(self, record: dict) -> dict | None:
+        if not self.enabled:
+            return None
+        proto = record.get("protocol")
+        if record.get("type") != "IP" or proto not in ("TCP", "UDP"):
+            return None
+
+        src_port = _normalize_port(record.get("src_port"))
+        dst_port = _normalize_port(record.get("dst_port"))
+        if src_port != self.DNS_PORT and dst_port != self.DNS_PORT:
+            return None
+
+        src_ip = record.get("src_ip", "")
+        dst_ip = record.get("dst_ip", "")
+        if not src_ip or not dst_ip or _is_trusted(src_ip):
+            return None
+
+        payload: bytes = record.get("payload", b"")
+        if not payload or len(payload) < 4:
+            return None
+
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
+
+        # Exclude TLS handshake if running DoT (RFC 7858) on port 53
+        if payload.startswith((b"\x16\x03\x01", b"\x16\x03\x02", b"\x16\x03\x03")):
+            return None
+
+        # Inspect for non-DNS payload indicators
+        anomaly_type = None
+        severity = "medium"
+        confidence = "heuristic"
+        detail = ""
+        matched_sig = None
+
+        # 1. Check for interactive shell or command signatures unconditionally
+        # (prevents evasion via spoofed DNS headers or crafted QNAMEs)
+        for sig in self.SHELL_SIGNATURES:
+            if sig in payload:
+                anomaly_type = "INTERACTIVE_SHELL"
+                severity = "high"
+                confidence = "high"
+                matched_sig = sig.decode("ascii", errors="replace")
+                detail = (
+                    f"{src_ip} transmitted interactive command shell data ('{matched_sig}') "
+                    f"over DNS port 53 ({proto}) to {dst_ip} — possible reverse shell or firewall bypass"
+                )
+                break
+
+        if not anomaly_type:
+            # If already parsed as a valid DNS query or response by Scapy layer
+            if record.get("dns_query") is not None:
+                return None
+
+            is_tcp = (proto == "TCP")
+            if self._is_valid_dns_message(payload, is_tcp):
+                return None
+
+        # 2. Check for cleartext HTTP traffic on port 53
+        if not anomaly_type:
+            for m in self.HTTP_METHODS:
+                if payload.startswith(m):
+                    anomaly_type = "CLEARTEXT_HTTP"
+                    severity = "medium"
+                    confidence = "high"
+                    matched_sig = m.decode("ascii", errors="replace").strip()
+                    detail = (
+                        f"{src_ip} sent cleartext HTTP request ('{matched_sig}') on DNS port 53 "
+                        f"to {dst_ip} — possible C2 tunneling or unauthorized HTTP service"
+                    )
+                    break
+
+        # 3. Check for general high-printable ASCII non-DNS stream (e.g. raw shell text)
+        if not anomaly_type and len(payload) >= 8:
+            printable_bytes = sum(1 for b in payload if 32 <= b <= 126 or b in (9, 10, 13))
+            ascii_ratio = printable_bytes / len(payload)
+            if ascii_ratio >= 0.85:
+                anomaly_type = "NON_DNS_PROTOCOL"
+                severity = "medium"
+                confidence = "heuristic"
+                preview_text = payload[:40].decode("ascii", errors="replace").strip()
+                matched_sig = f"ascii_ratio={ascii_ratio:.2f}"
+                detail = (
+                    f"{src_ip} sent non-DNS ASCII text stream on DNS port 53 to {dst_ip} "
+                    f"('{preview_text}') — possible covert tunnel or non-DNS protocol"
+                )
+
+        if not anomaly_type:
+            return None
+
+        # Direction-independent flow pair for cooldown deduplication
+        pair = tuple(sorted((str(src_ip), str(dst_ip))))
+        key = (pair, anomaly_type)
+
+        with self._lock:
+            last = self._seen.get(key)
+            if last is not None and now - last < self.cooldown:
+                self._seen.move_to_end(key)
+                return None
+            if key not in self._seen and len(self._seen) >= self.MAX_TRACKED_FLOWS:
+                self._seen.popitem(last=False)
+            self._seen[key] = now
+            self._seen.move_to_end(key)
+
+        preview = payload[:64].decode("latin1", errors="replace")
+        logger.debug(f"{self.name} [{anomaly_type}] fired: {detail}")
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "src_port": src_port,
+            "dst_port": dst_port,
+            "protocol": proto,
+            "severity": severity,
+            "confidence": confidence,
+            "detail": detail,
+            "evidence": {
+                "anomaly_type": anomaly_type,
+                "target_port": self.DNS_PORT,
+                "protocol": proto,
+                "payload_length": len(payload),
+                "payload_preview": preview,
+                "matched_signature": matched_sig,
+            },
+            "window_start": now,
+            "window_end": now,
+        }
+
+
+# =============================================================================
+# Rule 21: ICMP Covert Tunnel & Shell Detection
+# =============================================================================
+
+def _shannon_entropy_bytes(data: bytes) -> float:
+    """Return Shannon entropy in bits/byte for raw bytes (0.0 to 8.0)."""
+    if not data or not isinstance(data, (bytes, bytearray)):
+        return 0.0
+    n = len(data)
+    if n <= 1:
+        return 0.0
+    counts = Counter(data)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+class IcmpTunnelRule:
+    """
+    Detects covert ICMP tunneling, reverse shells (icmpsh), data exfiltration,
+    and embedded executable payloads transported inside ICMP Echo packets.
+
+    Standard diagnostic ICMP Echo Request (type 8/128) and Echo Reply (type 0/129)
+    packets carry small fixed-size payloads (Windows: 32 bytes, Linux: 56 bytes)
+    or repetitive diagnostic padding (all zeros or incrementing byte sequences).
+
+    Covert ICMP tunnels (ptunnel, icmpsh, hans, custom C2) abuse ICMP payloads
+    to bypass network controls, carrying encrypted payloads or command shells.
+
+    Detection Mechanisms:
+    1. Known Tunnel Tools: Ptunnel magic token (0xD5200804).
+    2. Embedded Executables: Windows PE (MZ header) or Linux ELF (\x7fELF).
+    3. Interactive Shells: Command prompts, shell execution tokens in ICMP payload.
+    4. High-Entropy Oversized Payloads: >=128 bytes with Shannon entropy >=4.5,
+       excluding legitimate diagnostic MTU sweeps (all zeros or sequential bytes).
+    """
+    name = "ICMP_TUNNEL"
+    rule_version = "1.1"
+    ALERT_COOLDOWN_S = 60.0
+    MAX_TRACKED_FLOWS = 4096
+
+    # Ptunnel magic signature
+    PTUNNEL_MAGIC = b"\xd5\x20\x08\x04"
+
+    # Shell and prompt indicators in ICMP payloads
+    ICMP_SHELL_STRINGS: tuple[bytes, ...] = (
+        b"cmd.exe",
+        b"/bin/sh",
+        b"/bin/bash",
+        b"powershell",
+        b"Microsoft Windows",
+        b"root@",
+        b"whoami",
+        b"C:\\WINDOWS",
+    )
+
+    def __init__(self, entropy_threshold: float = 4.5, min_bytes: int = 64,
+                 cooldown: float = 60.0, enabled: bool = True):
+        self.entropy_threshold = _nonnegative_float_setting(
+            entropy_threshold, 4.5, "ICMP_TUNNEL_ENTROPY_THRESHOLD"
+        )
+        self.min_bytes = _positive_setting(
+            min_bytes, 64, "ICMP_TUNNEL_MIN_BYTES"
+        )
+        self.cooldown = _nonnegative_float_setting(
+            cooldown, 60.0, "ICMP_TUNNEL_COOLDOWN_S"
+        )
+        self.enabled = bool(enabled)
+        self._lock = threading.Lock()
+        # Key: (min_ip, max_ip, anomaly_type) -> float (last alert timestamp)
+        self._seen: OrderedDict[tuple, float] = OrderedDict()
+
+    @staticmethod
+    def _is_diagnostic_ping(data: bytes) -> bool:
+        """
+        Check if payload is typical diagnostic ping padding (e.g. ping -s).
+        Returns True for all zeros, repeating small patterns, or sequential byte cycles.
+        """
+        if len(data) < 16:
+            return True
+        sample = data[16:] if len(data) >= 32 else data
+        if not sample:
+            return True
+        # Check sequential byte increment (e.g. 0x00, 0x01, 0x02...)
+        seq_count = sum(1 for i in range(len(sample) - 1) if (sample[i] + 1) % 256 == sample[i+1])
+        if seq_count >= len(sample) * 0.70:
+            return True
+        # Check low distinct alphabet (e.g. repeated "\x00" or repeating pattern)
+        if len(set(sample)) <= 8:
+            return True
+        return False
+
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
+        cutoff = now - self.cooldown
+        with self._lock:
+            for k in list(self._seen):
+                if self._seen[k] < cutoff or self._seen[k] > now:
+                    del self._seen[k]
+
+    def check(self, record: dict) -> dict | None:
+        if not self.enabled:
+            return None
+        proto = record.get("protocol")
+        if record.get("type") != "IP" or proto not in ("ICMP", "ICMPV6"):
+            return None
+
+        # Inspect ICMP Echo Request / Reply only
+        raw_type = record.get("icmp_type")
+        if raw_type is None:
+            return None
+        try:
+            icmp_type = int(raw_type)
+            raw_code = record.get("icmp_code", 0)
+            icmp_code = int(raw_code) if raw_code is not None else 0
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+        # IPv4: 8=Echo Request, 0=Echo Reply; IPv6: 128=Echo Request, 129=Echo Reply
+        is_echo = (proto == "ICMP" and icmp_type in (0, 8)) or (proto == "ICMPV6" and icmp_type in (128, 129))
+        if not is_echo:
+            return None
+
+        src_ip = record.get("src_ip", "")
+        dst_ip = record.get("dst_ip", "")
+        if not src_ip or not dst_ip or _is_trusted(src_ip):
+            return None
+
+        payload: bytes = record.get("payload", b"")
+        if not payload or not isinstance(payload, (bytes, bytearray)):
+            return None
+
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
+
+        anomaly_type = None
+        severity = "high"
+        confidence = "high"
+        detail = ""
+        matched_ind = None
+        entropy = 0.0
+        b64_ratio = None
+
+        # Check 1: Ptunnel signature
+        if payload.startswith(self.PTUNNEL_MAGIC):
+            anomaly_type = "PTUNNEL_TRAFFIC"
+            severity = "critical"
+            matched_ind = "ptunnel_magic_0xd5200804"
+            detail = (
+                f"{src_ip} sent ICMP Echo containing Ptunnel protocol magic to {dst_ip} "
+                "— active ICMP tunnel detected"
+            )
+
+        # Check 2: Embedded executable (PE/ELF)
+        elif payload.startswith(b"\x7fELF"):
+            anomaly_type = "EMBEDDED_EXECUTABLE"
+            severity = "high"
+            matched_ind = "elf_header"
+            detail = (
+                f"{src_ip} sent ICMP Echo containing Linux ELF executable header to {dst_ip} "
+                "— covert binary transfer or staging"
+            )
+        elif payload.startswith(b"MZ") and len(payload) >= 64:
+            anomaly_type = "EMBEDDED_EXECUTABLE"
+            severity = "high"
+            matched_ind = "pe_mz_header"
+            detail = (
+                f"{src_ip} sent ICMP Echo containing Windows PE/MZ executable header to {dst_ip} "
+                "— covert binary transfer or staging"
+            )
+
+        # Check 3: Interactive shell / command patterns (icmpsh)
+        if not anomaly_type:
+            for s in self.ICMP_SHELL_STRINGS:
+                if s in payload:
+                    anomaly_type = "ICMP_SHELL_PAYLOAD"
+                    severity = "high"
+                    matched_ind = s.decode("ascii", errors="replace")
+                    detail = (
+                        f"{src_ip} sent ICMP Echo containing interactive shell data ('{matched_ind}') "
+                        f"to {dst_ip} — possible icmpsh reverse shell"
+                    )
+                    break
+
+        # Check 4: High-entropy oversized payload (encrypted/compressed tunnel or Base64 exfiltration)
+        if not anomaly_type and len(payload) >= self.min_bytes:
+            entropy = _shannon_entropy_bytes(payload)
+            if entropy >= self.entropy_threshold and not self._is_diagnostic_ping(payload):
+                _B64_BYTES = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\r\n")
+                b64_count = sum(1 for b in payload if b in _B64_BYTES)
+                computed_b64_ratio = b64_count / len(payload)
+                if computed_b64_ratio >= 0.95 and len(payload) >= 64:
+                    anomaly_type = "BASE64_EXFILTRATION"
+                    severity = "high"
+                    confidence = "high"
+                    b64_ratio = round(computed_b64_ratio, 3)
+                    matched_ind = f"b64_ratio={computed_b64_ratio:.2f},entropy={entropy:.2f},len={len(payload)}"
+                    detail = (
+                        f"{src_ip} sent Base64-encoded exfiltration payload ({len(payload)} bytes, "
+                        f"entropy {entropy:.2f} >= {self.entropy_threshold}, b64_ratio {computed_b64_ratio:.2f}) to {dst_ip} "
+                        "in ICMP Echo — covert data exfiltration detected"
+                    )
+                else:
+                    anomaly_type = "HIGH_ENTROPY_TUNNEL"
+                    severity = "medium"
+                    confidence = "heuristic"
+                    matched_ind = f"len={len(payload)},entropy={entropy:.2f}"
+                    detail = (
+                        f"{src_ip} sent oversized high-entropy ICMP Echo payload ({len(payload)} bytes, "
+                        f"entropy {entropy:.2f} >= {self.entropy_threshold}) to {dst_ip} "
+                        "— possible encrypted ICMP data exfiltration or tunnel"
+                    )
+
+        if not anomaly_type:
+            return None
+
+        # Deduplication pair
+        pair = tuple(sorted((str(src_ip), str(dst_ip))))
+        key = (pair, anomaly_type)
+
+        with self._lock:
+            last = self._seen.get(key)
+            if last is not None and now - last < self.cooldown:
+                self._seen.move_to_end(key)
+                return None
+            if key not in self._seen and len(self._seen) >= self.MAX_TRACKED_FLOWS:
+                self._seen.popitem(last=False)
+            self._seen[key] = now
+            self._seen.move_to_end(key)
+
+        logger.debug(f"{self.name} [{anomaly_type}] fired: {detail}")
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "src_port": None,
+            "dst_port": None,
+            "protocol": proto,
+            "severity": severity,
+            "confidence": confidence,
+            "detail": detail,
+            "evidence": {
+                "anomaly_type": anomaly_type,
+                "icmp_type": icmp_type,
+                "icmp_code": icmp_code,
+                "payload_bytes": len(payload),
+                "entropy": round(entropy, 3) if entropy else 0.0,
+                "b64_ratio": b64_ratio,
+                "matched_indicator": matched_ind,
+                "payload_preview_hex": payload[:32].hex(),
+            },
+            "window_start": now,
+            "window_end": now,
+        }
+
+
+
+# =============================================================================
+# Rule 22: IP Fragmentation Anomaly & Reassembly Attack Detection
+# =============================================================================
+
+class IpFragmentAnomalyRule:
+    """
+    Detects Layer 3 IPv4/IPv6 fragmentation reassembly anomalies and evasions:
+    1. TEARDROP_OVERLAPPING_FRAGMENT: Overlapping payload byte ranges for the same
+       datagram ID (CVE-1997-0047 Teardrop, Bonk, Boink).
+    2. CONFLICTING_FRAGMENT_DUPLICATE: Identical fragment offset and length but conflicting
+       payload content/digest (reassembly evasion / cache poisoning / OS fingerprint evasion).
+    3. FRAGMENT_OVERFLOW: Offset + data length exceeds 65,535 bytes (RFC 791 limit, Ping of Death).
+    4. TINY_FRAGMENT_EVASION: Initial fragment (<20 bytes TCP, <8 bytes UDP/ICMP)
+       designed to split transport headers across packets to bypass stateless packet filters (RFC 1858 / RFC 3128).
+
+    State Bounding:
+    - Bounded datagram tracking: MAX_TRACKED_FLOWS = 4096 datagram flows.
+    - Bounded fragments per datagram: MAX_FRAGMENTS_PER_DATAGRAM = 64 ranges.
+    - Global range limit: MAX_TOTAL_FRAGMENT_RANGES = 16384 total ranges across all flows.
+    - Stale state pruning: reassembly timeout (default 30.0s) and cooldown (default 60.0s).
+    """
+    name = "IP_FRAGMENT_ANOMALY"
+    rule_version = "1.3"
+    ALERT_COOLDOWN_S = 60.0
+    MAX_TRACKED_FLOWS = 4096
+    MAX_FRAGMENTS_PER_DATAGRAM = 64
+    MAX_TOTAL_FRAGMENT_RANGES = 16384
+    REASSEMBLY_TIMEOUT_S = 30.0
+
+    def __init__(self, cooldown: float = 60.0, reassembly_timeout: float = 30.0,
+                 enabled: bool = True):
+        if hasattr(cooldown, "IP_FRAGMENT_ANOMALY_COOLDOWN_S"):
+            cfg = cooldown
+            cooldown = getattr(cfg, "IP_FRAGMENT_ANOMALY_COOLDOWN_S", 60.0)
+            reassembly_timeout = getattr(cfg, "IP_FRAGMENT_REASSEMBLY_TIMEOUT_S", 30.0)
+        self.cooldown = _nonnegative_float_setting(
+            cooldown, 60.0, "IP_FRAGMENT_ANOMALY_COOLDOWN_S"
+        )
+        self.reassembly_timeout = _positive_setting(
+            reassembly_timeout, 30.0, "IP_FRAGMENT_REASSEMBLY_TIMEOUT_S"
+        )
+        self.enabled = bool(enabled)
+        self._lock = threading.Lock()
+        # Key: (src_ip, dst_ip, protocol, fragment_id) -> {"fragments": [(start, end, digest), ...], "last_seen": float}
+        self._flows: OrderedDict[tuple, dict] = OrderedDict()
+        self._total_ranges: int = 0
+        # Key: (pair, anomaly_type) -> float
+        self._seen: OrderedDict[tuple, float] = OrderedDict()
+
+    def prune_stale(self, now: float = None):
+        if now is None:
+            now = time.time()
+        flow_cutoff = now - self.reassembly_timeout
+        seen_cutoff = now - self.cooldown
+        with self._lock:
+            for k in list(self._flows):
+                entry = self._flows[k]
+                last_seen = entry.get("last_seen", now)
+                if last_seen < flow_cutoff or last_seen > now or last_seen < 0:
+                    self._total_ranges -= len(entry.get("fragments", []))
+                    del self._flows[k]
+            if self._total_ranges < 0:
+                self._total_ranges = sum(len(e.get("fragments", [])) for e in self._flows.values())
+            for k in list(self._seen):
+                if self._seen[k] < seen_cutoff or self._seen[k] > now:
+                    del self._seen[k]
+
+    def _evict_oldest_flow(self, preserve_key=None):
+        """Remove the oldest tracked datagram flow and update range count."""
+        if not self._flows:
+            return
+        target_k = None
+        if preserve_key is not None and len(self._flows) > 1:
+            for k in self._flows:
+                if k != preserve_key:
+                    target_k = k
+                    break
+        if target_k is None:
+            target_k = next(iter(self._flows))
+
+        entry = self._flows.pop(target_k)
+        self._total_ranges -= len(entry.get("fragments", []))
+        if self._total_ranges < 0:
+            self._total_ranges = sum(len(e.get("fragments", [])) for e in self._flows.values())
+
+    def check(self, record: dict) -> dict | None:
+        if not self.enabled:
+            return None
+        if record.get("type") != "IP":
+            return None
+
+        raw_offset = record.get("ip_fragment_offset", 0)
+        if raw_offset is None:
+            raw_offset = 0
+        mf = bool(record.get("ip_more_fragments"))
+        is_fragmented = bool(record.get("ip_fragmented") or raw_offset or mf)
+        if not is_fragmented:
+            return None
+
+        src_ip = record.get("src_ip", "")
+        dst_ip = record.get("dst_ip", "")
+        if not src_ip or not dst_ip or _is_trusted(src_ip):
+            return None
+
+        frag_id = record.get("ip_fragment_id")
+        if frag_id is None:
+            return None
+
+        try:
+            frag_id = int(frag_id)
+            offset = int(raw_offset)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+        if offset < 0 or frag_id < 0:
+            return None
+
+        now = _finite_record_timestamp(record)
+        if now is None:
+            return None
+
+        proto = record.get("protocol", "IP")
+
+        # Robust input validation for ip_fragment_data_len and payload_len
+        raw_len = record.get("ip_fragment_data_len")
+        if raw_len is None:
+            raw_len = record.get("payload_len", 0)
+        try:
+            data_len = int(raw_len or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+        if data_len < 0:
+            return None
+
+        src_port = _normalize_port(record.get("src_port"))
+        dst_port = _normalize_port(record.get("dst_port"))
+
+        # Extract or compute fragment digest for content comparison
+        frag_digest = record.get("ip_fragment_data_digest")
+        if not frag_digest and record.get("payload"):
+            payload_bytes = record["payload"]
+            if isinstance(payload_bytes, (bytes, bytearray)) and payload_bytes:
+                frag_digest = hashlib.blake2s(payload_bytes, digest_size=16).digest()
+
+        anomaly_type = None
+        severity = "high"
+        confidence = "high"
+        detail = ""
+        overlap_bytes = None
+        overlapping_range = None
+
+        # Check 1: Fragment overflow (Ping of Death, RFC 791 limit)
+        if offset + data_len > 65535:
+            anomaly_type = "FRAGMENT_OVERFLOW"
+            severity = "critical"
+            detail = (
+                f"{src_ip} sent oversized IP fragment to {dst_ip} "
+                f"(offset {offset} + len {data_len} = {offset + data_len} > 65535) "
+                "— Ping of Death buffer overflow attempt"
+            )
+
+        # Check 2: Tiny initial fragment evasion (RFC 1858 / RFC 3128)
+        elif offset == 0 and mf and data_len > 0:
+            min_header = 20 if proto == "TCP" else (8 if proto in ("UDP", "ICMP", "ICMPV6") else 8)
+            if data_len < min_header:
+                anomaly_type = "TINY_FRAGMENT_EVASION"
+                severity = "high"
+                detail = (
+                    f"{src_ip} sent tiny initial IP fragment ({data_len} bytes < minimum {min_header} bytes) "
+                    f"for {proto} to {dst_ip} — possible stateless packet filter evasion (RFC 1858)"
+                )
+
+        # Check 3: Overlapping or Conflicting fragment reassembly attack (Teardrop / Bonk)
+        flow_key = (str(src_ip), str(dst_ip), str(proto), frag_id)
+        cur_end = offset + data_len
+
+        with self._lock:
+            flow_entry = self._flows.get(flow_key)
+            if flow_entry is not None:
+                last_seen = flow_entry.get("last_seen", now)
+                if now < last_seen:
+                    pass
+                elif now - last_seen > self.reassembly_timeout:
+                    self._total_ranges -= len(flow_entry.get("fragments", []))
+                    flow_entry = None
+                    self._flows.pop(flow_key, None)
+
+            is_identical_retransmission = False
+            if not anomaly_type and data_len > 0 and flow_entry is not None:
+                for item in flow_entry["fragments"]:
+                    prev_start, prev_end = item[0], item[1]
+                    prev_digest = item[2] if len(item) > 2 else None
+                    if offset == prev_start and cur_end == prev_end:
+                        # Exact same range: check if digest conflicts
+                        if frag_digest and prev_digest and frag_digest != prev_digest:
+                            anomaly_type = "CONFLICTING_FRAGMENT_DUPLICATE"
+                            severity = "high"
+                            confidence = "confirmed"
+                            detail = (
+                                f"{src_ip} sent conflicting IP fragment (ID {frag_id}, offset {offset}-{cur_end}) "
+                                f"with identical byte range but conflicting payload digest to {dst_ip} "
+                                "— reassembly evasion / cache poisoning attempt"
+                            )
+                            break
+                        else:
+                            # Exact identical retransmission: do not alert or consume capacity
+                            is_identical_retransmission = True
+                            break
+
+                    ov_start = max(offset, prev_start)
+                    ov_end = min(cur_end, prev_end)
+                    if ov_start < ov_end:
+                        overlap_bytes = ov_end - ov_start
+                        overlapping_range = [ov_start, ov_end]
+                        anomaly_type = "TEARDROP_OVERLAPPING_FRAGMENT"
+                        severity = "critical"
+                        confidence = "high"
+                        detail = (
+                            f"{src_ip} sent overlapping IP fragment (ID {frag_id}, offset {offset}-{cur_end}) "
+                            f"overlapping existing [{prev_start}-{prev_end}] by {overlap_bytes} bytes to {dst_ip} "
+                            "— possible Teardrop/Bonk TCP/IP reassembly crash attack"
+                        )
+                        break
+
+            if is_identical_retransmission:
+                # Benign duplicate: do NOT append, do NOT consume capacity, update last_seen
+                flow_entry["last_seen"] = now
+                self._flows.move_to_end(flow_key)
+            elif data_len > 0:
+                frag_tuple = (offset, cur_end, frag_digest)
+                if flow_key in self._flows:
+                    self._flows.move_to_end(flow_key)
+
+                # Enforce total ranges bound across all flows
+                while self._total_ranges >= self.MAX_TOTAL_FRAGMENT_RANGES and self._flows:
+                    self._evict_oldest_flow(preserve_key=flow_key if flow_key in self._flows else None)
+
+                flow_entry = self._flows.get(flow_key)
+                if flow_entry is None:
+                    while len(self._flows) >= self.MAX_TRACKED_FLOWS and self._flows:
+                        self._evict_oldest_flow()
+                    self._flows[flow_key] = {"fragments": [frag_tuple], "last_seen": now}
+                    self._total_ranges += 1
+                else:
+                    # Enforce per-datagram fragment cap
+                    frags = flow_entry["fragments"]
+                    if len(frags) >= self.MAX_FRAGMENTS_PER_DATAGRAM:
+                        frags.pop(0)
+                        self._total_ranges -= 1
+                    frags.append(frag_tuple)
+                    self._total_ranges += 1
+                    flow_entry["last_seen"] = now
+                    self._flows.move_to_end(flow_key)
+
+                if self._total_ranges < 0:
+                    self._total_ranges = sum(len(e.get("fragments", [])) for e in self._flows.values())
+
+            if not anomaly_type:
+                return None
+
+            pair = tuple(sorted((str(src_ip), str(dst_ip))))
+            seen_key = (pair, anomaly_type)
+            last_alert = self._seen.get(seen_key)
+            if last_alert is not None and now - last_alert < self.cooldown:
+                self._seen.move_to_end(seen_key)
+                return None
+
+            if seen_key not in self._seen and len(self._seen) >= self.MAX_TRACKED_FLOWS:
+                self._seen.popitem(last=False)
+            self._seen[seen_key] = now
+            self._seen.move_to_end(seen_key)
+
+        logger.debug(f"{self.name} [{anomaly_type}] fired: {detail}")
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "src_port": src_port,
+            "dst_port": dst_port,
+            "protocol": proto,
+            "severity": severity,
+            "confidence": confidence,
+            "detail": detail,
+            "evidence": {
+                "anomaly_type": anomaly_type,
+                "ip_fragment_id": frag_id,
+                "ip_fragment_offset": offset,
+                "ip_fragment_data_len": data_len,
+                "ip_more_fragments": mf,
+                "protocol": proto,
+                "overlap_bytes": overlap_bytes,
+                "overlapping_range": overlapping_range,
+                "fragment_digest": frag_digest.hex() if frag_digest else None,
+            },
+            "window_start": now,
+            "window_end": now,
+        }
 
 class AlertSpool:
     """
@@ -5272,6 +6444,452 @@ class AlertSpool:
             self._count = 0
 
 
+# =============================================================================
+# Rule 23: IRC-Based Botnet C2 Beaconing Detection
+# =============================================================================
+
+class IrcC2BeaconingRule:
+    """
+    Detects IRC-based botnet Command-and-Control (C2) communications on
+    well-known IRC ports (194, 6660-6669, 6697).
+
+    Detection paths:
+    1. IRC_PROTOCOL_SIGNATURE:
+       Payload inspection: TCP payload bytes contain IRC command verbs
+       (PING, PONG, NICK, USER, JOIN, PRIVMSG) on a known IRC port.
+       Differentiates generic IRC protocol observation (medium severity, heuristic)
+       from likely botnet C2 commands containing botnet channels/tokens (high severity, confirmed).
+
+    2. IRC_PORT_BEACONING:
+       Flow-rate heuristic: internal host makes >= IRC_BEACONING_THRESHOLD
+       initial TCP connection attempts (SYN packets, SYN set, ACK clear) to known IRC ports.
+       Deduplicates identical TCP SYN retransmissions using sequence/flow metadata.
+       Measures inter-attempt intervals to identify automated periodic beaconing.
+
+    State bounding:
+    - _connections: OrderedDict[src_ip -> OrderedDict[(dst_ip, dst_port) -> entry]]
+      Outer cap: MAX_TRACKED_SOURCES (2048).
+      Inner cap: MAX_DESTS_PER_SOURCE (128).
+    - _cooldown_map: OrderedDict[alert_key -> timestamp] bounded to MAX_TRACKED_SOURCES.
+    - Full two-level LRU eviction and stale-state pruning.
+    """
+    name = "IRC_C2_BEACONING"
+    rule_version = "1.3"
+
+    IRC_PORTS: frozenset[int] = frozenset({194, 6660, 6661, 6662, 6663, 6664, 6665, 6666, 6667, 6668, 6669, 6697})
+    _IRC_VERBS: tuple[bytes, ...] = (b"PING ", b"PONG ", b"NICK ", b"USER ", b"JOIN ", b"PRIVMSG ", b"PART ", b"QUIT ", b"MODE ")
+
+    _C2_TOKEN_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
+        (re.compile(rb"(?i)\bmirai\b"), "mirai"),
+        (re.compile(rb"(?i)(?<![#a-zA-Z])(?:botnet|botnets|ircbot)(?![a-zA-Z])"), "botnet"),
+        (re.compile(rb"(?i)(?<![#a-zA-Z])c2(?![a-zA-Z])"), "c2"),
+        (re.compile(rb"(?i)#(?:[a-z0-9_-]*bot[a-z0-9_-]*|c2|ddos)\b"), "bot_channel"),
+        (re.compile(rb"(?i)!(?:ddos|flood|attack|infect|scan|kill|syn|udp|http|c2)\b"), "bot_command"),
+        (re.compile(rb"(?i)\b(?:flood|ddos|attack|infect|scan)\b"), "malicious_verb"),
+        (re.compile(rb"(?i)(?<![#a-zA-Z])(?:bot_\w+|[a-z0-9_-]*\[bot\])(?![a-zA-Z])"), "bot_nick"),
+    )
+
+    IRC_BEACONING_THRESHOLD: int = 5
+    IRC_BEACONING_WINDOW: int = 300
+    IRC_ALERT_COOLDOWN_S: float = 300.0
+    MAX_TRACKED_SOURCES: int = 2048
+    MAX_DESTS_PER_SOURCE: int = 128
+
+    def __init__(
+        self,
+        threshold: int = None,
+        window: int = None,
+        cooldown: float = None,
+        max_sources: int = None,
+    ):
+        if hasattr(threshold, "IRC_BEACONING_THRESHOLD"):
+            cfg = threshold
+            threshold = getattr(cfg, "IRC_BEACONING_THRESHOLD", 5)
+            window = getattr(cfg, "IRC_BEACONING_WINDOW", 300)
+            cooldown = getattr(cfg, "IRC_BEACONING_COOLDOWN_S", 300.0)
+            max_sources = getattr(cfg, "IRC_BEACONING_MAX_SOURCES", 2048)
+        self.threshold = int(threshold) if threshold is not None else self.IRC_BEACONING_THRESHOLD
+        self.window = int(window) if window is not None else self.IRC_BEACONING_WINDOW
+        self.cooldown = float(cooldown) if cooldown is not None else self.IRC_ALERT_COOLDOWN_S
+        self.max_sources = int(max_sources) if max_sources is not None else self.MAX_TRACKED_SOURCES
+        self._lock = threading.Lock()
+        # src_ip -> OrderedDict[dst_key -> entry_dict]
+        self._connections: OrderedDict[str, OrderedDict[tuple, dict]] = OrderedDict()
+        # alert_key -> last_alert_time
+        self._cooldown_map: OrderedDict[tuple, float] = OrderedDict()
+
+    def prune_stale(self, now: float) -> None:
+        cutoff = now - (self.window + self.cooldown)
+        cooldown_cutoff = now - self.cooldown
+        syn_cutoff = now - 60.0
+        with self._lock:
+            for src in list(self._connections):
+                src_dests = self._connections[src]
+                for dst_key in list(src_dests):
+                    entry = src_dests[dst_key]
+                    ws = entry.get("window_start", now)
+                    if ws < cutoff or ws > now:
+                        del src_dests[dst_key]
+                    else:
+                        recent_syns = entry.get("recent_syns")
+                        if recent_syns:
+                            for syn_k in list(recent_syns):
+                                syn_ts = recent_syns[syn_k]
+                                if syn_ts < syn_cutoff or syn_ts > now:
+                                    del recent_syns[syn_k]
+                if not src_dests:
+                    del self._connections[src]
+            for key in list(self._cooldown_map):
+                ts = self._cooldown_map[key]
+                if ts < cooldown_cutoff or ts > now:
+                    del self._cooldown_map[key]
+
+    def _evict_sources(self) -> None:
+        while len(self._connections) >= self.max_sources:
+            self._connections.popitem(last=False)
+
+    def _evict_cooldowns(self) -> None:
+        while len(self._cooldown_map) >= self.max_sources:
+            self._cooldown_map.popitem(last=False)
+
+    def _check_payload_signature(self, payload: bytes) -> str | None:
+        for verb in self._IRC_VERBS:
+            if payload.startswith(verb):
+                return verb.decode("ascii").strip()
+        return None
+
+    @staticmethod
+    def _is_initial_syn(record: dict) -> bool:
+        """
+        Check if record represents an outgoing initial TCP SYN packet.
+        SYN must be set, ACK must be clear. Never counts SYN-ACK.
+        Accepts integer masks, string representation, or explicit boolean normalizer fields.
+        """
+        if "initial_syn" in record and record["initial_syn"] is not None:
+            return bool(record["initial_syn"])
+
+        raw_flags = record.get("tcp_flags")
+        if raw_flags is None:
+            raw_flags = record.get("flags")
+
+        if raw_flags is None:
+            return bool(record.get("syn_flag"))
+
+        if isinstance(raw_flags, int):
+            # Bit 1 (0x02) = SYN, Bit 4 (0x10) = ACK
+            return (raw_flags & 0x02) != 0 and (raw_flags & 0x10) == 0
+
+        if isinstance(raw_flags, str):
+            s = raw_flags.upper().strip()
+            if "ACK" in s or (len(s) <= 4 and "A" in s):
+                return False
+            if "SYN" in s or (len(s) <= 4 and "S" in s):
+                return True
+            try:
+                val = int(s, 0)
+                return (val & 0x02) != 0 and (val & 0x10) == 0
+            except ValueError:
+                return False
+
+        return False
+
+    def check(self, record: dict) -> dict | None:
+        if record.get("protocol") != "TCP":
+            return None
+
+        dst_port = record.get("dst_port")
+        try:
+            dst_port_i = int(dst_port)
+            if not (1 <= dst_port_i <= 65535):
+                return None
+        except (TypeError, ValueError):
+            return None
+
+        if dst_port_i not in self.IRC_PORTS:
+            return None
+
+        src_ip = record.get("src_ip", "")
+        dst_ip = record.get("dst_ip", "")
+        if not src_ip or not dst_ip:
+            return None
+
+        if src_ip in TRUSTED_HOSTS or dst_ip in TRUSTED_HOSTS:
+            return None
+
+        now_t = _finite_record_timestamp(record)
+        if now_t is None or now_t <= 0:
+            return None
+
+        src_port = record.get("src_port")
+        src_port_i = None
+        if src_port is not None:
+            try:
+                src_port_i = int(src_port)
+                if not (1 <= src_port_i <= 65535):
+                    return None
+            except (TypeError, ValueError):
+                src_port_i = None
+
+        # --- Path 1: IRC protocol payload signature ---
+        payload_raw = record.get("payload") or record.get("data") or b""
+        if isinstance(payload_raw, str):
+            try:
+                payload_raw = payload_raw.encode("latin-1", errors="replace")
+            except Exception:
+                payload_raw = b""
+
+        irc_verb = self._check_payload_signature(payload_raw) if payload_raw else None
+        if irc_verb:
+            payload_lower = payload_raw.lower()
+            matched_categories = {
+                cat for pat, cat in self._C2_TOKEN_PATTERNS if pat.search(payload_lower)
+            }
+
+            has_identity = bool(matched_categories.intersection({"mirai", "botnet", "c2", "bot_channel"}))
+            has_command = bool(matched_categories.intersection({"bot_command", "malicious_verb"}))
+
+            # Corroborating signals required for confirmed high-confidence C2:
+            # (botnet identity + malicious command) OR dual distinct indicator categories
+            is_corroborated_c2 = (has_identity and has_command) or (len(matched_categories) >= 2)
+            is_single_indicator = len(matched_categories) == 1
+
+            if is_corroborated_c2:
+                activity_assessment = "LIKELY_IRC_C2"
+                severity = "high"
+                confidence = "confirmed"
+                detail_desc = "IRC botnet C2 command/registration signature observed (corroborated)"
+            elif is_single_indicator:
+                activity_assessment = "SUSPICIOUS_IRC_ACTIVITY"
+                severity = "medium"
+                confidence = "heuristic"
+                detail_desc = "Single IRC botnet token/keyword observed (unconfirmed heuristic)"
+            else:
+                activity_assessment = "IRC_PROTOCOL_OBSERVED"
+                severity = "medium"
+                confidence = "heuristic"
+                detail_desc = "IRC protocol activity observed on standard port"
+
+            alert_key = (src_ip, dst_ip, dst_port_i, "SIGNATURE")
+            with self._lock:
+                last = self._cooldown_map.get(alert_key)
+                if last is not None and now_t - last < self.cooldown and now_t >= last:
+                    return None
+                self._evict_cooldowns()
+                self._cooldown_map[alert_key] = now_t
+                self._cooldown_map.move_to_end(alert_key)
+
+            return {
+                "rule_name": self.name,
+                "rule_version": self.rule_version,
+                "src_ip": src_ip,
+                "dst_ip": dst_ip,
+                "src_port": src_port_i,
+                "dst_port": dst_port_i,
+                "protocol": "TCP",
+                "severity": severity,
+                "confidence": confidence,
+                "detail": (
+                    f"{src_ip} sent IRC {irc_verb} command to {dst_ip}:{dst_port_i} "
+                    f"— {detail_desc}"
+                ),
+                "evidence": {
+                    "classification": "IRC_PROTOCOL_SIGNATURE",
+                    "activity_assessment": activity_assessment,
+                    "irc_verb": irc_verb,
+                    "dst_port": dst_port_i,
+                    "payload_preview": payload_raw[:64].hex() if payload_raw else "",
+                    "cooldown_s": self.cooldown,
+                },
+                "window_start": now_t,
+                "window_end": now_t,
+            }
+
+        # --- Path 2: IRC port connection-rate beaconing (Initial SYN packets) ---
+        if not self._is_initial_syn(record):
+            return None
+
+        tcp_seq = record.get("tcp_seq")
+        tcp_seq_i = None
+        if tcp_seq is not None:
+            try:
+                tcp_seq_i = int(tcp_seq)
+            except (TypeError, ValueError, OverflowError):
+                tcp_seq_i = None
+
+        with self._lock:
+            if src_ip not in self._connections:
+                self._evict_sources()
+                self._connections[src_ip] = OrderedDict()
+            else:
+                self._connections.move_to_end(src_ip)
+
+            src_dests = self._connections[src_ip]
+            dst_key = (dst_ip, dst_port_i)
+            if dst_key not in src_dests:
+                while len(src_dests) >= self.MAX_DESTS_PER_SOURCE:
+                    src_dests.popitem(last=False)
+                src_dests[dst_key] = {
+                    "count": 0,
+                    "window_start": now_t,
+                    "recent_syns": OrderedDict(),
+                    "last_src_port": None,
+                    "last_seq": None,
+                    "last_syn_ts": 0.0,
+                    "retransmissions": 0,
+                    "timestamps": [],
+                }
+            else:
+                src_dests.move_to_end(dst_key)
+
+            entry = src_dests[dst_key]
+            recent_syns = entry.setdefault("recent_syns", OrderedDict())
+
+            # Prune expired SYN tuples (> 60s old or future clock drift)
+            syn_cutoff = now_t - 60.0
+            for syn_k in list(recent_syns):
+                syn_ts = recent_syns[syn_k]
+                if syn_ts < syn_cutoff or syn_ts > now_t:
+                    del recent_syns[syn_k]
+
+            # Check if this is an identical SYN retransmission
+            # In TCP, retransmissions of an unacknowledged SYN keep the same ephemeral
+            # source port and sequence number.
+            # Using a multi-entry sliding table handles interleaved connections across threads/ports.
+            is_retransmission = False
+            syn_key = (src_port_i, tcp_seq_i) if (src_port_i is not None and tcp_seq_i is not None) else None
+
+            if syn_key is not None and syn_key in recent_syns:
+                is_retransmission = True
+
+            if is_retransmission:
+                entry["retransmissions"] = entry.get("retransmissions", 0) + 1
+                entry["last_syn_ts"] = now_t
+                recent_syns[syn_key] = now_t
+                recent_syns.move_to_end(syn_key)
+                return None
+
+            if syn_key is not None:
+                while len(recent_syns) >= 64:
+                    recent_syns.popitem(last=False)
+                recent_syns[syn_key] = now_t
+
+            entry["last_src_port"] = src_port_i
+            entry["last_seq"] = tcp_seq_i
+            entry["last_syn_ts"] = now_t
+
+            if now_t - entry["window_start"] > self.window or now_t < entry["window_start"]:
+                entry["count"] = 0
+                entry["window_start"] = now_t
+                entry["timestamps"] = []
+
+            entry["count"] += 1
+            if len(entry["timestamps"]) >= 128:
+                entry["timestamps"] = entry["timestamps"][-64:]
+            entry["timestamps"].append(now_t)
+            count = entry["count"]
+
+            if count < self.threshold:
+                return None
+
+            alert_key = (src_ip, dst_ip, dst_port_i, "BEACONING")
+            last = self._cooldown_map.get(alert_key)
+            if last is not None and now_t - last < self.cooldown and now_t >= last:
+                return None
+
+            ts_list = entry.get("timestamps", [])
+            intervals = [t2 - t1 for t1, t2 in zip(ts_list[:-1], ts_list[1:]) if t2 >= t1]
+            if len(intervals) >= 3:
+                avg_interval = sum(intervals) / len(intervals)
+                variance = sum((x - avg_interval) ** 2 for x in intervals) / len(intervals)
+                std_interval = variance ** 0.5
+                is_periodic = std_interval < 5.0
+            else:
+                avg_interval = None
+                std_interval = None
+                is_periodic = False
+
+            if is_periodic:
+                activity_assessment = "LIKELY_IRC_C2"
+                severity = "high"
+                confidence = "heuristic"
+                pattern_desc = f"regular periodic beaconing (avg {avg_interval:.1f}s, std {std_interval:.1f}s)"
+            else:
+                activity_assessment = "SUSPICIOUS_IRC_ACTIVITY"
+                severity = "medium"
+                confidence = "heuristic"
+                pattern_desc = "elevated connection attempt frequency"
+
+            entry["count"] = 0
+            entry["window_start"] = now_t
+            entry["timestamps"] = []
+            self._evict_cooldowns()
+            self._cooldown_map[alert_key] = now_t
+            self._cooldown_map.move_to_end(alert_key)
+
+        return {
+            "rule_name": self.name,
+            "rule_version": self.rule_version,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "src_port": src_port_i,
+            "dst_port": dst_port_i,
+            "protocol": "TCP",
+            "severity": severity,
+            "confidence": confidence,
+            "detail": (
+                f"{src_ip} made {count} TCP connection attempts to IRC port "
+                f"{dst_ip}:{dst_port_i} in {self.window}s ({pattern_desc}) — {activity_assessment}"
+            ),
+            "evidence": {
+                "classification": "IRC_PORT_BEACONING",
+                "activity_assessment": activity_assessment,
+                "connection_count": count,
+                "retransmissions_suppressed": entry.get("retransmissions", 0),
+                "window_s": self.window,
+                "threshold": self.threshold,
+                "dst_port": dst_port_i,
+                "avg_interval_s": round(avg_interval, 2) if avg_interval is not None else None,
+                "std_interval_s": round(std_interval, 2) if std_interval is not None else None,
+                "cooldown_s": self.cooldown,
+            },
+            "window_start": now_t - self.window,
+            "window_end": now_t,
+        }
+
+
+# =============================================================================
+# Canonical Rule Registry (Single Source of Truth for all 23 Engine Rules)
+# =============================================================================
+
+ALL_RULE_CLASSES: tuple[type, ...] = (
+    BlocklistRule,
+    TcpFlagAnomalyRule,
+    PortScanRule,
+    UdpScanRule,
+    UdpFloodRule,
+    TcpStealthScanRule,
+    SynFloodRule,
+    DistributedSynFloodRule,
+    IcmpSweepRule,
+    IcmpFloodRule,
+    ArpSpoofRule,
+    PayloadRule,
+    DnsRule,
+    BruteForceRule,
+    SlowPortScanRule,
+    DataExfiltrationRule,
+    TlsAnomalyRule,
+    CleartextHttpOnTlsPortRule,
+    TcpZeroWindowRule,
+    NonDnsTrafficOnDnsPortRule,
+    IcmpTunnelRule,
+    IpFragmentAnomalyRule,
+    IrcC2BeaconingRule,
+)
+
+REGISTERED_RULE_NAMES: frozenset[str] = frozenset(rule_cls.name for rule_cls in ALL_RULE_CLASSES)
+
+
 class RuleEngine:
     """
     Runs all rules against every packet record.
@@ -5376,7 +6994,52 @@ class RuleEngine:
                 cooldown=getattr(cfg, "TCP_ZERO_WINDOW_COOLDOWN", 60.0),
                 min_distinct_flows=getattr(cfg, "TCP_ZERO_WINDOW_MIN_FLOWS", 3),
             ),
+            NonDnsTrafficOnDnsPortRule(
+                cooldown=getattr(cfg, "NON_DNS_ON_DNS_PORT_COOLDOWN_S", 60.0),
+            ),
+            IcmpTunnelRule(
+                entropy_threshold=getattr(cfg, "ICMP_TUNNEL_ENTROPY_THRESHOLD", 4.5),
+                min_bytes=getattr(cfg, "ICMP_TUNNEL_MIN_BYTES", 64),
+                cooldown=getattr(cfg, "ICMP_TUNNEL_COOLDOWN_S", 60.0),
+            ),
+            IpFragmentAnomalyRule(
+                cooldown=getattr(cfg, "IP_FRAGMENT_ANOMALY_COOLDOWN_S", 60.0),
+                reassembly_timeout=getattr(cfg, "IP_FRAGMENT_REASSEMBLY_TIMEOUT_S", 30.0),
+            ),
+            IrcC2BeaconingRule(
+                threshold=getattr(cfg, "IRC_BEACONING_THRESHOLD", 5),
+                window=getattr(cfg, "IRC_BEACONING_WINDOW", 300),
+                cooldown=getattr(cfg, "IRC_BEACONING_COOLDOWN_S", 300.0),
+                max_sources=getattr(cfg, "IRC_BEACONING_MAX_SOURCES", 2048),
+            ),
         ]
+
+        # Suricata-inspired protocol-aware candidate rule dispatch:
+        # Pre-group rules by required protocol to avoid checking irrelevant rules.
+        # Unknown or unclassified protocols fall back to evaluating all 23 rules.
+        self._rules_by_proto = {
+            "TCP": [r for r in self.rules if isinstance(r, (
+                BlocklistRule, TcpFlagAnomalyRule, PortScanRule, TcpStealthScanRule,
+                SynFloodRule, DistributedSynFloodRule, PayloadRule, DnsRule,
+                BruteForceRule, SlowPortScanRule, DataExfiltrationRule, TlsAnomalyRule,
+                CleartextHttpOnTlsPortRule, TcpZeroWindowRule, NonDnsTrafficOnDnsPortRule,
+                IpFragmentAnomalyRule, IrcC2BeaconingRule
+            ))],
+            "UDP": [r for r in self.rules if isinstance(r, (
+                BlocklistRule, UdpScanRule, UdpFloodRule, PayloadRule,
+                DnsRule, DataExfiltrationRule, NonDnsTrafficOnDnsPortRule,
+                IpFragmentAnomalyRule
+            ))],
+            "ICMP": [r for r in self.rules if isinstance(r, (
+                BlocklistRule, IcmpSweepRule, IcmpFloodRule, PayloadRule,
+                DataExfiltrationRule, IcmpTunnelRule, IpFragmentAnomalyRule
+            ))],
+            "ICMPV6": [r for r in self.rules if isinstance(r, (
+                BlocklistRule, IcmpSweepRule, IcmpFloodRule, PayloadRule,
+                DataExfiltrationRule, IcmpTunnelRule, IpFragmentAnomalyRule
+            ))],
+            "ARP": [r for r in self.rules if isinstance(r, (ArpSpoofRule,))],
+        }
 
         # Bounded alert queue + durable disk spool backup
         alert_q_max = getattr(cfg, "ALERT_QUEUE_MAXSIZE", 1000)
@@ -5539,60 +7202,76 @@ class RuleEngine:
                     self._alert_queue.task_done()
                     break
 
-                if conn is not None and self._spool.count() > 0:
-                    _drain_spool()
+                # Batch drain up to 50 pending alerts to minimize queue wait and disk sync churn
+                batch = [(sentinel, data)]
+                while len(batch) < 50:
+                    try:
+                        s, d = self._alert_queue.get_nowait()
+                        batch.append((s, d))
+                    except _queue.Empty:
+                        break
 
-                if conn is not None:
-                    # Attempt write with retry
-                    write_ok = False
-                    for attempt in range(2):
-                        try:
-                            self._write_alert(conn, data)
-                            self._stats["alert_writes"] += 1
-                            write_ok = True
-                            break
-                        except Exception as write_err:
-                            logger.warning(
-                                f"Alert write transient failure (attempt {attempt+1}/2): {write_err}"
-                            )
+                stop_encountered = False
+                for s, item_data in batch:
+                    if s == "stop":
+                        stop_encountered = True
+                        self._alert_queue.task_done()
+                        break
+
+                    if conn is not None and self._spool.count() > 0:
+                        _drain_spool()
+
+                    if conn is not None:
+                        write_ok = False
+                        for attempt in range(2):
                             try:
-                                conn.close()
-                            except Exception:
-                                pass
-                            conn = None
-                            if attempt == 0:
-                                if _try_connect():
-                                    continue
-                            break
+                                self._write_alert(conn, item_data)
+                                self._stats["alert_writes"] += 1
+                                write_ok = True
+                                break
+                            except Exception as write_err:
+                                logger.warning(
+                                    f"Alert write transient failure (attempt {attempt+1}/2): {write_err}"
+                                )
+                                try:
+                                    conn.close()
+                                except Exception:
+                                    pass
+                                conn = None
+                                if attempt == 0:
+                                    if _try_connect():
+                                        continue
+                                break
 
-                    if not write_ok:
-                        # Write failed even after retry/reconnect -> spool to disk
-                        spooled = self._spool.append(data)
+                        if not write_ok:
+                            spooled = self._spool.append(item_data)
+                            if spooled:
+                                self._stats["alerts_spooled"] = self._spool.count()
+                                logger.warning(
+                                    f"Alert write failed after retry — spooled to disk: rule={item_data.get('rule_name')}"
+                                )
+                            else:
+                                self._stats["alerts_dropped"] += 1
+                                logger.error(
+                                    f"Alert spool saturated/failed — alert dropped: rule={item_data.get('rule_name')} (drop count: {self._stats['alerts_dropped']})"
+                                )
+                    else:
+                        spooled = self._spool.append(item_data)
                         if spooled:
                             self._stats["alerts_spooled"] = self._spool.count()
                             logger.warning(
-                                f"Alert write failed after retry — spooled to disk: rule={data.get('rule_name')}"
+                                f"DB unavailable — alert spooled to disk: rule={item_data.get('rule_name')}"
                             )
                         else:
                             self._stats["alerts_dropped"] += 1
                             logger.error(
-                                f"Alert spool saturated/failed — alert dropped: rule={data.get('rule_name')} (drop count: {self._stats['alerts_dropped']})"
+                                f"DB unavailable & spool saturated — alert dropped: rule={item_data.get('rule_name')} (drop count: {self._stats['alerts_dropped']})"
                             )
-                else:
-                    # DB is currently disconnected -> buffer to durable spool
-                    spooled = self._spool.append(data)
-                    if spooled:
-                        self._stats["alerts_spooled"] = self._spool.count()
-                        logger.warning(
-                            f"DB unavailable — alert spooled to disk: rule={data.get('rule_name')}"
-                        )
-                    else:
-                        self._stats["alerts_dropped"] += 1
-                        logger.error(
-                            f"DB unavailable & spool saturated — alert dropped: rule={data.get('rule_name')} (drop count: {self._stats['alerts_dropped']})"
-                        )
 
-                self._alert_queue.task_done()
+                    self._alert_queue.task_done()
+
+                if stop_encountered:
+                    break
             except _queue.Empty:
                 if self._stop_event.is_set():
                     break
@@ -5747,8 +7426,18 @@ class RuleEngine:
                         self._seen_devices.pop(dev_key, None)
                         self._seen_devices[dev_key] = now_wall
 
-        # Run ALL rules — no early exit
-        for rule in self.rules:
+        # Determine protocol-aware candidate rules (fall back to ALL rules for safety)
+        rec_type = record.get("type")
+        if rec_type == "ARP":
+            target_rules = self._rules_by_proto.get("ARP", self.rules)
+        elif rec_type == "IP":
+            proto = record.get("protocol")
+            target_rules = self._rules_by_proto.get(proto, self.rules)
+        else:
+            target_rules = self.rules
+
+        # Run candidate rules — no early exit
+        for rule in target_rules:
             try:
                 alert = rule.check(record)
                 if alert:

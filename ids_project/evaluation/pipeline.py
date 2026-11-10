@@ -1,0 +1,1621 @@
+#!/usr/bin/env python3
+"""
+ids_project/evaluation/pipeline.py
+----------------------------------
+Smart Asynchronous Dataset Acquisition and Evaluation Pipeline for NetGuard IDS.
+
+Features:
+  - Worker A: Discovery & prioritized acquisition queue across independent publishers
+  - Worker B: Background downloader with HTTP resume (.part) and persistent 90-min / 5-GiB resource budgeting
+  - Worker C: Integrity & metadata verification (SHA-256, safe extraction, deep PCAP header validation)
+  - Worker D: Concurrent real-time evaluation against NetGuard detection engine with TemporaryDirectory isolation
+  - Automated Ground-Truth Verdict Classification (TP, TN, FP, Sub-Threshold)
+  - Storage stages: incoming/ (.part) -> verified/ -> evaluation/ (with quarantine/ fallback)
+  - Preserves external HDD invariants (>= 100 GiB free, <= 450 GiB total allocation, mount check)
+"""
+
+import gzip
+import hashlib
+import json
+import logging
+import lzma
+import os
+import queue
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+
+# Ensure ids_project is in sys.path
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_IDS_ROOT = os.path.dirname(_HERE)
+IDS_PROJECT_DIR = _IDS_ROOT
+DATA_DIR = os.path.join(IDS_PROJECT_DIR, "data")
+if _IDS_ROOT not in sys.path:
+    sys.path.insert(0, _IDS_ROOT)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] [%(threadName)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
+logger = logging.getLogger("pipeline")
+
+# Storage Roots
+HDD_DATASETS_DIR = "/run/media/harshitgarg/Data1/NetGuard-datasets"
+INCOMING_DIR = os.path.join(HDD_DATASETS_DIR, "incoming")
+VERIFIED_DIR = os.path.join(HDD_DATASETS_DIR, "verified")
+QUARANTINE_DIR = os.path.join(HDD_DATASETS_DIR, "quarantine")
+EVALUATION_DIR = os.path.join(HDD_DATASETS_DIR, "evaluation")
+EVALUATION_RESULTS_DIR = os.path.join(HDD_DATASETS_DIR, "evaluation-results")
+MANIFESTS_DIR = os.path.join(HDD_DATASETS_DIR, "manifests")
+HASHES_DIR = os.path.join(HDD_DATASETS_DIR, "hashes")
+COORDINATION_DIR = os.path.join(HDD_DATASETS_DIR, "coordination")
+CUMULATIVE_BUDGET_FILE = os.path.join(COORDINATION_DIR, "cumulative_budget.json")
+
+# Invariants & Safety Limits
+MIN_FREE_DISK_GIB = 100.0
+MAX_INITIAL_ACQUISITION_GIB = 5.0
+MAX_ALLOCATION_GIB = 450.0
+MAX_DOWNLOAD_TIME_SECONDS = 90 * 60  # 90 minutes
+EXPECTED_MOUNT_POINT = "/run/media/harshitgarg/Data1"
+EXPECTED_BACKING_DEVICE = "/dev/sdb1"
+EXPECTED_DEVICE_UUID = "99a513c9-4aaa-4660-b7dc-2d2616449df9"
+EXPECTED_DEVICE_LABEL = "Data"
+
+# PCAP Magic Numbers
+PCAP_MAGIC_LE = b"\xd4\xc3\xb2\xa1"
+PCAP_MAGIC_BE = b"\xa1\xb2\xc3\xd4"
+PCAP_MAGIC_NS_LE = b"\x4d\x3c\xb2\xa1"
+PCAP_MAGIC_NS_BE = b"\xa1\xb2\x3c\x4d"
+PCAPNG_MAGIC = b"\x0a\x0d\x0d\x0a"
+VALID_MAGICS = (PCAP_MAGIC_LE, PCAP_MAGIC_BE, PCAP_MAGIC_NS_LE, PCAP_MAGIC_NS_BE, PCAPNG_MAGIC)
+
+
+def check_disk_safety(require_mount: bool = True) -> bool:
+    """Verify that the external HDD is mounted at the expected device path,
+    has >= 100 GiB free space, and total allocation is <= 450 GiB.
+
+    Args:
+        require_mount: If True (default), return False when the mount point is
+            absent from /proc/mounts or the backing device is not /dev/sdb1.
+            Set False only in unit tests running on a tmpfs without a real HDD.
+
+    Returns:
+        True iff all safety invariants are satisfied.
+    """
+    if not os.path.isdir(HDD_DATASETS_DIR):
+        logger.error(f"HDD dataset directory does not exist: {HDD_DATASETS_DIR}")
+        return False
+
+    # --- Mount verification: backing device must match EXPECTED_BACKING_DEVICE or persistent UUID/Label ---
+    if require_mount:
+        root_dev = None
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[1] == "/":
+                        root_dev = os.path.realpath(parts[0]) if os.path.exists(parts[0]) else parts[0]
+                        break
+        except Exception:
+            pass
+
+        try:
+            mount_ok = False
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[1] == EXPECTED_MOUNT_POINT:
+                        dev = parts[0]
+                        dev_real = os.path.realpath(dev) if os.path.exists(dev) else dev
+
+                        if root_dev and dev_real == root_dev:
+                            logger.error(
+                                f"Mount check FAILED: {EXPECTED_MOUNT_POINT} resolved to root partition "
+                                f"'{dev_real}'. Writes blocked."
+                            )
+                            return False
+
+                        uuid_target = f"/dev/disk/by-uuid/{EXPECTED_DEVICE_UUID}"
+                        label_target = f"/dev/disk/by-label/{EXPECTED_DEVICE_LABEL}"
+                        exp_real = os.path.realpath(EXPECTED_BACKING_DEVICE) if os.path.exists(EXPECTED_BACKING_DEVICE) else EXPECTED_BACKING_DEVICE
+
+                        is_valid = (
+                            dev == EXPECTED_BACKING_DEVICE
+                            or dev_real == exp_real
+                            or (os.path.exists(uuid_target) and os.path.realpath(uuid_target) == dev_real)
+                            or (os.path.exists(label_target) and os.path.realpath(label_target) == dev_real)
+                        )
+
+                        if is_valid:
+                            mount_ok = True
+                            break
+                        else:
+                            logger.error(
+                                f"Mount check FAILED: {EXPECTED_MOUNT_POINT} is mounted on unexpected backing device "
+                                f"'{dev}' (expected '{EXPECTED_BACKING_DEVICE}' or UUID '{EXPECTED_DEVICE_UUID}'). Writes blocked."
+                            )
+                            return False
+            if not mount_ok:
+                logger.error(
+                    f"Mount check FAILED: {EXPECTED_MOUNT_POINT} not found in /proc/mounts. "
+                    f"All dataset writes are blocked until the drive is mounted."
+                )
+                return False
+        except Exception as exc:
+            logger.error(f"Could not read /proc/mounts to verify mount: {exc}")
+            return False
+
+    # --- Free space: >= MIN_FREE_DISK_GIB ---
+    try:
+        stat = os.statvfs(HDD_DATASETS_DIR)
+        free_bytes = stat.f_bavail * stat.f_frsize
+        free_gib = free_bytes / (1024 ** 3)
+        if free_gib < MIN_FREE_DISK_GIB:
+            logger.error(
+                f"Insufficient free space on HDD: {free_gib:.2f} GiB available "
+                f"(minimum {MIN_FREE_DISK_GIB} GiB required). Writes blocked."
+            )
+            return False
+
+        # --- Total allocation cap: <= MAX_ALLOCATION_GIB ---
+        total_bytes = stat.f_blocks * stat.f_frsize
+        used_bytes = (stat.f_blocks - stat.f_bavail) * stat.f_frsize
+        allocated_gib = used_bytes / (1024 ** 3)
+        if allocated_gib > MAX_ALLOCATION_GIB:
+            logger.error(
+                f"Total allocation cap exceeded: {allocated_gib:.2f} GiB used "
+                f"(maximum {MAX_ALLOCATION_GIB} GiB). Writes blocked."
+            )
+            return False
+
+        logger.debug(
+            f"Disk safety OK: {free_gib:.1f} GiB free, {allocated_gib:.1f} GiB allocated "
+            f"on {EXPECTED_MOUNT_POINT}"
+        )
+        return True
+    except Exception as exc:
+        logger.error(f"Failed to check disk safety: {exc}")
+        return False
+
+
+def load_cumulative_budget(require_mount: bool = True) -> dict:
+    """Load persistent cumulative acquisition budget from disk."""
+    initial_budget = {
+        "cumulative_downloaded_bytes": 0,
+        "cumulative_download_time_s": 0.0,
+        "max_acquisition_budget_bytes": int(MAX_INITIAL_ACQUISITION_GIB * (1024 ** 3)),
+        "max_download_time_s": MAX_DOWNLOAD_TIME_SECONDS,
+        "max_allocation_bytes": int(MAX_ALLOCATION_GIB * (1024 ** 3)),
+        "last_updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    # Verify disk safety and expected backing device BEFORE creating directories
+    if not check_disk_safety(require_mount=require_mount):
+        logger.warning("Disk safety check failed — returning in-memory budget without directory creation.")
+        return initial_budget
+
+    os.makedirs(COORDINATION_DIR, exist_ok=True)
+    if os.path.isfile(CUMULATIVE_BUDGET_FILE):
+        try:
+            with open(CUMULATIVE_BUDGET_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "cumulative_downloaded_bytes" in data:
+                    # Reconcile existing .part files in INCOMING_DIR on startup
+                    if os.path.isdir(INCOMING_DIR):
+                        part_bytes = sum(
+                            os.path.getsize(os.path.join(INCOMING_DIR, fn))
+                            for fn in os.listdir(INCOMING_DIR)
+                            if fn.endswith(".part") and os.path.isfile(os.path.join(INCOMING_DIR, fn))
+                        )
+                        if part_bytes > data["cumulative_downloaded_bytes"]:
+                            data["cumulative_downloaded_bytes"] = part_bytes
+                    return data
+        except Exception as exc:
+            logger.warning(f"Could not read cumulative budget file: {exc}")
+
+    try:
+        with open(CUMULATIVE_BUDGET_FILE, "w", encoding="utf-8") as f:
+            json.dump(initial_budget, f, indent=2)
+    except Exception:
+        pass
+    return initial_budget
+
+
+def update_cumulative_budget(newly_downloaded_bytes: int, elapsed_time_s: float, require_mount: bool = True) -> dict:
+    """Atomically update persistent cumulative budget on disk."""
+    budget = load_cumulative_budget(require_mount=require_mount)
+    budget["cumulative_downloaded_bytes"] += newly_downloaded_bytes
+    budget["cumulative_download_time_s"] += elapsed_time_s
+    budget["last_updated_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    if check_disk_safety(require_mount=require_mount):
+        tmp_path = CUMULATIVE_BUDGET_FILE + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(budget, f, indent=2)
+            os.replace(tmp_path, CUMULATIVE_BUDGET_FILE)
+        except Exception as exc:
+            logger.error(f"Failed to update cumulative budget: {exc}")
+    return budget
+
+
+# Evaluator version — bump when evaluation logic changes to invalidate cached results.
+_EVALUATOR_VERSION = "1.5.0"
+
+_CACHE_SOURCE_FILES = [
+    os.path.join(IDS_PROJECT_DIR, "engine", "rules.py"),
+    os.path.join(IDS_PROJECT_DIR, "config.py"),
+    os.path.join(IDS_PROJECT_DIR, "capture", "sniffer.py"),
+    os.path.join(IDS_PROJECT_DIR, "evaluation", "replay.py"),
+    os.path.join(IDS_PROJECT_DIR, "evaluation", "pipeline.py"),
+    os.path.join(IDS_PROJECT_DIR, "storage", "db.py"),
+    os.path.join(IDS_PROJECT_DIR, "evaluation", "compare.py"),
+]
+
+# Single authoritative blocklist constant used consistently across evaluator workers and cache fingerprints
+AUTHORITATIVE_BLOCKLIST_PATH = os.path.join(DATA_DIR, "test_blocklist.txt")
+
+
+def compute_eval_cache_key(pcap_path: str, candidate: dict, labels_path: str = None) -> str:
+    """
+    Compute a stable full SHA-256 cache fingerprint for an evaluation result.
+    Fail-closed: Invalidation guaranteed on any change to PCAP bytes, evaluator version,
+    all detection engine and pipeline source files, registered rule versions,
+    detection configurations, target rules, labels, or authoritative blocklist.
+    Raises RuntimeError or FileNotFoundError if required components cannot be fingerprinted.
+    """
+    h = hashlib.sha256()
+
+    # 1. PCAP content hash
+    if not os.path.isfile(pcap_path):
+        raise RuntimeError(f"compute_eval_cache_key: PCAP file does not exist: {pcap_path}")
+    try:
+        with open(pcap_path, "rb") as f:
+            while chunk := f.read(128 * 1024):
+                h.update(chunk)
+    except OSError as exc:
+        raise RuntimeError(f"compute_eval_cache_key: could not hash PCAP {pcap_path}: {exc}")
+
+    # 2. Evaluator version
+    h.update(_EVALUATOR_VERSION.encode())
+
+    # 3. Full SHA-256 digests of all detection and evaluation source modules
+    for src_file in sorted(_CACHE_SOURCE_FILES):
+        rel_name = os.path.basename(src_file)
+        if not os.path.isfile(src_file):
+            raise RuntimeError(f"compute_eval_cache_key: required source module missing: {src_file}")
+        try:
+            with open(src_file, "rb") as sf:
+                file_digest = hashlib.sha256(sf.read()).digest()
+                h.update(f"{rel_name}:".encode() + file_digest)
+        except OSError as exc:
+            raise RuntimeError(f"compute_eval_cache_key: could not hash source module {src_file}: {exc}")
+
+    # 4. Registered rule names and versions
+    try:
+        from engine.rules import ALL_RULE_CLASSES
+        r_versions = {rc.name: rc.rule_version for rc in ALL_RULE_CLASSES}
+        h.update(json.dumps(r_versions, sort_keys=True).encode())
+    except Exception as exc:
+        raise RuntimeError(f"compute_eval_cache_key: could not read ALL_RULE_CLASSES: {exc}")
+
+    # 5. Effective detection configurations
+    try:
+        import config
+        settings_to_hash = (
+            "PORT_SCAN_THRESHOLD", "UDP_SCAN_THRESHOLD", "UDP_FLOOD_THRESHOLD", "UDP_FLOOD_WINDOW",
+            "TCP_STEALTH_SCAN_THRESHOLD", "SYN_FLOOD_THRESHOLD", "RST_FLOOD_THRESHOLD",
+            "DISTRIBUTED_SYN_FLOOD_THRESHOLD", "DISTRIBUTED_SYN_FLOOD_MIN_SOURCES",
+            "ICMP_SWEEP_THRESHOLD", "ICMP_FLOOD_THRESHOLD", "ICMP_FLOOD_WINDOW",
+            "TIME_WINDOW", "DNS_ENTROPY_THRESHOLD", "DNS_QUERY_MAX_LEN",
+            "DNS_FREQ_THRESHOLD", "DNS_FREQ_WINDOW", "DNS_SUBDOMAIN_THRESHOLD",
+            "BRUTE_FORCE_THRESHOLD", "BRUTE_FORCE_WINDOW", "SLOW_SCAN_THRESHOLD",
+            "DATA_EXFIL_BYTE_THRESHOLD", "CLEAR_HTTP_TLS_MIN_REQUESTS",
+            "TCP_ZERO_WINDOW_THRESHOLD", "NON_DNS_ON_DNS_PORT_COOLDOWN_S",
+            "ICMP_TUNNEL_ENTROPY_THRESHOLD", "IP_FRAGMENT_ANOMALY_COOLDOWN_S",
+            "IRC_BEACONING_THRESHOLD", "IRC_BEACONING_WINDOW", "IRC_ALERT_COOLDOWN_S",
+        )
+        cfg_vals = {s: str(getattr(config, s, "")) for s in settings_to_hash}
+        h.update(json.dumps(cfg_vals, sort_keys=True).encode())
+    except Exception as exc:
+        raise RuntimeError(f"compute_eval_cache_key: could not extract config values: {exc}")
+
+    # 6. Target rules
+    rules_str = json.dumps(sorted(candidate.get("target_rules", [])), separators=(",", ":"))
+    h.update(rules_str.encode())
+
+    # 7. Labels file or inline candidate labels (Fail closed on missing specified file)
+    res_labels = labels_path or candidate.get("labels_path") or candidate.get("labels_file")
+    if res_labels:
+        if not os.path.isfile(res_labels):
+            raise FileNotFoundError(f"compute_eval_cache_key: specified ground-truth labels file does not exist: {res_labels}")
+        try:
+            with open(res_labels, "rb") as lf:
+                h.update(b"labels_file:" + hashlib.sha256(lf.read()).digest())
+        except OSError as exc:
+            raise RuntimeError(f"compute_eval_cache_key: could not hash labels file {res_labels}: {exc}")
+    elif candidate.get("labels") or candidate.get("ground_truth_labels"):
+        inline_lbls = candidate.get("labels") or candidate.get("ground_truth_labels")
+        h.update(b"inline_labels:" + json.dumps(inline_lbls, sort_keys=True).encode())
+    else:
+        h.update(b"labels:NONE")
+
+    # 8. Label coverage and granularity metadata
+    if "label_coverage" in candidate:
+        h.update(f"cov:{candidate['label_coverage']}".encode())
+    if "label_granularity" in candidate:
+        h.update(f"gran:{candidate['label_granularity']}".encode())
+
+    # 9. Authoritative blocklist file used across evaluator workers (Fail-closed / explicit marker)
+    if os.path.isfile(AUTHORITATIVE_BLOCKLIST_PATH):
+        try:
+            with open(AUTHORITATIVE_BLOCKLIST_PATH, "rb") as bf:
+                h.update(b"blocklist:" + hashlib.sha256(bf.read()).digest())
+        except OSError as exc:
+            raise RuntimeError(f"compute_eval_cache_key: could not hash authoritative blocklist: {exc}")
+    else:
+        h.update(b"blocklist:MISSING")
+
+    return h.hexdigest()
+
+
+
+def validate_pcap_deep(pcap_path: str) -> tuple[bool, str]:
+    """
+    Perform deep structural validation of a PCAP or PCAPNG capture file:
+    1. Size >= 24 bytes (minimum standard PCAP global header).
+    2. Valid magic bytes.
+    3. Proper major/minor version (2.4 for classic PCAP, valid SHB length for PCAPNG).
+    4. First packet record header readable without premature EOF or corrupt packet length.
+    """
+    if not os.path.isfile(pcap_path):
+        return False, "File does not exist"
+
+    size = os.path.getsize(pcap_path)
+    if size < 24:
+        return False, f"File size ({size} bytes) smaller than minimum PCAP header (24 bytes)"
+
+    with open(pcap_path, "rb") as f:
+        magic = f.read(4)
+        if magic not in VALID_MAGICS:
+            return False, f"Invalid PCAP magic bytes: {magic.hex()}"
+
+        if magic == PCAPNG_MAGIC:
+            # PCAPNG: verify Section Header Block length >= 28
+            f.seek(4)
+            shb_len_bytes = f.read(4)
+            if len(shb_len_bytes) == 4:
+                shb_len = struct.unpack("<I", shb_len_bytes)[0]
+                if shb_len < 28 or shb_len > size:
+                    return False, f"Invalid PCAPNG SHB length: {shb_len}"
+            return True, "Valid PCAPNG format"
+
+        # Classic libpcap format
+        is_le = magic in (PCAP_MAGIC_LE, PCAP_MAGIC_NS_LE)
+        endian = "<" if is_le else ">"
+        f.seek(4)
+        hdr_rest = f.read(20)
+        if len(hdr_rest) < 20:
+            return False, "Truncated PCAP global header"
+
+        major, minor, tz, sigfigs, snaplen, network = struct.unpack(endian + "HHIIII", hdr_rest)
+        if major != 2:
+            return False, f"Unsupported PCAP major version {major} (expected 2)"
+
+        # Check if file has at least one packet header (16 bytes)
+        if size > 24:
+            pkt_hdr = f.read(16)
+            if len(pkt_hdr) < 16:
+                return False, "Truncated first packet record header"
+            ts_sec, ts_usec, incl_len, orig_len = struct.unpack(endian + "IIII", pkt_hdr)
+            if snaplen > 0 and incl_len > snaplen:
+                if incl_len > 65535 * 4:
+                    return False, f"Packet length exceeds sane boundaries: {incl_len}"
+
+    return True, "Valid classic libpcap format"
+
+
+MAX_DECOMPRESSED_SIZE_BYTES = 1024 * 1024 * 1024  # 1 GiB safety limit per archive extraction
+
+
+def get_git_revision() -> str:
+    """Return HEAD commit SHA if inside git repository, else 'unknown'."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_IDS_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()[:10]
+    except Exception:
+        pass
+    return "unknown"
+
+
+def hash_file_sha256(path: str) -> str:
+    """Compute standard SHA-256 digest of a file in 128 KiB chunks."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(128 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def safe_decompress_stream(reader, writer, max_bytes: int = MAX_DECOMPRESSED_SIZE_BYTES, chunk_size: int = 64 * 1024) -> int:
+    """Safely stream decompressed content with a strict output size bound to prevent decompression bombs.
+
+    Returns total bytes written or raises RuntimeError if limit is exceeded.
+    """
+    total_written = 0
+    while True:
+        chunk = reader.read(chunk_size)
+        if not chunk:
+            break
+        total_written += len(chunk)
+        if total_written > max_bytes:
+            raise RuntimeError(
+                f"Decompressed output exceeded safety limit ({total_written} > {max_bytes} bytes). Aborting to prevent disk exhaustion."
+            )
+        writer.write(chunk)
+    return total_written
+
+
+def validate_pcap_with_tools(pcap_path: str, timeout_s: float = 15.0) -> tuple[bool, str, dict]:
+    """Validate PCAP using internal deep header checks, plus external capinfos / tshark if available.
+
+    Returns (is_valid, message, tool_metadata).
+    """
+    # 1. Structural deep check
+    is_valid, msg = validate_pcap_deep(pcap_path)
+    if not is_valid:
+        return False, msg, {}
+
+    stats: dict = {"packet_count": 0, "duration_seconds": 0.0}
+    capinfos_bin = shutil.which("capinfos")
+    if capinfos_bin:
+        try:
+            proc = subprocess.run(
+                [capinfos_bin, "-c", "-d", "-u", "-s", "-y", pcap_path],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+            if proc.returncode != 0:
+                err = proc.stderr.strip() or f"capinfos error (code {proc.returncode})"
+                return False, f"capinfos validation failed: {err}", {}
+            for line in proc.stdout.splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    k = k.strip().lower().replace(" ", "_")
+                    v = v.strip()
+                    if "number_of_packets" in k:
+                        try:
+                            stats["packet_count"] = int(v.replace(",", ""))
+                        except ValueError:
+                            pass
+                    elif "capture_duration" in k:
+                        try:
+                            stats["duration_seconds"] = float(v.split()[0].replace(",", ""))
+                        except (ValueError, IndexError):
+                            pass
+        except subprocess.TimeoutExpired:
+            return False, f"capinfos validation timed out after {timeout_s}s", {}
+        except Exception as exc:
+            logger.warning(f"capinfos execution warning: {exc}")
+
+    # 2. tshark smoke test
+    tshark_bin = shutil.which("tshark")
+    if tshark_bin and stats.get("packet_count", 1) > 0:
+        try:
+            proc = subprocess.run(
+                [tshark_bin, "-r", pcap_path, "-c", "1", "-q"],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+            if proc.returncode != 0:
+                err = proc.stderr.strip() or f"tshark error (code {proc.returncode})"
+                return False, f"tshark packet dissection failed: {err}", {}
+        except subprocess.TimeoutExpired:
+            return False, f"tshark validation timed out after {timeout_s}s", {}
+        except Exception as exc:
+            logger.warning(f"tshark execution warning: {exc}")
+
+    return True, msg, stats
+
+
+def classify_capture_level_signal(candidate: dict, alerts: list[dict], rule_breakdown: dict) -> tuple[str, str]:
+    """Capture-level preliminary signal heuristic.
+
+    WARNING: This is a coarse capture-level check based on expected rule names and
+    candidate attack category. It does NOT constitute rigorous flow-level ground truth.
+    For rigorous evaluation, use evaluate_ground_truth_labels().
+    """
+    cat = candidate.get("category", "").lower()
+    attack_type = candidate.get("attack_type", "").lower()
+    cid = candidate.get("id", "").lower()
+    is_benign = "benign" in cat or "benign" in attack_type or "honeypot" in cid
+
+    target_rules = set(candidate.get("target_rules", []))
+    fired_rules = set(rule_breakdown.keys())
+
+    if is_benign:
+        if len(alerts) == 0:
+            return "TRUE_NEGATIVE", "Zero false alarms raised on authentic benign traffic (100% specificity)"
+        return "FALSE_POSITIVE", f"Spurious alerts raised on benign traffic: {list(fired_rules)}"
+
+    # Unassessed or Out-of-Scope Traffic Families
+    if target_rules and all(r.startswith("UNASSESSED_") for r in target_rules):
+        return "UNASSESSED_REFERENCE_CAPTURE", f"Capture represents unassessed traffic family ({list(target_rules)}); outside active IDS detection scope"
+
+    # Malicious / Attack Traffic
+    if target_rules and (target_rules & fired_rules):
+        matched = list(target_rules & fired_rules)
+        return "TRUE_POSITIVE", f"Successfully detected targeted attack vector(s): {matched}"
+    if len(alerts) > 0:
+        return "PARTIAL_DETECTION", f"Detected network anomalies ({list(fired_rules)}), but targeted rules {list(target_rules)} did not trip"
+    return "FALSE_NEGATIVE_OR_SUBTHRESHOLD", "Zero alerts raised on attack capture (investigate threshold calibration or evasion)"
+
+
+# Backward compatibility alias
+classify_ground_truth_verdict = classify_capture_level_signal
+
+
+def canonicalize_flow(src_ip: str, dst_ip: str, src_port: int | None, dst_port: int | None, proto: str) -> tuple:
+    """Canonicalize bidirectional 5-tuple so both directions map to the same flow key."""
+    import ipaddress
+    s_ip = ""
+    d_ip = ""
+    if src_ip:
+        try:
+            s_ip = str(ipaddress.ip_address(str(src_ip).strip()))
+        except ValueError:
+            s_ip = str(src_ip).strip()
+    if dst_ip:
+        try:
+            d_ip = str(ipaddress.ip_address(str(dst_ip).strip()))
+        except ValueError:
+            d_ip = str(dst_ip).strip()
+
+    sp = 0
+    dp = 0
+    if src_port is not None:
+        try:
+            val = int(src_port)
+            if 0 <= val <= 65535:
+                sp = val
+        except (ValueError, TypeError):
+            pass
+    if dst_port is not None:
+        try:
+            val = int(dst_port)
+            if 0 <= val <= 65535:
+                dp = val
+        except (ValueError, TypeError):
+            pass
+
+    p = (proto or "").strip().upper()
+    if (s_ip, sp) <= (d_ip, dp):
+        return (s_ip, d_ip, sp, dp, p)
+    return (d_ip, s_ip, dp, sp, p)
+
+
+VALID_LABEL_GRANULARITIES = frozenset({"packet", "flow", "event", "scenario", "time-window"})
+
+
+def evaluate_ground_truth_labels(
+    labels: list[dict],
+    alerts: list[dict],
+    label_coverage: str = "partial",
+    timestamp_tolerance_s: float = 5.0
+) -> dict:
+    """Rigorous flow- and window-level ground-truth matching.
+
+    Requirements satisfied:
+    - Structured dataset label metadata with provenance and granularity.
+    - Rejects rule-only labels without independent flow, event or time-window evidence.
+    - Rejects incomplete flow tuples (must specify complete 5-tuple: src_ip, dst_ip, src_port, dst_port, protocol).
+    - Event timestamps matched to valid label windows; malformed alert timestamps rejected.
+    - Bijective matching: prevents one event from inflating TP counts.
+    - Unmatched alerts counted as FP ONLY when label_coverage is verified complete/exhaustive.
+      Otherwise classified as UNASSESSED alerts.
+    - Labels missing provenance, granularity, or required fields classified as unassessed_labels.
+    - Returns structured metrics dictionary.
+    """
+    from evaluation.compare import _semantic_family
+
+    matched_alert_indices: set[int] = set()
+    matched_labels: list[dict] = []
+    unmatched_labels: list[dict] = []
+    unassessed_labels: list[dict] = []
+
+    for lbl in labels:
+        # 1. Check label provenance
+        provenance = lbl.get("provenance") or lbl.get("publisher") or lbl.get("source")
+        if not provenance or not str(provenance).strip():
+            reason = "Missing label provenance metadata"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        # 2. Check label granularity
+        granularity = str(lbl.get("granularity", "")).strip().lower()
+        if not granularity or granularity not in VALID_LABEL_GRANULARITIES:
+            reason = "Missing or unsupported label granularity"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        # 3. Check rule or family expectation
+        expected_family = lbl.get("expected_family", "").strip().lower()
+        expected_rule = lbl.get("expected_rule", "").strip()
+        if not expected_family and not expected_rule:
+            reason = "Missing expected_rule or expected_family"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        # 4. Check for independent event evidence according to granularity
+        flow = lbl.get("flow")
+        window = lbl.get("time_window")
+        event_id = lbl.get("event_id")
+        packet_index = lbl.get("packet_index")
+        if packet_index is None and "frame_index" in lbl:
+            packet_index = lbl.get("frame_index")
+
+        has_flow = bool(flow and isinstance(flow, dict))
+        has_window = bool(window and isinstance(window, dict) and (window.get("start") is not None or window.get("end") is not None))
+        has_event = bool(event_id is not None and str(event_id).strip())
+        has_packet = bool(packet_index is not None)
+        has_scenario = bool(granularity == "scenario")
+
+        # Reject rule-only labels without independent flow, event, packet, or time-window evidence
+        if not has_flow and not has_window and not has_event and not has_packet and not has_scenario:
+            reason = "Insufficient matching constraints: rule-only label without flow, event, packet or time-window"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        # 5. Validate time window timestamps if present
+        win_start = window.get("start") if has_window else None
+        win_end = window.get("end") if has_window else None
+        if win_start is not None and win_end is not None:
+            try:
+                f_start = float(win_start)
+                f_end = float(win_end)
+                if f_start > f_end:
+                    reason = "Invalid time_window: start > end"
+                    unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                    unmatched_labels.append(dict(lbl, rejection_reason=reason))
+                    continue
+            except (ValueError, TypeError):
+                reason = "Malformed time_window timestamps"
+                unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                unmatched_labels.append(dict(lbl, rejection_reason=reason))
+                continue
+        elif (win_start is not None and win_end is None) or (win_start is None and win_end is not None):
+            try:
+                if win_start is not None:
+                    float(win_start)
+                if win_end is not None:
+                    float(win_end)
+            except (ValueError, TypeError):
+                reason = "Malformed time_window timestamps"
+                unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                unmatched_labels.append(dict(lbl, rejection_reason=reason))
+                continue
+
+        # 6. Granularity-specific requirement checks
+        if granularity == "flow" and not has_flow and not has_window:
+            reason = "Granularity 'flow' requires valid 'flow' 5-tuple dictionary"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        if granularity == "time-window" and not has_window:
+            reason = "Granularity 'time-window' requires valid 'time_window' dictionary"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        if granularity == "event" and not has_event:
+            reason = "Granularity 'event' requires non-empty 'event_id'"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        if granularity == "packet" and not has_packet:
+            reason = "Granularity 'packet' requires valid 'packet_index'"
+            unassessed_labels.append(dict(lbl, rejection_reason=reason))
+            unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            continue
+
+        # 7. Validate flow tuple completeness if flow specified
+        lbl_flow_key = None
+        if has_flow:
+            src_ip = flow.get("src_ip")
+            dst_ip = flow.get("dst_ip")
+            src_port = flow.get("src_port")
+            dst_port = flow.get("dst_port")
+            proto = flow.get("protocol")
+
+            # Require complete 5-tuple
+            if not src_ip or not dst_ip or src_port is None or dst_port is None or not proto:
+                reason = "Incomplete flow tuple (must specify src_ip, dst_ip, src_port, dst_port, protocol)"
+                unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                unmatched_labels.append(dict(lbl, rejection_reason=reason))
+                continue
+
+            try:
+                sp_i = int(src_port)
+                dp_i = int(dst_port)
+                if not (0 <= sp_i <= 65535 and 0 <= dp_i <= 65535):
+                    reason = "Flow port out of valid range 0..65535"
+                    unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                    unmatched_labels.append(dict(lbl, rejection_reason=reason))
+                    continue
+            except (ValueError, TypeError):
+                reason = "Flow port not a valid integer"
+                unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                unmatched_labels.append(dict(lbl, rejection_reason=reason))
+                continue
+
+            lbl_flow_key = canonicalize_flow(src_ip, dst_ip, src_port, dst_port, proto)
+
+        # 8. Search for matching alert (bijective 1-to-1)
+        found = False
+        evidence_unemitted = False
+        for idx, alert in enumerate(alerts):
+            if idx in matched_alert_indices:
+                continue
+
+            # A. Rule/Family match
+            alert_family = _semantic_family(alert)
+            rule_ok = False
+            if expected_family and alert_family == expected_family:
+                rule_ok = True
+            elif expected_rule and alert.get("rule_name") == expected_rule:
+                rule_ok = True
+
+            if not rule_ok:
+                continue
+
+            # B. Flow match (bidirectional)
+            if lbl_flow_key:
+                a_src = alert.get("src_ip", "")
+                a_dst = alert.get("dst_ip", "")
+                a_sport = alert.get("src_port")
+                a_dport = alert.get("dst_port")
+                a_proto = alert.get("protocol", "")
+                if not a_src or not a_dst or a_sport is None or a_dport is None or not a_proto:
+                    continue
+                alert_flow_key = canonicalize_flow(a_src, a_dst, a_sport, a_dport, a_proto)
+                if alert_flow_key != lbl_flow_key:
+                    continue
+
+            # C. Time window match
+            if has_window:
+                alert_ts = alert.get("timestamp")
+                if alert_ts is None:
+                    continue
+                try:
+                    ts_val = float(alert_ts)
+                except (ValueError, TypeError):
+                    continue  # Reject malformed alert timestamp
+                if win_start is not None and ts_val < (float(win_start) - timestamp_tolerance_s):
+                    continue
+                if win_end is not None and ts_val > (float(win_end) + timestamp_tolerance_s):
+                    continue
+
+            # D. Event ID matching for event granularity
+            alert_ev = alert.get("evidence")
+            if not isinstance(alert_ev, dict):
+                alert_ev = {}
+
+            if granularity == "event":
+                a_ev_id = alert_ev.get("event_id") or alert_ev.get("event")
+                if a_ev_id is None:
+                    evidence_unemitted = True
+                    continue
+                if str(a_ev_id).strip() != str(event_id).strip():
+                    continue
+
+            # E. Packet Index matching for packet granularity
+            if granularity == "packet":
+                a_pkt_idx = alert_ev.get("packet_index") if "packet_index" in alert_ev else alert_ev.get("frame_index")
+                if a_pkt_idx is None:
+                    evidence_unemitted = True
+                    continue
+                try:
+                    if int(a_pkt_idx) != int(packet_index):
+                        continue
+                except (ValueError, TypeError):
+                    continue
+
+            # Match found!
+            matched_alert_indices.add(idx)
+            matched_labels.append({"label": lbl, "alert": alert})
+            found = True
+            break
+
+        if not found:
+            if evidence_unemitted and (granularity in ("event", "packet")):
+                reason = f"IDS alerts fired for rule/family but lacked required {granularity} evidence in alert evidence dictionary"
+                unassessed_labels.append(dict(lbl, rejection_reason=reason))
+                unmatched_labels.append(dict(lbl, rejection_reason=reason))
+            else:
+                unmatched_labels.append(lbl)
+
+    extra_alerts = [alert for idx, alert in enumerate(alerts) if idx not in matched_alert_indices]
+    tp = len(matched_labels)
+    fn = len(unmatched_labels)
+
+    is_exhaustive = (str(label_coverage).lower() in ("complete", "exhaustive"))
+    if is_exhaustive:
+        fp = len(extra_alerts)
+        unassessed_alerts = 0
+    else:
+        fp = 0
+        unassessed_alerts = len(extra_alerts)
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else (1.0 if tp > 0 else 0.0)
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+    return {
+        "label_coverage": label_coverage,
+        "total_labels": len(labels),
+        "total_alerts": len(alerts),
+        "true_positives": tp,
+        "false_negatives": fn,
+        "false_positives": fp,
+        "unassessed_alerts": unassessed_alerts,
+        "unassessed_labels": unassessed_labels,
+        "precision": precision if is_exhaustive else None,
+        "recall": recall,
+        "f1": f1 if is_exhaustive else None,
+        "matched_details": matched_labels,
+        "missed_labels": unmatched_labels,
+        "extra_alerts": extra_alerts,
+    }
+
+
+def get_candidate_queue() -> list[dict]:
+    """
+    Ranked acquisition candidates prioritizing coverage per downloaded GiB
+    across distinct independent publishers.
+    """
+    return [
+        {
+            "id": "ws_arp_storm",
+            "name": "Wireshark ARP Storm",
+            "publisher": "Wireshark Foundation",
+            "url": "https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/arp-storm.pcap",
+            "type": "pcap",
+            "size_est_bytes": 47296,
+            "category": "Protocol & Flag Anomalies",
+            "attack_type": "ARP request storm / broadcast flood (non-spoofing)",
+            "target_rules": ["UNASSESSED_PROTOCOL_FLOOD"],
+            "ground_truth": "Synthetic flood of ARP requests on cable modem (not ARP spoofing)",
+            "compression": None,
+        },
+        {
+            "id": "ws_dns_remoteshell",
+            "name": "Wireshark DNS Remote Shell",
+            "publisher": "Wireshark Foundation",
+            "url": "https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/dns-remoteshell.pcap",
+            "type": "pcap",
+            "size_est_bytes": 25600,
+            "category": "DNS Anomalies & DPI",
+            "attack_type": "Remote shell over DNS port 53",
+            "target_rules": ["NON_DNS_TRAFFIC_ON_DNS_PORT", "DNS_ANOMALY", "PAYLOAD_HIT"],
+            "ground_truth": "Command shell payloads over UDP port 53",
+            "compression": None,
+        },
+        {
+            "id": "ws_teardrop",
+            "name": "Wireshark Teardrop IP Exploit",
+            "publisher": "Wireshark Foundation",
+            "url": "https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/teardrop.cap",
+            "type": "pcap",
+            "size_est_bytes": 15360,
+            "category": "Protocol & Flag Anomalies",
+            "attack_type": "Overlapping IP fragmentation exploit",
+            "target_rules": ["IP_FRAGMENT_ANOMALY"],
+            "ground_truth": "Packets 8 and 9 demonstrate overlapping teardrop fragments",
+            "compression": None,
+        },
+        {
+            "id": "ws_skype_irc",
+            "name": "Wireshark Skype and IRC Traffic (Benign)",
+            "publisher": "Wireshark Foundation",
+            "url": "https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/SkypeIRC.cap",
+            "type": "pcap",
+            "size_est_bytes": 420869,
+            "category": "Benign Real-World Traffic",
+            "attack_type": "Benign user traffic (IRC, Skype, DNS)",
+            "target_rules": ["FP_BENIGN_VERIFICATION"],
+            "ground_truth": "Authentic normal user desktop traffic",
+            "compression": None,
+        },
+        {
+            "id": "iot23_honeypot_4_1",
+            "name": "IoT-23 Honeypot Somfy Smart Doorlock (Benign)",
+            "publisher": "Stratosphere IPS / CTU University",
+            "url": "https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset/IndividualScenarios/CTU-Honeypot-Capture-4-1/2018-10-25-14-06-32-192.168.1.132.pcap.xz",
+            "type": "pcap.xz",
+            "size_est_bytes": 376840,
+            "category": "Benign IoT Traffic",
+            "attack_type": "Benign IoT hardware operational traffic",
+            "target_rules": ["FP_BENIGN_VERIFICATION"],
+            "ground_truth": "Verified real hardware benign IoT traffic (Somfy doorlock)",
+            "compression": "xz",
+        },
+        {
+            "id": "iot23_malware_8_1",
+            "name": "IoT-23 Hakai Botnet Capture",
+            "publisher": "Stratosphere IPS / CTU University",
+            "url": "https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset/IndividualScenarios/CTU-IoT-Malware-Capture-8-1/2018-07-31-15-15-09-192.168.100.113.pcap",
+            "type": "pcap",
+            "size_est_bytes": 2098362,
+            "category": "IoT Malware C2 Callbacks",
+            "attack_type": "Hakai botnet TCP port 50 C2 retry callbacks with exponential backoff",
+            "target_rules": ["UNASSESSED_BOTNET_C2_BEACON"],
+            "ground_truth": "CTU-IoT-Malware-8-1 verified malware execution (port 50 C2 callback retry sequence)",
+            "compression": None,
+        },
+        {
+            "id": "iot23_malware_3_1",
+            "name": "IoT-23 Muhstik Botnet Capture",
+            "publisher": "Stratosphere IPS / CTU University",
+            "url": "https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset/IndividualScenarios/CTU-IoT-Malware-Capture-3-1/2018-05-21_capture.pcap",
+            "type": "pcap",
+            "size_est_bytes": 57919772,
+            "category": "DPI Exploitation & C2",
+            "attack_type": "Muhstik botnet propagation and scanning",
+            "target_rules": ["PAYLOAD_HIT", "PORT_SCAN", "SYN_FLOOD"],
+            "ground_truth": "CTU-IoT-Malware-3-1 malware execution",
+            "compression": None,
+        },
+        {
+            "id": "iot23_malware_34_1",
+            "name": "IoT-23 Mirai Botnet Capture",
+            "publisher": "Stratosphere IPS / CTU University",
+            "url": "https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset/IndividualScenarios/CTU-IoT-Malware-Capture-34-1/2018-12-21-15-50-14-192.168.1.195.pcap",
+            "type": "pcap",
+            "size_est_bytes": 126317980,
+            "category": "DoS, Scans, Brute Force & C2",
+            "attack_type": "Mirai botnet: SYN flood, Telnet brute force, DNS C2, IRC C2",
+            "target_rules": ["SYN_FLOOD", "PORT_SCAN", "BRUTE_FORCE", "DNS_ANOMALY", "IRC_C2_BEACONING", "DATA_EXFIL", "UDP_FLOOD"],
+            "ground_truth": "CTU-IoT-Malware-34-1 with publisher Suricata and Zeek logs",
+            "compression": None,
+        },
+        {
+            "id": "nozomi_triton_exec",
+            "name": "Nozomi Networks TRITON ICS Malware Execution",
+            "publisher": "Nozomi Networks",
+            "url": "https://raw.githubusercontent.com/NozomiNetworks/tricotools/master/malware_exec.pcap",
+            "type": "pcap",
+            "size_est_bytes": 174052,
+            "category": "Industrial OT / Malware Staging",
+            "attack_type": "TRITON / TRISIS industrial safety system malware execution",
+            "target_rules": ["PAYLOAD_HIT", "TCP_FLAG_ANOMALY"],
+            "ground_truth": "Authentic Nozomi Networks research capture of TRITON payload injection",
+            "compression": None,
+        },
+        {
+            "id": "foxit_quantum_insert",
+            "name": "Fox-IT QuantumInsert Packet Injection",
+            "publisher": "Fox-IT",
+            "url": "https://raw.githubusercontent.com/fox-it/quantuminsert/master/presentations/brocon2015/pcaps/id1.cn-inject.pcap",
+            "type": "pcap",
+            "size_est_bytes": 1842,
+            "category": "Man-on-the-Side Injection",
+            "attack_type": "TCP sequence racing & out-of-order injected HTTP redirection (port 80)",
+            "target_rules": ["UNASSESSED_TCP_INJECTION"],
+            "ground_truth": "BroCon 2015 QuantumInsert reproducible injection capture (cleartext port 80; requires TCP reassembly sequence conflict analysis)",
+            "compression": None,
+        },
+        {
+            "id": "ws_http_browsing",
+            "name": "Wireshark Benign HTTP Web Browsing",
+            "publisher": "Wireshark Foundation",
+            "url": "https://wiki.wireshark.org/uploads/27707187aeb30df68e70c8fb9d614981/http.cap",
+            "type": "pcap",
+            "size_est_bytes": 25803,
+            "category": "Benign Web Browsing Traffic",
+            "attack_type": "Benign HTTP request and response flow",
+            "target_rules": ["FP_BENIGN_VERIFICATION"],
+            "ground_truth": "Standard benign reference HTTP traffic (0 FP verification)",
+            "compression": None,
+        },
+        {
+            "id": "iot23_malware_20_1",
+            "name": "IoT-23 Torii Botnet C2 & Scanning",
+            "publisher": "Stratosphere IPS / CTU University",
+            "url": "https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset/IndividualScenarios/CTU-IoT-Malware-Capture-20-1/2018-10-02-13-12-30-192.168.100.103.pcap",
+            "type": "pcap",
+            "size_est_bytes": 4089446,
+            "category": "Modular Botnet C2 & Scanning",
+            "attack_type": "Torii botnet low-bandwidth TLS C2 beaconing to single server",
+            "target_rules": ["UNASSESSED_BOTNET_C2_BEACON"],
+            "ground_truth": "CTU-IoT-Malware-Capture-20-1 authentic Torii execution (subthreshold volume, persistent TLS C2 session)",
+            "compression": None,
+        },
+        {
+            "id": "m_rau5_icmp_tunnel",
+            "name": "Covert ICMP Base64 Exfiltration Tunnel",
+            "publisher": "m-rau5 Security Research",
+            "url": "https://raw.githubusercontent.com/m-rau5/cover-channel-analyzer/main/test_data/mock_covert_channels.pcap",
+            "type": "pcap",
+            "size_est_bytes": 1956,
+            "category": "Covert ICMP Tunneling",
+            "attack_type": "Base64 exfiltration payload chunks in ICMP Echo requests",
+            "target_rules": ["ICMP_TUNNEL", "DATA_EXFIL"],
+            "ground_truth": "Curated mock test fixture: 128-byte base64 chunks carried in ICMP Echo requests (not independent real-world field telemetry)",
+            "provenance_type": "synthetic_mock_fixture",
+            "compression": None,
+        },
+        {
+            "id": "foxit_log4shell",
+            "name": "Fox-IT Log4Shell JNDI RCE Exploit",
+            "publisher": "Fox-IT / NCC Group",
+            "url": "https://raw.githubusercontent.com/fox-it/log4shell-pcaps/main/log4shell-ldap-pcaps/ldap-uri-params-ev0.pcap",
+            "type": "pcap",
+            "size_est_bytes": 56278,
+            "category": "Web Exploit Payloads",
+            "attack_type": "Log4Shell CVE-2021-44228 JNDI LDAP lookup & bytecode delivery",
+            "target_rules": ["PAYLOAD_HIT"],
+            "ground_truth": "HTTP GET with nested obfuscated JNDI LDAP lookup in query param",
+            "compression": None,
+        },
+        {
+            "id": "oisf_tls_sni_anomaly",
+            "name": "OISF Suricata TLS SNI Enforcement",
+            "publisher": "Open Information Security Foundation (OISF)",
+            "url": "https://raw.githubusercontent.com/OISF/suricata-verify/master/tests/firewall/ruletype-firewall-160-tls-sni-firewall-enforcement/input.pcap",
+            "type": "pcap",
+            "size_est_bytes": 3596,
+            "category": "TLS Firewall Policy Enforcement",
+            "attack_type": "Suricata-specific firewall SNI allowlist policy verification",
+            "target_rules": ["UNASSESSED_FIREWALL_POLICY"],
+            "ground_truth": "Differential ClientHello with unauthorized SNI and omitted SNI extensions (evaluates firewall drop policy for non-suricata.io SNI; outside IDS signature scope)",
+            "compression": None,
+        },
+        {
+            "id": "ws_nmap_stealth_scan",
+            "name": "Wireshark Nmap Stealth & OS Scan",
+            "publisher": "Wireshark Foundation",
+            "url": "https://wiki.wireshark.org/uploads/__moin_import__/attachments/SampleCaptures/NMap-Captures.zip",
+            "type": "zip",
+            "size_est_bytes": 114641,
+            "category": "TCP Stealth Scan",
+            "attack_type": "Nmap NULL, XMAS, and illegal TCP flag combinations",
+            "target_rules": ["TCP_STEALTH_SCAN", "TCP_FLAG_ANOMALY"],
+            "ground_truth": "RFC 793 illegal flag combinations (0x0000 NULL, 0x0029 XMAS, 0x002b)",
+            "compression": "zip",
+            "archive_member": "nmap_OS_scan_succesful",
+        },
+        {
+            "id": "oisf_modbus",
+            "name": "OISF Modbus/TCP Industrial Control Baseline",
+            "publisher": "OISF / ITI ICS Tools",
+            "url": "https://raw.githubusercontent.com/OISF/suricata-verify/master/tests/modbus/modbus-raw/modbus-test.pcap",
+            "type": "pcap",
+            "size_est_bytes": 8701,
+            "category": "ICS / SCADA Protocol Verification",
+            "attack_type": "Industrial Modbus/TCP operational traffic baseline (benign / zero false positive)",
+            "target_rules": ["FP_BENIGN_VERIFICATION"],
+            "ground_truth": "Authentic Modbus/TCP query/response frames on port 502 (verifies zero false positives and parser stability on industrial automation traffic)",
+            "provenance_type": "curated_research_capture",
+            "compression": None,
+        },
+        {
+            "id": "oisf_syn_flood",
+            "name": "OISF TCP SYN Flood Burst",
+            "publisher": "Open Information Security Foundation (OISF)",
+            "url": "https://raw.githubusercontent.com/OISF/suricata-verify/master/tests/firewall/tcp-session-syn-flood-drop-precedence/input.pcap",
+            "type": "pcap",
+            "size_est_bytes": 14024,
+            "category": "Denial of Service (DoS)",
+            "attack_type": "High-rate volumetric TCP SYN flood burst (200 SYNs in 0.2s)",
+            "target_rules": ["SYN_FLOOD"],
+            "ground_truth": "OISF Suricata verify firewall test: 200 SYN packets targeting 198.51.100.5:443 from incrementing source ports in 0.199s",
+            "provenance_type": "curated_research_capture",
+            "compression": None,
+        },
+    ]
+
+
+class PipelineCoordinator:
+    """Coordinates producer-consumer dataset acquisition and NetGuard evaluation."""
+
+    def __init__(self, candidates: list[dict], max_items: int = None, force_reeval: bool = False):
+        self.candidates = candidates[:max_items] if max_items else candidates
+        self.force_reeval = force_reeval
+        self.verification_queue = queue.Queue()
+        self.evaluation_queue = queue.Queue()
+        self.completed_evaluations: list[dict] = []
+
+        # Persistent cumulative budget tracking across runs
+        self.budget_state = load_cumulative_budget()
+        self.cumulative_bytes = self.budget_state.get("cumulative_downloaded_bytes", 0)
+        self.cumulative_time_s = self.budget_state.get("cumulative_download_time_s", 0.0)
+
+        self.start_time = time.time()
+        self.stop_requested = False
+        self._lock = threading.Lock()
+
+    def download_worker(self):
+        """Worker B: Downloads files sequentially with resume, 206 validation, and persistent budget bounds checks."""
+        for candidate in self.candidates:
+            if self.stop_requested:
+                break
+            if not check_disk_safety():
+                logger.error("Disk safety check failed — stopping downloader.")
+                break
+            if self.cumulative_time_s >= MAX_DOWNLOAD_TIME_SECONDS:
+                logger.warning(f"Cumulative download time budget reached ({self.cumulative_time_s:.1f}s >= {MAX_DOWNLOAD_TIME_SECONDS}s).")
+                break
+            if self.cumulative_bytes >= MAX_INITIAL_ACQUISITION_GIB * (1024 ** 3):
+                logger.warning(f"Cumulative download size budget reached ({self.cumulative_bytes / (1024**3):.2f} GiB >= {MAX_INITIAL_ACQUISITION_GIB} GiB).")
+                break
+
+            cid = candidate["id"]
+            url = candidate["url"]
+            ext = "." + candidate["type"]
+            incoming_part = os.path.join(INCOMING_DIR, f"{cid}{ext}.part")
+            incoming_final = os.path.join(INCOMING_DIR, f"{cid}{ext}")
+            verified_target = os.path.join(VERIFIED_DIR, f"{cid}.pcap")
+
+            # Check if already verified
+            if os.path.isfile(verified_target):
+                logger.info(f"[{cid}] Already verified at {verified_target} — queuing for evaluation.")
+                self.evaluation_queue.put({"candidate": candidate, "pcap_path": verified_target})
+                continue
+
+            logger.info(f"[{cid}] Starting download from: {url}")
+            t0 = time.perf_counter()
+            req = urllib.request.Request(url, headers={"User-Agent": "NetGuard-IDS-Evaluation/1.0"})
+
+            # Resume support with 206 Partial Content validation
+            downloaded = 0
+            if os.path.isfile(incoming_part):
+                downloaded = os.path.getsize(incoming_part)
+                if downloaded > 0:
+                    req.add_header("Range", f"bytes={downloaded}-")
+                    logger.info(f"[{cid}] Resuming from byte offset {downloaded:,}")
+
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    status_code = getattr(resp, "status", getattr(resp, "code", 200))
+                    write_mode = "wb"
+                    if downloaded > 0:
+                        if status_code == 206:
+                            content_range = resp.headers.get("Content-Range", "")
+                            # Format: bytes <start>-<end>/<total>
+                            range_match = re.match(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", content_range.strip()) if content_range else None
+                            if not range_match or int(range_match.group(1)) != downloaded:
+                                logger.warning(f"[{cid}] Content-Range invalid or mismatched ({content_range}); closing and reissuing fresh request from byte 0.")
+                                resp.close()
+                                downloaded = 0
+                                try:
+                                    if os.path.exists(incoming_part):
+                                        os.remove(incoming_part)
+                                except Exception:
+                                    pass
+                                fresh_req = urllib.request.Request(url, headers={"User-Agent": "NetGuard-IDS-Evaluation/1.0"})
+                                resp = urllib.request.urlopen(fresh_req, timeout=30)
+                                write_mode = "wb"
+                            else:
+                                write_mode = "ab"
+                        else:
+                            # Server returned HTTP 200 or other non-206 status: full body from byte 0
+                            logger.info(f"[{cid}] Server returned HTTP {status_code} (not 206 Partial Content); restarting from byte 0.")
+                            downloaded = 0
+                            write_mode = "wb"
+
+                    with open(incoming_part, write_mode) as f_out:
+                        while True:
+                            chunk = resp.read(64 * 1024)
+                            if not chunk:
+                                break
+                            now_stream = time.perf_counter()
+                            # Incremental acquisition budget and transfer time enforcement during streaming
+                            with self._lock:
+                                if self.cumulative_bytes + len(chunk) > MAX_INITIAL_ACQUISITION_GIB * (1024 ** 3):
+                                    raise RuntimeError(
+                                        f"Cumulative download budget ({MAX_INITIAL_ACQUISITION_GIB} GiB) exceeded during streaming."
+                                    )
+                                if self.cumulative_time_s + (now_stream - t0) > MAX_DOWNLOAD_TIME_SECONDS:
+                                    raise RuntimeError(
+                                        f"Cumulative transfer time budget ({MAX_DOWNLOAD_TIME_SECONDS}s) exceeded during streaming."
+                                    )
+                                self.cumulative_bytes += len(chunk)
+                            f_out.write(chunk)
+
+                elapsed = max(0.001, time.perf_counter() - t0)
+                file_size = os.path.getsize(incoming_part)
+                newly_downloaded = file_size - downloaded
+
+                with self._lock:
+                    self.cumulative_time_s += elapsed
+                    self.budget_state = update_cumulative_budget(newly_downloaded, elapsed)
+
+                throughput_mbs = (newly_downloaded / (1024 * 1024)) / elapsed
+                throughput_mbps = (newly_downloaded * 8) / (elapsed * 1_000_000)
+                logger.info(f"[{cid}] Download complete: {file_size:,} bytes in {elapsed:.2f}s ({throughput_mbs:.2f} MB/s, {throughput_mbps:.2f} Mbps)")
+
+                # Move from .part to incoming_final
+                os.replace(incoming_part, incoming_final)
+                # Pass to verification worker
+                self.verification_worker(candidate, incoming_final)
+
+            except Exception as exc:
+                # Persist partial bytes and elapsed time upon interruption
+                elapsed_partial = max(0.001, time.perf_counter() - t0)
+                part_size = os.path.getsize(incoming_part) if os.path.isfile(incoming_part) else 0
+                newly_part = max(0, part_size - downloaded)
+                if newly_part > 0 or elapsed_partial > 0:
+                    with self._lock:
+                        self.cumulative_time_s += elapsed_partial
+                        self.budget_state = update_cumulative_budget(newly_part, elapsed_partial)
+                logger.error(f"[{cid}] Download failed: {exc}")
+
+        # Signal completion to evaluation worker
+        self.evaluation_queue.put(None)
+
+    def verification_worker(self, candidate: dict, incoming_path: str):
+        """Worker C: Integrity, extraction, deep PCAP header validation, and atomic promotion."""
+        cid = candidate["id"]
+        logger.info(f"[{cid}] Verifying integrity of: {incoming_path}")
+
+        # Compute SHA-256 of incoming archive/file
+        archive_sha256 = hash_file_sha256(incoming_path)
+        logger.info(f"[{cid}] Incoming SHA-256: {archive_sha256}")
+
+        # Handle decompression if needed
+        verified_pcap = os.path.join(VERIFIED_DIR, f"{cid}.pcap")
+        tmp_decomp = incoming_path + ".decomp"
+        is_compressed = bool(candidate.get("compression"))
+
+        try:
+            if candidate.get("compression") == "xz":
+                logger.info(f"[{cid}] Decompressing XZ archive safely with bounds check...")
+                with lzma.open(incoming_path, "rb") as f_in, open(tmp_decomp, "wb") as f_out:
+                    safe_decompress_stream(f_in, f_out)
+                os.replace(tmp_decomp, verified_pcap)
+            elif candidate.get("compression") == "gz":
+                logger.info(f"[{cid}] Decompressing GZ archive safely with bounds check...")
+                with gzip.open(incoming_path, "rb") as f_in, open(tmp_decomp, "wb") as f_out:
+                    safe_decompress_stream(f_in, f_out)
+                os.replace(tmp_decomp, verified_pcap)
+            elif candidate.get("compression") == "zip":
+                logger.info(f"[{cid}] Extracting ZIP archive safely with bounds check...")
+                import zipfile
+                with zipfile.ZipFile(incoming_path, "r") as z:
+                    target_member = candidate.get("archive_member")
+                    if not target_member:
+                        members = [m for m in z.namelist() if not m.endswith("/")]
+                        target_member = members[0] if members else None
+                    if target_member:
+                        with z.open(target_member) as f_in, open(tmp_decomp, "wb") as f_out:
+                            safe_decompress_stream(f_in, f_out)
+                        os.replace(tmp_decomp, verified_pcap)
+                    else:
+                        logger.error(f"[{cid}] ZIP member not found: {target_member}")
+                        return
+            else:
+                # Atomic promote
+                os.replace(incoming_path, verified_pcap)
+        except Exception as exc:
+            logger.error(f"[{cid}] Decompression failed or exceeded safety limits: {exc}")
+            if os.path.exists(tmp_decomp):
+                try:
+                    os.remove(tmp_decomp)
+                except OSError:
+                    pass
+            os.makedirs(QUARANTINE_DIR, exist_ok=True)
+            quarantine_path = os.path.join(QUARANTINE_DIR, f"{cid}.corrupt.archive")
+            try:
+                os.replace(incoming_path, quarantine_path)
+            except OSError:
+                pass
+            return
+
+        # Compute SHA-256 of verified PCAP
+        pcap_sha256 = hash_file_sha256(verified_pcap)
+
+        # Save PCAP hash file
+        hash_file = os.path.join(HASHES_DIR, f"{cid}.sha256")
+        with open(hash_file, "w") as f:
+            f.write(f"{pcap_sha256}  {os.path.basename(verified_pcap)}\n")
+
+        # If compressed, save archive hash separately
+        if is_compressed:
+            archive_hash_file = os.path.join(HASHES_DIR, f"{cid}.archive.sha256")
+            with open(archive_hash_file, "w") as f:
+                f.write(f"{archive_sha256}  {os.path.basename(incoming_path)}\n")
+
+        # Deep PCAP header and tool-based validation (capinfos / tshark)
+        is_valid, validation_msg, tool_stats = validate_pcap_with_tools(verified_pcap)
+        if not is_valid:
+            logger.error(f"[{cid}] PCAP validation failed: {validation_msg} — moving to quarantine.")
+            os.makedirs(QUARANTINE_DIR, exist_ok=True)
+            quarantine_path = os.path.join(QUARANTINE_DIR, f"{cid}.corrupt.pcap")
+            os.replace(verified_pcap, quarantine_path)
+            return
+
+        # Write metadata manifest
+        meta = {
+            "id": cid,
+            "name": candidate["name"],
+            "publisher": candidate["publisher"],
+            "url": candidate["url"],
+            "verified_pcap": verified_pcap,
+            "size_bytes": os.path.getsize(verified_pcap),
+            "sha256": pcap_sha256,
+            "archive_sha256": archive_sha256 if is_compressed else None,
+            "category": candidate["category"],
+            "attack_type": candidate["attack_type"],
+            "target_rules": candidate["target_rules"],
+            "ground_truth": candidate["ground_truth"],
+            "validation": validation_msg,
+            "packet_count": tool_stats.get("packet_count", 0),
+            "capture_duration_s": tool_stats.get("duration_seconds", 0.0),
+            "verified_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        meta_file = os.path.join(VERIFIED_DIR, f"{cid}.meta.json")
+        with open(meta_file, "w") as f:
+            json.dump(meta, f, indent=2)
+
+        logger.info(f"[{cid}] Successfully verified and promoted to {verified_pcap} ({validation_msg}, packets: {tool_stats.get('packet_count', 'unknown')})")
+        # Enqueue for real-time evaluation
+        self.evaluation_queue.put({"candidate": candidate, "pcap_path": verified_pcap, "meta": meta, "tool_stats": tool_stats})
+
+    def evaluation_worker(self):
+        """Worker D: Processes verified PCAPs against NetGuard with bulletproof TemporaryDirectory isolation."""
+        from storage.db import get_connection, init_db
+        from engine.blocklist import load_blocklist, BlocklistData
+        from capture.sniffer import replay_pcap
+        from evaluation.replay import create_replay_engine
+        import config
+
+        bl_path = AUTHORITATIVE_BLOCKLIST_PATH
+        if os.path.exists(bl_path):
+            blocklist = load_blocklist(bl_path, url=None)
+        else:
+            blocklist = BlocklistData(exact=set(), networks=[])
+
+        while True:
+            item = self.evaluation_queue.get()
+            if item is None:
+                # End of queue
+                break
+
+            candidate = item["candidate"]
+            pcap_path = item["pcap_path"]
+            cid = candidate["id"]
+            tool_stats = item.get("tool_stats", {})
+
+            cache_key = compute_eval_cache_key(pcap_path, candidate)
+            out_eval_file = os.path.join(EVALUATION_DIR, f"{cid}_eval.json")
+            cached_result = None
+            if not self.force_reeval and os.path.isfile(out_eval_file):
+                try:
+                    with open(out_eval_file, "r") as f:
+                        data = json.load(f)
+                    if "rule_breakdown" in data and data.get("cache_key") == cache_key:
+                        cached_result = data
+                except Exception as exc:
+                    logger.warning(f"[{cid}] Could not read existing evaluation {out_eval_file}: {exc}")
+
+            if cached_result is not None:
+                logger.info(f"[{cid}] Valid evaluation cache hit (cache key: {cache_key}) — skipping replay.")
+                with self._lock:
+                    self.completed_evaluations.append(cached_result)
+                continue
+
+            logger.info(f"[{cid}] === STARTING NETGUARD EVALUATION ===")
+
+            orig_sqlite = config.SQLITE_PATH
+            orig_arp = config.ARP_TABLE_PATH
+
+            # Use TemporaryDirectory for complete isolation and cleanup
+            with tempfile.TemporaryDirectory(prefix=f"netguard_iso_{cid}_") as tmpdir:
+                tmp_db = os.path.join(tmpdir, "isolated.db")
+                tmp_arp = os.path.join(tmpdir, "isolated_arp.json")
+                config.SQLITE_PATH = tmp_db
+                config.ARP_TABLE_PATH = tmp_arp
+
+                try:
+                    conn = get_connection()
+                    init_db(conn)
+                    tracking_engine = create_replay_engine(conn, blocklist, config)
+
+                    t0 = time.perf_counter()
+                    replay_stats = replay_pcap(pcap_path, tracking_engine)
+                    tracking_engine.flush()
+                    eval_time = max(0.001, time.perf_counter() - t0)
+
+                    # Read alerts from isolated DB
+                    conn.row_factory = None
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT rule_name, rule_version, src_ip, dst_ip, src_port, dst_port, "
+                        "protocol, detail, severity, confidence, evidence_json, timestamp FROM alerts ORDER BY timestamp"
+                    )
+                    raw_alerts = cursor.fetchall()
+                    alerts = []
+                    for row in raw_alerts:
+                        ev = {}
+                        if row[10]:
+                            try:
+                                ev = json.loads(row[10])
+                            except Exception:
+                                pass
+                        alerts.append({
+                            "rule_name": row[0],
+                            "rule_version": row[1],
+                            "src_ip": row[2],
+                            "dst_ip": row[3],
+                            "src_port": row[4],
+                            "dst_port": row[5],
+                            "protocol": row[6],
+                            "detail": row[7],
+                            "severity": row[8],
+                            "confidence": row[9],
+                            "evidence": ev,
+                            "timestamp": row[11],
+                        })
+
+                    stats = tracking_engine.engine._stats.copy()
+                    file_size = os.path.getsize(pcap_path)
+                    mbs = (file_size / (1024 * 1024)) / eval_time
+
+                    # Alert breakdown by rule
+                    rule_breakdown = {}
+                    for a in alerts:
+                        rn = a["rule_name"]
+                        rule_breakdown[rn] = rule_breakdown.get(rn, 0) + 1
+
+                    # Automated Ground-Truth Verdict Classification (capture-level heuristic)
+                    verdict, verdict_rationale = classify_capture_level_signal(candidate, alerts, rule_breakdown)
+
+                    # Rigorous ground-truth evaluation: if structured labels exist, run evaluate_ground_truth_labels
+                    labels = candidate.get("labels")
+                    labels_file = candidate.get("labels_file") or candidate.get("labels_path")
+                    if not labels and labels_file and os.path.isfile(labels_file):
+                        try:
+                            with open(labels_file, "r", encoding="utf-8") as lf:
+                                labels = json.load(lf)
+                        except Exception as exc:
+                            logger.warning(f"[{cid}] Could not load labels from {labels_file}: {exc}")
+
+                    if labels and isinstance(labels, list):
+                        gt_result = evaluate_ground_truth_labels(
+                            labels, alerts,
+                            label_coverage=candidate.get("label_coverage", "complete")
+                        )
+                    else:
+                        gt_result = {
+                            "status": "UNASSESSED",
+                            "reason": "No validated structured flow labels available for capture",
+                            "label_coverage": "unassessed",
+                            "total_labels": 0,
+                            "total_alerts": len(alerts),
+                            "true_positives": 0,
+                            "false_negatives": 0,
+                            "false_positives": 0,
+                            "unassessed_alerts": len(alerts),
+                            "precision": None,
+                            "recall": None,
+                            "f1": None,
+                        }
+
+                    logger.info(f"[{cid}] Replay finished in {eval_time:.2f}s ({mbs:.2f} MB/s). Alerts fired: {len(alerts)} | Verdict: {verdict}")
+                    logger.info(f"[{cid}] Rule breakdown: {rule_breakdown}")
+
+                    git_rev = get_git_revision()
+                    p_total = replay_stats.get("total", 0) if isinstance(replay_stats, dict) else 0
+                    packet_cnt = p_total or tool_stats.get("packet_count") or stats.get("packets_total", 0)
+
+                    eval_result = {
+                        "id": cid,
+                        "name": candidate["name"],
+                        "publisher": candidate["publisher"],
+                        "category": candidate["category"],
+                        "attack_type": candidate["attack_type"],
+                        "target_rules": candidate["target_rules"],
+                        "file_size_bytes": file_size,
+                        "eval_duration_s": eval_time,
+                        "eval_throughput_mbs": mbs,
+                        "total_alerts": len(alerts),
+                        "rule_breakdown": rule_breakdown,
+                        "verdict": verdict,
+                        "verdict_rationale": verdict_rationale,
+                        "capture_level_signal": {
+                            "verdict": verdict,
+                            "rationale": verdict_rationale,
+                        },
+                        "ground_truth": gt_result,
+                        "alerts_sample": alerts[:50],  # first 50 alerts
+                        "stats": stats,
+                        "packet_count": packet_cnt,
+                        "cache_key": cache_key,
+                        "evaluator_version": _EVALUATOR_VERSION,
+                        "code_revision": git_rev,
+                        "evaluated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    }
+
+                    out_eval_file = os.path.join(EVALUATION_DIR, f"{cid}_eval.json")
+                    out_results_file = os.path.join(EVALUATION_RESULTS_DIR, f"{cid}_eval.json")
+                    with open(out_eval_file, "w") as f:
+                        json.dump(eval_result, f, indent=2)
+                    try:
+                        with open(out_results_file, "w") as f:
+                            json.dump(eval_result, f, indent=2)
+                    except OSError:
+                        pass
+
+                    with self._lock:
+                        self.completed_evaluations.append(eval_result)
+
+                except Exception as exc:
+                    logger.error(f"[{cid}] Evaluation error: {exc}", exc_info=True)
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    config.SQLITE_PATH = orig_sqlite
+                    config.ARP_TABLE_PATH = orig_arp
+
+    def run(self):
+        """Execute concurrent download and evaluation workers."""
+        logger.info(f"Starting NetGuard Pipeline: {len(self.candidates)} candidates queued.")
+        logger.info(f"Storage path: {HDD_DATASETS_DIR}")
+        logger.info(f"Cumulative downloaded: {self.cumulative_bytes / (1024 * 1024):.2f} MB | Cumulative time: {self.cumulative_time_s:.1f}s")
+
+        downloader_thread = threading.Thread(target=self.download_worker, name="Worker-B-Downloader")
+        evaluator_thread = threading.Thread(target=self.evaluation_worker, name="Worker-D-Evaluator")
+
+        t_start = time.perf_counter()
+        downloader_thread.start()
+        evaluator_thread.start()
+
+        downloader_thread.join()
+        evaluator_thread.join()
+
+        total_elapsed = time.perf_counter() - t_start
+        logger.info(f"Pipeline run finished in {total_elapsed:.2f}s.")
+        logger.info(f"Total cumulative budget: {self.cumulative_bytes / (1024 * 1024):.2f} MB across {len(self.completed_evaluations)} evaluated captures.")
+        return self.completed_evaluations
+
+
+if __name__ == "__main__":
+    force = "--force" in sys.argv or "-f" in sys.argv
+    candidates = get_candidate_queue()
+    if "--id" in sys.argv:
+        idx = sys.argv.index("--id")
+        if idx + 1 < len(sys.argv):
+            target_id = sys.argv[idx + 1]
+            candidates = [c for c in candidates if c["id"] == target_id]
+    coord = PipelineCoordinator(candidates, force_reeval=force)
+    results = coord.run()
+    print("\n" + "=" * 70)
+    print(f"PIPELINE SUMMARY: {len(results)} Captures Evaluated")
+    for r in results:
+        v = r.get("verdict", "N/A")
+        print(f" - {r['id']} ({r['publisher']}): {r['total_alerts']} alerts | {r['eval_duration_s']:.2f}s | Verdict: {v} | {r['rule_breakdown']}")
+    print("=" * 70)

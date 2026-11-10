@@ -1,0 +1,51 @@
+{
+  "netguard-workbench-hooks": {
+    "enabled": true,
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python3 scripts/session_start.py",
+        "timeout": 15
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 scripts/pre_tool_guard.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 scripts/post_tool_logger.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python3 scripts/pre_invocation.py",
+        "timeout": 10
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 scripts/stop_checkpoint.py",
+        "timeout": 15
+      }
+    ]
+  }
+}
+

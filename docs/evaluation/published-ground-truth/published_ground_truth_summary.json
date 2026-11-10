@@ -1,0 +1,83 @@
+{
+  "evaluation_name": "NetGuard IDS Published Ground-Truth Evaluation",
+  "evaluation_date_utc": "2026-11-09T13:57:24Z",
+  "dataset": {
+    "name": "CTU-IoT-Malware-Capture-48-1 (Mirai Botnet)",
+    "publisher": "Stratosphere Laboratory, Czech Technical University (CTU)",
+    "url": "https://mcfp.felk.cvut.cz/publicDatasets/IoT-23-Dataset-v2/CTU-IoT-Malware-Capture-48-1/",
+    "device": "Raspberry Pi",
+    "infected_host_ip": "192.168.1.200",
+    "pcap_file": "2019-02-28-19-15-13-192.168.1.200.pcap",
+    "pcap_sha256": "ac2e41f0d5b2479ce5e1779fbaa6d6b73a6151050d86f04f80a872759034865c",
+    "packets": 13565553,
+    "capture_duration_hours": 9.77,
+    "zeek_labeled_file": "2019-02-28-19-15-13-192.168.1.200-zeek-conn-log.labeled",
+    "zeek_labeled_sha256": "9f69946243df93c199876c0783cb4b5fb188e6d2325c593858f2db8fb5fa847f",
+    "zeek_flows_total": 3394338,
+    "zeek_labels": {
+      "Malicious": 3390604,
+      "Benign": 3734
+    },
+    "zeek_detailed_labels": {
+      "C&C-HeartBeat-FileDownload": 11,
+      "PartOfAHorizontalPortScan": 3386119,
+      "Attack": 2752,
+      "": 3734,
+      "C&C-HeartBeat-Attack": 834,
+      "C&C-PartOfAHorizontalPortScan": 888
+    }
+  },
+  "engine": {
+    "version": "1.1",
+    "engine_fingerprint": "86c41a7839fcaae6660190615a2da8681f6a60283377817542d720c324de22d7",
+    "rules_count": 23,
+    "clean_git_tree": true,
+    "commit": "f7e816a5f0dc41e3f1db458001899b145abfbca4"
+  },
+  "execution_metrics": {
+    "runtime_seconds": 2711.11,
+    "packets_processed": 13565553,
+    "packets_total": 13565553,
+    "throughput_pps": 5003.7,
+    "peak_rss_mb": 116.44,
+    "database_path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/netguard_eval_48_1.db",
+    "database_size_bytes": 2224128
+  },
+  "netguard_alerts": {
+    "total_alerts": 4027,
+    "alerts_by_rule": {
+      "PORT_SCAN": 3473,
+      "SLOW_PORT_SCAN": 292,
+      "ARP_SPOOF": 262
+    },
+    "malformed_timestamps": 0,
+    "invalid_ports": 0,
+    "invalid_ips": 0
+  },
+  "ground_truth_corroboration": {
+    "tier_counts": {
+      "CONFIRMED_TRUE_POSITIVE": 3765,
+      "FALSE_POSITIVE": 5,
+      "MALICIOUS_TRAFFIC_ASSOCIATED": 257
+    },
+    "precision_confirmed_tp": 93.49,
+    "precision_all_malicious": 99.88,
+    "false_positive_count": 5,
+    "false_positive_rate": 0.12
+  },
+  "suricata_comparison": {
+    "total_alerts": 85,
+    "top_signatures": {
+      "SURICATA STREAM Packet with invalid ack": 23,
+      "SURICATA STREAM SHUTDOWN RST invalid ack": 23,
+      "ET INFO Executable and linking format (ELF) file download Over HTTP": 11,
+      "ET HUNTING Possible ELF executable sent when remote host claims to send a Text File": 11,
+      "SURICATA TCPv4 invalid checksum": 6,
+      "SURICATA STREAM excessive retransmissions": 3,
+      "ET DROP Spamhaus DROP Listed Traffic Inbound group 36": 2,
+      "SURICATA HTTP unable to match response to request": 2,
+      "SURICATA STREAM 3way handshake SYNACK with wrong ack": 2,
+      "ET DROP Spamhaus DROP Listed Traffic Inbound group 37": 1
+    }
+  }
+}

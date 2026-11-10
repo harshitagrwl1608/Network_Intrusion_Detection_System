@@ -50,7 +50,7 @@ class TestIcmpFloodRule(unittest.TestCase):
                 break
         self.assertIsNotNone(alert)
         self.assertEqual(alert["rule_name"], "ICMP_FLOOD")
-        self.assertEqual(alert["rule_version"], "1.7")
+        self.assertEqual(alert["rule_version"], "1.8")
         self.assertEqual(alert["severity"], "medium")
         self.assertEqual(alert["confidence"], "heuristic")
         self.assertEqual(alert["evidence"]["classification"], "ICMP_ECHO_RATE_THRESHOLD")
@@ -171,6 +171,13 @@ class TestIcmpFloodRule(unittest.TestCase):
             self.rule.check(_icmp_pkt(timestamp=base + i * 0.1))
         self.assertEqual(len(self.rule._history), 1)
         self.rule.prune_stale(base + 100)
+        self.assertEqual(len(self.rule._history), 0)
+
+        # Test prune_stale with default now=None
+        for i in range(5):
+            self.rule.check(_icmp_pkt(timestamp=base - 100 + i * 0.1))
+        self.assertEqual(len(self.rule._history), 1)
+        self.rule.prune_stale()
         self.assertEqual(len(self.rule._history), 0)
 
 

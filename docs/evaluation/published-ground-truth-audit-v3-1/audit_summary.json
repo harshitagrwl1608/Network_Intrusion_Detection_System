@@ -1,0 +1,114 @@
+{
+  "audit_name": "NetGuard IDS Forensic Ground-Truth Audit V3.1",
+  "audit_version": "3.1.0",
+  "audit_timestamp_utc": "2026-11-09T17:09:15Z",
+  "provenance": {
+    "pcap_file": "2019-02-28-19-15-13-192.168.1.200.pcap",
+    "pcap_size_bytes": 1222967296,
+    "pcap_sha256": "ac2e41f0d5b2479ce5e1779fbaa6d6b73a6151050d86f04f80a872759034865c",
+    "zeek_file": "2019-02-28-19-15-13-192.168.1.200-zeek-conn-log.labeled",
+    "zeek_size_bytes": 531738215,
+    "zeek_sha256": "9f69946243df93c199876c0783cb4b5fb188e6d2325c593858f2db8fb5fa847f",
+    "db_file": "netguard_eval_48_1.db",
+    "db_size_bytes": 2224128,
+    "db_sha256": "6bb5376835c5b25ba721e80fa2547c6cbadb56f38710a8d28650dc8ec6cff042",
+    "suricata_eve_sha256": "47def6819b58635e4f27be0d06dee4470f62f98e278173aa65abfe25da30b762"
+  },
+  "zeek_parsing": {
+    "total_records": 3394338,
+    "parsed_records": 3394338,
+    "malformed_records": 0,
+    "duplicate_uids": 0,
+    "publisher_scan_flows": 3386119
+  },
+  "pcap_parsing": {
+    "packets_read": 13565552,
+    "valid_initial_syn_packets": 13523890,
+    "total_exported_attribution_packets": 223845
+  },
+  "alert_attribution": {
+    "total_alerts": 4027,
+    "scan_alerts": 3765,
+    "arp_alerts": 262,
+    "tier_a_confirmed_tp": 3669,
+    "tier_b_malicious_associated": 96,
+    "tier_c_false_positive": 0,
+    "tier_d_unassessed": 262,
+    "tier_e_no_association": 0,
+    "strict_precision_pct": 91.11,
+    "scan_rule_precision_pct": 97.45,
+    "unassessed_rate_pct": 6.51
+  },
+  "retransmission_investigation": {
+    "total_cases": 402,
+    "resolved_via_flow_lifetime": 397,
+    "partially_resolved": 5,
+    "unresolved": 0,
+    "resolution_pct": 98.76
+  },
+  "flow_coverage": {
+    "publisher_scan_flows": 3386119,
+    "unique_uids_in_trigger": 111214,
+    "trigger_evidence_pct": 3.28,
+    "campaign_cooldown_overlap_pct": 100,
+    "per_flow_recall_status": "NOT MEASURABLE at per-flow granularity due to intentional rate-limiting alert aggregation"
+  },
+  "arp_forensics": {
+    "total_arp_alerts": 262,
+    "physical_arp_frames": 6252,
+    "gateway_mac_stable": "78:8a:20:43:93:d5",
+    "physical_spoofing_observed": false,
+    "classification": "Tier D (Unassessed due to missing historical runtime arp_table.json)"
+  },
+  "suricata_provenance": {
+    "total_alerts": 85,
+    "signatures": {
+      "SURICATA STREAM Packet with invalid ack": 23,
+      "SURICATA STREAM SHUTDOWN RST invalid ack": 23,
+      "ET INFO Executable and linking format (ELF) file download Over HTTP": 11,
+      "ET HUNTING Possible ELF executable sent when remote host claims to send a Text File": 11,
+      "SURICATA TCPv4 invalid checksum": 6,
+      "SURICATA STREAM excessive retransmissions": 3,
+      "ET DROP Spamhaus DROP Listed Traffic Inbound group 36": 2,
+      "SURICATA HTTP unable to match response to request": 2,
+      "SURICATA STREAM 3way handshake SYNACK with wrong ack": 2,
+      "ET DROP Spamhaus DROP Listed Traffic Inbound group 37": 1
+    },
+    "horizontal_scan_alerts": 0
+  },
+  "exports": {
+    "per_alert_attribution.csv": {
+      "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_1_exports/per_alert_attribution.csv",
+      "size_bytes": 850017,
+      "sha256": "42c60dddc0fd7503865464cf82855862370a780972864dda9ee83fd32c19e1d2"
+    },
+    "alert_to_zeek_uid.csv": {
+      "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_1_exports/alert_to_zeek_uid.csv",
+      "size_bytes": 3917955,
+      "sha256": "34370fde65fbaa8ab1ac2a884e6f1da345c16e5bc8acdc90f6c8aa31bab88341"
+    },
+    "alert_packet_evidence.csv": {
+      "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_1_exports/alert_packet_evidence.csv",
+      "size_bytes": 29390343,
+      "sha256": "ed5e3c98e0456718d69e95968f8f0966ece9b7f7ea8f856d7f00b05802cfcb57"
+    },
+    "per_flow_scan_attribution.csv": {
+      "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_1_exports/per_flow_scan_attribution.csv",
+      "size_bytes": 289842589,
+      "sha256": "2217b4c59060104f29c4a46a06e2b900bd85d5f69e7f5024fd942b152faa28a6"
+    },
+    "402_retransmission_case_audit.csv": {
+      "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_1_exports/402_retransmission_case_audit.csv",
+      "size_bytes": 37143,
+      "sha256": "ffe55617f35bfa1a2125a15d851ad1315b26bbbc3b09288aaacc26dc3da4ecf3"
+    },
+    "arp_alert_packet_attribution.csv": {
+      "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_1_exports/arp_alert_packet_attribution.csv",
+      "size_bytes": 57169,
+      "sha256": "50ea00c6815464dfa7a13c7c06c6bfcd8aa8c1832205cb66dde063c937522f80"
+    }
+  },
+  "audit_status": "HISTORICAL_SUPERSEDED_BY_V3_1_1_CODE_CORRECTIONS; METRICS_REQUIRE_RERUN",
+  "superseding_document": "docs/evaluation/published-ground-truth-audit-v3-1-1/00_correction_status.md",
+  "metric_caveat": "The 91.11% and 97.45% values are historical Tier-A fractions, not conventional precision. Do not cite as final."
+}

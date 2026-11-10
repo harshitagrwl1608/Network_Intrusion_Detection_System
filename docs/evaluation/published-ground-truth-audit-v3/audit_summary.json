@@ -1,0 +1,90 @@
+{
+  "audit_name": "NetGuard IDS Forensic Ground-Truth Audit V3",
+  "audit_version": "3.0.0",
+  "audit_timestamp_utc": "2026-11-09T15:35:12Z",
+  "provenance": {
+    "pcap_file": "2019-02-28-19-15-13-192.168.1.200.pcap",
+    "pcap_size_bytes": 1222967296,
+    "pcap_sha256": "ac2e41f0d5b2479ce5e1779fbaa6d6b73a6151050d86f04f80a872759034865c",
+    "pcap_hash_conflict_resolution": "True byte digest ac2e41f0d5b2479ce5e1779fbaa6d6b73a6151050d86f04f80a872759034865c established; previous ac2e41f022a8... was a typographical string corruption in V2 markdown text.",
+    "zeek_file": "2019-02-28-19-15-13-192.168.1.200-zeek-conn-log.labeled",
+    "zeek_size_bytes": 531738215,
+    "zeek_sha256": "9f69946243df93c199876c0783cb4b5fb188e6d2325c593858f2db8fb5fa847f",
+    "db_file": "netguard_eval_48_1.db",
+    "db_size_bytes": 2224128,
+    "db_sha256": "6bb5376835c5b25ba721e80fa2547c6cbadb56f38710a8d28650dc8ec6cff042",
+    "suricata_eve_sha256": "47def6819b58635e4f27be0d06dee4470f62f98e278173aa65abfe25da30b762"
+  },
+  "alert_attribution": {
+    "total_alerts": 4027,
+    "tier_a_confirmed_tp": 3765,
+    "tier_b_malicious_associated": 0,
+    "tier_c_false_positive": 262,
+    "tier_d_unassessed": 0,
+    "strict_precision_pct": 93.49,
+    "false_discovery_rate_pct": 6.51,
+    "scan_rule_precision_pct": 100.0
+  },
+  "retransmission_investigation": {
+    "total_zero_flow_start_alerts": 402,
+    "resolved_via_flow_lifetime": 402,
+    "resolution_pct": 100.0
+  },
+  "flow_coverage": {
+    "publisher_scan_flows": 3386119,
+    "flows_with_trigger_window_packets": 111817,
+    "flows_with_trigger_window_packets_pct": 3.3,
+    "flows_in_campaign_cooldown": 3386119,
+    "flows_in_campaign_cooldown_pct": 100.0,
+    "conventional_recall_assessability": "NOT MEASURABLE at per-flow granularity due to intentional alert rate-limiting cooldown aggregation."
+  },
+  "arp_forensics": {
+    "total_arp_alerts": 262,
+    "classification": "Unsupported False Alarm on this Capture",
+    "physical_gateway_mac": "78:8a:20:43:93:d5",
+    "actual_spoofing_observed": false
+  },
+  "suricata_provenance": {
+    "total_alerts": 85,
+    "signatures": {
+      "SURICATA STREAM Packet with invalid ack": 23,
+      "SURICATA STREAM SHUTDOWN RST invalid ack": 23,
+      "ET INFO Executable and linking format (ELF) file download Over HTTP": 11,
+      "ET HUNTING Possible ELF executable sent when remote host claims to send a Text File": 11,
+      "SURICATA TCPv4 invalid checksum": 6,
+      "SURICATA STREAM excessive retransmissions": 3,
+      "ET DROP Spamhaus DROP Listed Traffic Inbound group 36": 2,
+      "SURICATA HTTP unable to match response to request": 2,
+      "SURICATA STREAM 3way handshake SYNACK with wrong ack": 2,
+      "ET DROP Spamhaus DROP Listed Traffic Inbound group 37": 1
+    },
+    "horizontal_scan_alerts": 0,
+    "elf_download_alerts": 22
+  },
+  "exports": {
+    "per_alert_attribution.csv": {
+      "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_exports/per_alert_attribution.csv",
+      "sha256": "649820dff6232a942a9168eca70a2c6e321806fede89085ab43088ae2f1a64f4"
+    },
+    "alert_to_zeek_uid.csv": {
+      "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_exports/alert_to_zeek_uid.csv",
+      "sha256": "631a9620227abc30c7847c31e3713b63ca923682944939d80409fcc690468ac3"
+    },
+    "alert_packet_evidence.csv": {
+      "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_exports/alert_packet_evidence.csv",
+      "sha256": "a2f86abf8617f05bf06f9b41071820ed540e2e72204e49651e767677e1c103ef"
+    },
+    "per_flow_scan_attribution.csv": {
+      "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_exports/per_flow_scan_attribution.csv",
+      "sha256": "551d48e24321e60fc00ca2dcd71b085e3eab1afc7c72af98d29812820444cd84"
+    },
+    "402_retransmission_case_audit.csv": {
+      "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_exports/402_retransmission_case_audit.csv",
+      "sha256": "7bd10cd87f88a063c4450c490d513c409615eb4db96ef673a174c06197f64e07"
+    },
+    "arp_alert_packet_attribution.csv": {
+      "path": "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/audit_v3_exports/arp_alert_packet_attribution.csv",
+      "sha256": "2e588530ed4ca50960c4d64b25fcd15d41d401cfd20af609bea3610932af8bf0"
+    }
+  }
+}

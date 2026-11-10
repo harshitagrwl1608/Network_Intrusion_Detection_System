@@ -174,7 +174,18 @@ def main():
                             "Pass a fresh temp path for isolated evaluation runs "
                             "so previous replay state does not contaminate results."
                         ))
+    parser.add_argument("--log-mode", choices=["all", "summary", "quiet"], default="all",
+                        help=(
+                            "Logging verbosity: 'all' logs every alert (default), "
+                            "'summary' shows high-level progress without per-alert terminal spam, "
+                            "'quiet' suppresses info logs."
+                        ))
     args = parser.parse_args()
+
+    if args.log_mode == "quiet":
+        logging.getLogger().setLevel(logging.WARNING)
+    elif args.log_mode == "summary":
+        logging.getLogger("engine.rules").setLevel(logging.WARNING)
 
     if not os.path.exists(args.pcap):
         print(f"ERROR: PCAP not found: {args.pcap}")

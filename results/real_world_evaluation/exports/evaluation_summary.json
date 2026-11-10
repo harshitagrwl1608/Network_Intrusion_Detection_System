@@ -1,0 +1,569 @@
+{
+  "evaluation_timestamp_utc": "2026-11-10T08:52:31Z",
+  "total_captures": 19,
+  "total_packets": 429369,
+  "total_size_bytes": 143783853,
+  "total_elapsed_seconds": 125.88,
+  "average_throughput_pps": 3411.1,
+  "total_alerts": 267,
+  "attack_alerts": 267,
+  "benign_alerts": 0,
+  "captures": [
+    {
+      "id": "ciciot_pingsweep",
+      "name": "CICIoT2023 Recon-PingSweep",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "attack_type": "ICMP Ping Sweep Reconnaissance",
+      "target_rules": [
+        "ICMP_SWEEP"
+      ],
+      "pcap_file": "Recon-PingSweep.pcap",
+      "size_bytes": 7853566,
+      "sha256": "1aaf410fcc6dbfefa48b680b401344f0fa7b6e04c2acc9af427b5b7728b0ee89",
+      "packet_count": 22943,
+      "elapsed_seconds": 8.64,
+      "throughput_pps": 2655.5,
+      "alert_count": 9,
+      "rule_counts": {
+        "PAYLOAD_HIT": 1,
+        "DNS_ANOMALY": 6,
+        "ICMP_SWEEP": 1,
+        "DATA_EXFIL": 1
+      },
+      "severity_counts": {
+        "medium": 8,
+        "high": 1
+      }
+    },
+    {
+      "id": "ciciot_sqli",
+      "name": "CICIoT2023 SqlInjection",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "attack_type": "SQL Injection Web Exploitation",
+      "target_rules": [
+        "PAYLOAD_HIT"
+      ],
+      "pcap_file": "SqlInjection.pcap",
+      "size_bytes": 9823016,
+      "sha256": "712750bd64f8250861bd8a76bd1c33a44a4fe8d3dc2f34e2043c208edc19bde7",
+      "packet_count": 53462,
+      "elapsed_seconds": 10.588,
+      "throughput_pps": 5049.3,
+      "alert_count": 69,
+      "rule_counts": {
+        "DNS_ANOMALY": 23,
+        "PAYLOAD_HIT": 46
+      },
+      "severity_counts": {
+        "medium": 57,
+        "high": 12
+      }
+    },
+    {
+      "id": "ciciot_xss",
+      "name": "CICIoT2023 XSS",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "attack_type": "Cross-Site Scripting (XSS)",
+      "target_rules": [
+        "PAYLOAD_HIT"
+      ],
+      "pcap_file": "XSS.pcap",
+      "size_bytes": 12571710,
+      "sha256": "62a9d0ca316f3e5eb9c910fc8c21dc169ef76033bafa22d17f85f53e64809bf0",
+      "packet_count": 40183,
+      "elapsed_seconds": 9.42,
+      "throughput_pps": 4265.8,
+      "alert_count": 20,
+      "rule_counts": {
+        "PAYLOAD_HIT": 19,
+        "DNS_ANOMALY": 1
+      },
+      "severity_counts": {
+        "medium": 19,
+        "high": 1
+      }
+    },
+    {
+      "id": "ciciot_cmdinj",
+      "name": "CICIoT2023 CommandInjection",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "attack_type": "OS Command Injection",
+      "target_rules": [
+        "PAYLOAD_HIT"
+      ],
+      "pcap_file": "CommandInjection.pcap",
+      "size_bytes": 28585606,
+      "sha256": "151c761536d530d8432589e35ed09f2162e51c78a28995fc2a7dbeae32082b13",
+      "packet_count": 55741,
+      "elapsed_seconds": 10.219,
+      "throughput_pps": 5454.5,
+      "alert_count": 2,
+      "rule_counts": {
+        "PAYLOAD_HIT": 1,
+        "NON_DNS_TRAFFIC_ON_DNS_PORT": 1
+      },
+      "severity_counts": {
+        "medium": 1,
+        "high": 1
+      }
+    },
+    {
+      "id": "ciciot_upload",
+      "name": "CICIoT2023 Uploading_Attack",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "attack_type": "Malicious File Upload / Web Shell",
+      "target_rules": [
+        "PAYLOAD_HIT"
+      ],
+      "pcap_file": "Uploading_Attack.pcap",
+      "size_bytes": 3326177,
+      "sha256": "13eb2c9478cb3d54921766436808cc89623f25179565241ece3c20a95ca71ee8",
+      "packet_count": 12939,
+      "elapsed_seconds": 5.471,
+      "throughput_pps": 2365.2,
+      "alert_count": 8,
+      "rule_counts": {
+        "PAYLOAD_HIT": 8
+      },
+      "severity_counts": {
+        "high": 3,
+        "medium": 5
+      }
+    },
+    {
+      "id": "ciciot_browserhijack",
+      "name": "CICIoT2023 BrowserHijacking",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "attack_type": "Browser Hijacking / Web Exploit",
+      "target_rules": [
+        "PAYLOAD_HIT"
+      ],
+      "pcap_file": "BrowserHijacking.pcap",
+      "size_bytes": 35038616,
+      "sha256": "aeac45ba4fdb14575af2e8193d3ef99783e15760eea76696a9155655f5c99138",
+      "packet_count": 59821,
+      "elapsed_seconds": 10.572,
+      "throughput_pps": 5658.3,
+      "alert_count": 3,
+      "rule_counts": {
+        "DNS_ANOMALY": 1,
+        "DATA_EXFIL": 1,
+        "UDP_FLOOD": 1
+      },
+      "severity_counts": {
+        "medium": 3
+      }
+    },
+    {
+      "id": "ciciot_bruteforce",
+      "name": "CICIoT2023 DictionaryBruteForce",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "attack_type": "Credential Dictionary Brute Force",
+      "target_rules": [
+        "BRUTE_FORCE"
+      ],
+      "pcap_file": "DictionaryBruteForce.pcap",
+      "size_bytes": 39130622,
+      "sha256": "09ad3cfabd139b950da3078fec0f0fd196fe36cd82237d898035437f4c69161b",
+      "packet_count": 133138,
+      "elapsed_seconds": 20.619,
+      "throughput_pps": 6457.1,
+      "alert_count": 147,
+      "rule_counts": {
+        "ARP_SPOOF": 117,
+        "BRUTE_FORCE": 21,
+        "DATA_EXFIL": 5,
+        "PAYLOAD_HIT": 2,
+        "DNS_ANOMALY": 1,
+        "SYN_FLOOD": 1
+      },
+      "severity_counts": {
+        "medium": 146,
+        "high": 1
+      }
+    },
+    {
+      "id": "benign_iot23_doorlock",
+      "name": "IoT-23 Honeypot Somfy Doorlock",
+      "family": "CTU-IoT-23",
+      "category": "benign",
+      "attack_type": "Benign IoT Hardware Operations",
+      "target_rules": [
+        "FP_BENIGN_VERIFICATION"
+      ],
+      "pcap_file": "iot23_honeypot_4_1.pcap",
+      "size_bytes": 4594492,
+      "sha256": "3fb775c0391b6ad313a3f7845e634a277b07c3f6377346c2486ba63e1c22e90c",
+      "packet_count": 21664,
+      "elapsed_seconds": 5.691,
+      "throughput_pps": 3807.0,
+      "alert_count": 0,
+      "rule_counts": {},
+      "severity_counts": {}
+    },
+    {
+      "id": "benign_oisf_modbus",
+      "name": "OISF Modbus/TCP Industrial Control",
+      "family": "OISF-QA",
+      "category": "benign",
+      "attack_type": "Benign SCADA Modbus Polling",
+      "target_rules": [
+        "FP_BENIGN_VERIFICATION"
+      ],
+      "pcap_file": "oisf_modbus.pcap",
+      "size_bytes": 8701,
+      "sha256": "809e2bbded145ccf3491bbb7a1f7b04b3b296bcc6e98e0fbc08f20dfa85e0a7f",
+      "packet_count": 99,
+      "elapsed_seconds": 3.621,
+      "throughput_pps": 27.3,
+      "alert_count": 0,
+      "rule_counts": {},
+      "severity_counts": {}
+    },
+    {
+      "id": "benign_ws_http",
+      "name": "Wireshark HTTP Web Browsing",
+      "family": "Wireshark-Sample",
+      "category": "benign",
+      "attack_type": "Benign Web Browsing",
+      "target_rules": [
+        "FP_BENIGN_VERIFICATION"
+      ],
+      "pcap_file": "ws_http_browsing.pcap",
+      "size_bytes": 25803,
+      "sha256": "25a72bdf10339f2c29916920c8b9501d294923108de8f29b19aba7cc001ab60d",
+      "packet_count": 43,
+      "elapsed_seconds": 3.648,
+      "throughput_pps": 11.8,
+      "alert_count": 0,
+      "rule_counts": {},
+      "severity_counts": {}
+    },
+    {
+      "id": "benign_ws_skype_irc",
+      "name": "Wireshark Skype and IRC Traffic",
+      "family": "Wireshark-Sample",
+      "category": "benign",
+      "attack_type": "Benign Chat & Voice Telemetry",
+      "target_rules": [
+        "FP_BENIGN_VERIFICATION"
+      ],
+      "pcap_file": "ws_skype_irc.pcap",
+      "size_bytes": 420869,
+      "sha256": "bac79a9c3413637f871193589d848697af895b7f2700d949022224d59aa6830f",
+      "packet_count": 2263,
+      "elapsed_seconds": 4.609,
+      "throughput_pps": 491.0,
+      "alert_count": 0,
+      "rule_counts": {},
+      "severity_counts": {}
+    },
+    {
+      "id": "attack_ws_nmap_stealth",
+      "name": "Wireshark Nmap Stealth Scan",
+      "family": "Wireshark-Sample",
+      "category": "attack",
+      "attack_type": "TCP SYN Stealth Scan",
+      "target_rules": [
+        "TCP_STEALTH_SCAN",
+        "TCP_FLAG_ANOMALY"
+      ],
+      "pcap_file": "ws_nmap_stealth_scan.pcap",
+      "size_bytes": 157862,
+      "sha256": "2eaca3a56fbdc1c95338ae85f00567fae41daa7d791293133094f544fe869459",
+      "packet_count": 2052,
+      "elapsed_seconds": 3.894,
+      "throughput_pps": 527.0,
+      "alert_count": 3,
+      "rule_counts": {
+        "PORT_SCAN": 1,
+        "SLOW_PORT_SCAN": 1,
+        "TCP_FLAG_ANOMALY": 1
+      },
+      "severity_counts": {
+        "medium": 2,
+        "high": 1
+      }
+    },
+    {
+      "id": "attack_ws_teardrop",
+      "name": "Wireshark Teardrop IP Exploit",
+      "family": "Wireshark-Sample",
+      "category": "attack",
+      "attack_type": "Overlapping IP Fragment Crash Attack",
+      "target_rules": [
+        "IP_FRAGMENT_ANOMALY"
+      ],
+      "pcap_file": "ws_teardrop.pcap",
+      "size_bytes": 1828,
+      "sha256": "e8e4193ae426dabf549cc103c9e93e7d93c6ae049ee9259f1ce2ebdb7315a683",
+      "packet_count": 17,
+      "elapsed_seconds": 3.78,
+      "throughput_pps": 4.5,
+      "alert_count": 1,
+      "rule_counts": {
+        "IP_FRAGMENT_ANOMALY": 1
+      },
+      "severity_counts": {
+        "critical": 1
+      }
+    },
+    {
+      "id": "attack_ws_dns_remoteshell",
+      "name": "Wireshark DNS Remote Shell",
+      "family": "Wireshark-Sample",
+      "category": "attack",
+      "attack_type": "Non-DNS Backdoor on DNS Port 53",
+      "target_rules": [
+        "NON_DNS_TRAFFIC_ON_DNS_PORT"
+      ],
+      "pcap_file": "ws_dns_remoteshell.pcap",
+      "size_bytes": 25005,
+      "sha256": "8c89c0d2d5b91695a03d05a451897f583a99d2379afac0822af0d8f390163d95",
+      "packet_count": 131,
+      "elapsed_seconds": 3.948,
+      "throughput_pps": 33.2,
+      "alert_count": 3,
+      "rule_counts": {
+        "NON_DNS_TRAFFIC_ON_DNS_PORT": 1,
+        "DNS_ANOMALY": 2
+      },
+      "severity_counts": {
+        "high": 3
+      }
+    },
+    {
+      "id": "attack_oisf_sni_anomaly",
+      "name": "OISF TLS SNI Enforcement",
+      "family": "OISF-QA",
+      "category": "attack",
+      "attack_type": "TLS SNI Mismatch / Malformed Handshake",
+      "target_rules": [
+        "TLS_ANOMALY"
+      ],
+      "pcap_file": "oisf_tls_sni_anomaly.pcap",
+      "size_bytes": 4020,
+      "sha256": "da73184c5cacd3a509f8aaaa8628da19f172f478fae35cbfef45025339d78963",
+      "packet_count": 25,
+      "elapsed_seconds": 4.04,
+      "throughput_pps": 6.2,
+      "alert_count": 0,
+      "rule_counts": {},
+      "severity_counts": {}
+    },
+    {
+      "id": "attack_oisf_syn_flood",
+      "name": "OISF TCP SYN Flood Burst",
+      "family": "OISF-QA",
+      "category": "attack",
+      "attack_type": "High-Rate TCP SYN Flood DoS",
+      "target_rules": [
+        "SYN_FLOOD"
+      ],
+      "pcap_file": "oisf_syn_flood.pcap",
+      "size_bytes": 14024,
+      "sha256": "c8e0349e99229bd3b9a3a4dfb2122f0a9a5b6c9d234325fb6beb404197413441",
+      "packet_count": 200,
+      "elapsed_seconds": 3.705,
+      "throughput_pps": 54.0,
+      "alert_count": 1,
+      "rule_counts": {
+        "SYN_FLOOD": 1
+      },
+      "severity_counts": {
+        "high": 1
+      }
+    },
+    {
+      "id": "attack_ws_arp_storm",
+      "name": "Wireshark ARP Storm / Spoofing",
+      "family": "Wireshark-Sample",
+      "category": "attack",
+      "attack_type": "ARP Spoofing / Poisoning Storm",
+      "target_rules": [
+        "ARP_SPOOF"
+      ],
+      "pcap_file": "ws_arp_storm.pcap",
+      "size_bytes": 47296,
+      "sha256": "dc101ea9bfda59f56b54bfb949195c3f169032c045b47f98e6952a86933c1b8d",
+      "packet_count": 622,
+      "elapsed_seconds": 3.691,
+      "throughput_pps": 168.5,
+      "alert_count": 0,
+      "rule_counts": {},
+      "severity_counts": {}
+    },
+    {
+      "id": "attack_iot23_hakai",
+      "name": "IoT-23 Hakai Botnet Capture",
+      "family": "CTU-IoT-23",
+      "category": "attack",
+      "attack_type": "Hakai Botnet Scanning & Telnet Brute Force",
+      "target_rules": [
+        "PORT_SCAN",
+        "SLOW_PORT_SCAN",
+        "BRUTE_FORCE"
+      ],
+      "pcap_file": "iot23_malware_8_1.pcap",
+      "size_bytes": 2098362,
+      "sha256": "80dcc2602519479ddcde889fa902fee19a76696630811452f8df38888af894f2",
+      "packet_count": 23623,
+      "elapsed_seconds": 5.997,
+      "throughput_pps": 3939.0,
+      "alert_count": 0,
+      "rule_counts": {},
+      "severity_counts": {}
+    },
+    {
+      "id": "attack_foxit_log4shell",
+      "name": "Fox-IT Log4Shell JNDI RCE Exploit",
+      "family": "Fox-IT",
+      "category": "attack",
+      "attack_type": "Log4Shell CVE-2021-44228 JNDI Injection",
+      "target_rules": [
+        "PAYLOAD_HIT"
+      ],
+      "pcap_file": "foxit_log4shell.pcap",
+      "size_bytes": 56278,
+      "sha256": "f328c22f25fa74f59628a2cc5abfaa180d677cdccb5bc3d309c53526fa65d9c0",
+      "packet_count": 403,
+      "elapsed_seconds": 3.722,
+      "throughput_pps": 108.3,
+      "alert_count": 1,
+      "rule_counts": {
+        "PAYLOAD_HIT": 1
+      },
+      "severity_counts": {
+        "high": 1
+      }
+    }
+  ],
+  "rule_coverage_summary": {
+    "ARP_SPOOF": {
+      "total_alerts": 117,
+      "attack_alerts": 117,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "ciciot_bruteforce"
+      ]
+    },
+    "BRUTE_FORCE": {
+      "total_alerts": 21,
+      "attack_alerts": 21,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "ciciot_bruteforce"
+      ]
+    },
+    "DATA_EXFIL": {
+      "total_alerts": 7,
+      "attack_alerts": 7,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "ciciot_pingsweep",
+        "ciciot_browserhijack",
+        "ciciot_bruteforce"
+      ]
+    },
+    "DNS_ANOMALY": {
+      "total_alerts": 34,
+      "attack_alerts": 34,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "ciciot_pingsweep",
+        "ciciot_sqli",
+        "ciciot_xss",
+        "ciciot_browserhijack",
+        "ciciot_bruteforce",
+        "attack_ws_dns_remoteshell"
+      ]
+    },
+    "ICMP_SWEEP": {
+      "total_alerts": 1,
+      "attack_alerts": 1,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "ciciot_pingsweep"
+      ]
+    },
+    "IP_FRAGMENT_ANOMALY": {
+      "total_alerts": 1,
+      "attack_alerts": 1,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "attack_ws_teardrop"
+      ]
+    },
+    "NON_DNS_TRAFFIC_ON_DNS_PORT": {
+      "total_alerts": 2,
+      "attack_alerts": 2,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "ciciot_cmdinj",
+        "attack_ws_dns_remoteshell"
+      ]
+    },
+    "PAYLOAD_HIT": {
+      "total_alerts": 78,
+      "attack_alerts": 78,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "ciciot_pingsweep",
+        "ciciot_sqli",
+        "ciciot_xss",
+        "ciciot_cmdinj",
+        "ciciot_upload",
+        "ciciot_bruteforce",
+        "attack_foxit_log4shell"
+      ]
+    },
+    "PORT_SCAN": {
+      "total_alerts": 1,
+      "attack_alerts": 1,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "attack_ws_nmap_stealth"
+      ]
+    },
+    "SLOW_PORT_SCAN": {
+      "total_alerts": 1,
+      "attack_alerts": 1,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "attack_ws_nmap_stealth"
+      ]
+    },
+    "SYN_FLOOD": {
+      "total_alerts": 2,
+      "attack_alerts": 2,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "ciciot_bruteforce",
+        "attack_oisf_syn_flood"
+      ]
+    },
+    "TCP_FLAG_ANOMALY": {
+      "total_alerts": 1,
+      "attack_alerts": 1,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "attack_ws_nmap_stealth"
+      ]
+    },
+    "UDP_FLOOD": {
+      "total_alerts": 1,
+      "attack_alerts": 1,
+      "benign_alerts": 0,
+      "captures_fired": [
+        "ciciot_browserhijack"
+      ]
+    }
+  }
+}

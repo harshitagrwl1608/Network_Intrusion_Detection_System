@@ -135,8 +135,19 @@ CREATE TABLE IF NOT EXISTS feedback (
 # Connection factory
 # ---------------------------------------------------------------------------
 
-def get_connection():
-    """Return a DB connection based on configured backend."""
+def get_connection(db_path: str | None = None):
+    """Return a DB connection based on configured backend or an explicitly specified path.
+    
+    If db_path is provided, connects directly to that SQLite database without modifying
+    global config.SQLITE_PATH.
+    """
+    if db_path is not None:
+        d = os.path.dirname(db_path) or "."
+        os.makedirs(d, exist_ok=True)
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
     if config.DB_BACKEND == "postgres":
         try:
             import psycopg2

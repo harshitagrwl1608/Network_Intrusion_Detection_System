@@ -419,7 +419,7 @@ class TestDnsAndArpDetection(unittest.TestCase):
             "dns_query": qname, "timestamp": 100,
         })
         self.assertIsNotNone(alert)
-        self.assertEqual(alert["rule_version"], "1.23")
+        self.assertEqual(alert["rule_version"], "1.24")
         self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
         self.assertEqual(alert["evidence"]["longest_label"], "a" * 61)
         self.assertEqual(alert["evidence"]["longest_label_length"], 61)
@@ -641,6 +641,172 @@ class TestDnsAndArpDetection(unittest.TestCase):
         self.assertEqual(rule._parent_domain("dept.intranet.gc.ca"), "intranet.gc.ca")
         self.assertEqual(rule._parent_domain("api.service.com.pl"), "service.com.pl")
         self.assertEqual(rule._parent_domain("dns.node.com.gr"), "node.com.gr")
+
+
+    def test_shannon_entropy_edge_cases_and_punycode(self):
+        from engine.rules import _shannon_entropy
+        # Empty and non-string inputs produce 0.0
+        self.assertEqual(_shannon_entropy(""), 0.0)
+        self.assertEqual(_shannon_entropy(None), 0.0)
+        self.assertEqual(_shannon_entropy(123), 0.0)
+        # Single-character string produces 0.0
+        self.assertEqual(_shannon_entropy("a"), 0.0)
+        # Homogeneous repetitive string produces 0.0
+        self.assertEqual(_shannon_entropy("aaaaaaa"), 0.0)
+        # Punycode prefix is stripped before calculation
+        self.assertEqual(_shannon_entropy("xn--a"), 0.0)
+        # Valid non-zero entropy
+        ent = _shannon_entropy("abcdefgh")
+        self.assertAlmostEqual(ent, 3.0, places=2)
+
+    def test_dns_prune_stale_optional_now_and_unconditional_seen_pruning(self):
+        rule = DnsRule()
+        # Plant stale seen entries (cutoff is now - 120)
+        stale_key = ("192.168.1.1", "stale.com", "DNS_DGA")
+        fresh_key = ("192.168.1.1", "fresh.com", "DNS_DGA")
+        future_key = ("192.168.1.1", "future.com", "DNS_DGA")
+
+        rule._seen[stale_key] = 10.0
+        rule._seen[fresh_key] = 900.0
+        rule._seen[future_key] = 1500.0
+
+        # Prune with now=1000.0
+        rule.prune_stale(now=1000.0)
+        self.assertNotIn(stale_key, rule._seen)
+        self.assertNotIn(future_key, rule._seen)
+        self.assertIn(fresh_key, rule._seen)
+
+        # Prune without explicit now (defaults to time.time())
+        rule.prune_stale()
+
+    def test_reverse_dns_ptr_queries_do_not_trigger_false_exfil_or_freq(self):
+        """Standard IPv4/IPv6 reverse PTR queries must not alert as DNS_EXFIL or DNS_FREQ."""
+        rule = DnsRule()
+        alerts = []
+        # Send 25 distinct reverse DNS lookups in 60 seconds
+        for i in range(25):
+            rec = {
+                "type": "IP",
+                "src_ip": "192.168.1.50",
+                "dst_ip": "192.168.1.1",
+                "dst_port": 53,
+                "dns_query": f"{i}.1.168.192.in-addr.arpa",
+                "timestamp": 1000.0 + i,
+            }
+            alert = rule.check(rec)
+            if alert:
+                alerts.append(alert)
+
+        self.assertEqual(len(alerts), 0, f"Expected 0 alerts on reverse DNS lookups, got: {alerts}")
+
+        # In contrast, 25 distinct subdomains under an attacker domain MUST trigger DNS_EXFIL
+        exfil_alerts = []
+        for i in range(25):
+            rec = {
+                "type": "IP",
+                "src_ip": "192.168.1.50",
+                "dst_ip": "192.168.1.1",
+                "dst_port": 53,
+                "dns_query": f"chunk{i}.attacker-domain.com",
+                "timestamp": 1000.0 + i,
+            }
+            alert = rule.check(rec)
+            if alert:
+                exfil_alerts.append(alert)
+
+        self.assertGreaterEqual(len(exfil_alerts), 1, "Exfiltration to attacker-domain.com must alert")
+        self.assertIn("attacker-domain.com", exfil_alerts[0]["detail"])
+
+    def test_reverse_dns_ipv6_ip6_arpa_exemption_from_subdomain_exfil(self):
+        """IPv6 PTR lookups (*.ip6.arpa) must not trigger DNS_EXFIL or accumulate state in _subdomain_freq."""
+        rule = DnsRule(subdomain_threshold=20, subdomain_window=60)
+        alerts = []
+        for i in range(25):
+            rec = {
+                "type": "IP",
+                "protocol": "UDP",
+                "src_ip": "192.168.1.50",
+                "dst_ip": "8.8.8.8",
+                "src_port": 50000,
+                "dst_port": 53,
+                "dns_query": f"{i % 16:x}.{i // 16:x}.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa",
+                "timestamp": 1000.0 + i * 0.1,
+            }
+            alert = rule.check(rec)
+            if alert:
+                alerts.append(alert)
+
+        self.assertEqual(len(alerts), 0, f"Expected 0 alerts for ip6.arpa reverse DNS, got: {alerts}")
+        self.assertEqual(len(rule._subdomain_freq), 0, "Reverse DNS lookups must not accumulate state in _subdomain_freq")
+
+    def test_covert_tunneling_under_in_addr_arpa_triggers_exfil(self):
+        """Covert exfiltration tunneling alphanumeric data under in-addr.arpa must alert as DNS_EXFIL."""
+        rule = DnsRule(subdomain_threshold=20, subdomain_window=60)
+        alerts = []
+        for i in range(25):
+            rec = {
+                "type": "IP",
+                "protocol": "UDP",
+                "src_ip": "192.168.1.50",
+                "dst_ip": "8.8.8.8",
+                "src_port": 50000,
+                "dst_port": 53,
+                "dns_query": f"covertchunk{i:02d}.tunnel.in-addr.arpa",
+                "timestamp": 1000.0 + i * 0.1,
+            }
+            alert = rule.check(rec)
+            if alert:
+                alerts.append(alert)
+
+        self.assertGreaterEqual(len(alerts), 1, "Exfiltration masquerading under in-addr.arpa must alert")
+        self.assertEqual(alerts[0]["evidence"]["sub_type"], "DNS_EXFIL")
+
+
+    def test_dns_query_bytes_and_malformed_type_handling(self):
+        """DnsRule must safely handle bytes dns_query and discard non-string types without crashing."""
+        rule = DnsRule()
+        # Bytes query should decode properly and detect long label tunnel
+        rec_bytes = {
+            "type": "IP", "protocol": "UDP",
+            "src_port": 53000, "dst_port": 53,
+            "src_ip": "192.168.1.50", "dst_ip": "8.8.8.8",
+            "dns_query": b"a" * 63 + b".tunnel.example.com",
+            "timestamp": 1000.0,
+        }
+        alert = rule.check(rec_bytes)
+        self.assertIsNotNone(alert, "Bytes dns_query should be decoded and inspected")
+        self.assertEqual(alert["evidence"]["sub_type"], "DNS_TUNNEL")
+
+        # Malformed types should safely return None without raising exceptions
+        for malformed in (12345, 99.9, None, ["evil.com"], {"query": "evil.com"}, object()):
+            rec_bad = {
+                "type": "IP", "protocol": "UDP",
+                "src_port": 53000, "dst_port": 53,
+                "src_ip": "192.168.1.50", "dst_ip": "8.8.8.8",
+                "dns_query": malformed,
+                "timestamp": 1000.0,
+            }
+            try:
+                res = rule.check(rec_bad)
+                self.assertIsNone(res)
+            except Exception as exc:
+                self.fail(f"DnsRule.check crashed on non-string dns_query {malformed}: {exc}")
+
+    def test_reverse_mapping_syntax_and_unicode_digit_rejection(self):
+        """Reverse DNS validation must reject non-ASCII unicode digits and oversized octets."""
+        rule = DnsRule(subdomain_threshold=20, subdomain_window=60)
+        # Unicode Arabic-Indic digits are not RFC 1035 ASCII octets
+        self.assertFalse(rule._is_valid_reverse_mapping("١.٢.٣.٤.in-addr.arpa"))
+        # Octet longer than 3 characters is invalid
+        self.assertFalse(rule._is_valid_reverse_mapping("1234.2.3.4.in-addr.arpa"))
+        # 5000-digit string must safely return False without Integer conversion limits
+        self.assertFalse(rule._is_valid_reverse_mapping("9" * 5000 + ".in-addr.arpa"))
+        # Valid IPv4 reverse PTR
+        self.assertTrue(rule._is_valid_reverse_mapping("4.3.2.1.in-addr.arpa"))
+        # Valid IPv6 reverse PTR
+        self.assertTrue(rule._is_valid_reverse_mapping("1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa"))
+        # IPv6 with > 32 nibbles is invalid
+        self.assertFalse(rule._is_valid_reverse_mapping("1." * 35 + "ip6.arpa"))
 
 
 if __name__ == "__main__":

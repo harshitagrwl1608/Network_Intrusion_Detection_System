@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "netguard-pcap": {
+      "command": "python3",
+      "args": [
+        "scripts/pcap_mcp_server.py"
+      ]
+    },
+    "netguard-eval-db": {
+      "command": "python3",
+      "args": [
+        "scripts/eval_db_mcp_server.py"
+      ]
+    }
+  }
+}

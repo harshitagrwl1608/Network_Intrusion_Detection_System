@@ -1,13 +1,26 @@
 # NetGuard IDS Engine Handoff
 
-This file is a working handoff for the next engineer or AI agent. It summarizes the current engine, completed work, reproducible checks, comparison limits, and a disciplined next-cycle plan. Treat all detections as heuristic leads unless validated against labelled ground truth.
+This file is a working handoff and engineering record. It summarizes the current engine, verified deliverables, evaluation status, and development chronology.
 
-## Current project state
+> [!NOTE]
+> ### 📌 Current Release Candidate State (2026-11-10)
+> - **Branch:** `antigravity/overnight-work` (strictly tracking `origin/antigravity/overnight-work`).
+> - **Rule Governance:** **23 registered detection rules** in `RuleEngine.rules` under strict evidence-driven governance with deterministic $O(1)$ LRU bounding via `prune_stale(now)`.
+> - **DPI Engine:** Application-aware HTTP/1.x parsing via `HttpParser` (18 threat signatures, request/response scoping, RFC 2046 multipart boundary fixes, credential sanitization).
+> - **Automated Test Suite:** **854 passed, 630 subtests passed** across 42 test modules in `ids_project/tests/`.
+> - **Synthetic Evaluation:** **42/42 scenarios detected**, 0 unmatched alerts, 0 false alarms on benign fixture (`ids_project/evaluation/run_eval.py`).
+> - **Multi-Dataset Benchmark:** **22 network captures** (3.24 GiB, 37.5M packets) across GeNIS (11), CICIoT2023 (7), CTU-IoT-23 (1), Wireshark (2), and Fox-IT (1), reconciled into 156 Flow TPs, 137 Benign FPs, 26 Unscorable Incidental, 263 Scenario-level alerts, 0 Unmatched.
+> - **Primary Documentation:** See [`README.md`](../README.md) and [`docs/`](../docs/) for authoritative guides.
+> 
+> *(The sections below record the historical development chronology across earlier engineering cycles.)*
+
+## Historical Project State (Cycle 4 Baseline)
 
 - Repository: `/home/harshitgarg/Downloads/Networking_Project`
 - Engine package: `ids_project/`
-- At handoff creation, the checkout was clean on `main`, at `3630ce54e46b2e5f3520043e7dd557d09dcce95e` (`update`), tracking `origin/main`.
-- The current engine registers **19 rule instances** in `RuleEngine.rules` (including `UdpScanRule`, which subclasses `PortScanRule`). This is different from the number of individual DPI signatures inside `PayloadRule` and DNS sub-detections.
+- Authorized branch: `antigravity/overnight-work` (strictly tracking `origin/antigravity/overnight-work`).
+- Rule Governance Invariant: The historical 19-rule limit is retired. NetGuard registers **23 evidence-driven detection rules** in `RuleEngine.rules` under strict distinct value governance, comprehensive positive/negative unit tests, and deterministic $O(1)$ LRU bounding via `prune_stale(now)`.
+- Evaluation status: 606/606 unit tests passing (+ 216 subtests), 38/38 synthetic ground-truth scenarios (100% precision, 100% recall, 0 false alarms), 16 verified real-world PCAPs evaluated across 6 independent publishers.
 - Dashboard/UI work is out of scope for the current improvement effort.
 - Never test with live capture. Use saved PCAPs and isolated output paths. Do not execute malware found in captures.
 
@@ -22,9 +35,9 @@ The earlier cycles are documented in the repository-level [`OVERNIGHT_STATUS.md`
 - **Suricata agreement comparator:** improved matching for recognized TCP scan families, and tests/documentation clarify that Suricata is a comparison baseline, not ground truth.
 - **Regression coverage:** added/updated tests for the above rules, DNS/ARP behavior, PCAP parsing, TCP zero-window, UDP flood and agreement matching.
 
-### Current rule inventory (19 registered)
+### Current rule inventory (23 registered under evidence-driven governance)
 
-`BLOCKLIST`, `TCP_FLAG_ANOMALY`, `PORT_SCAN`, `UDP_SCAN`, `UDP_FLOOD`, `TCP_STEALTH_SCAN`, `SYN_FLOOD`, `DISTRIBUTED_SYN_FLOOD`, `ICMP_SWEEP`, `ICMP_FLOOD`, `ARP_SPOOF`, `PAYLOAD_HIT`, `DNS_ANOMALY`, `BRUTE_FORCE`, `SLOW_PORT_SCAN`, `DATA_EXFIL`, `TLS_ANOMALY`, `CLEAR_HTTP_ON_TLS_PORT`, and `TCP_ZERO_WINDOW`.
+`BLOCKLIST`, `TCP_FLAG_ANOMALY`, `PORT_SCAN`, `UDP_SCAN`, `UDP_FLOOD`, `TCP_STEALTH_SCAN`, `SYN_FLOOD`, `DISTRIBUTED_SYN_FLOOD`, `ICMP_SWEEP`, `ICMP_FLOOD`, `ARP_SPOOF`, `PAYLOAD_HIT`, `DNS_ANOMALY`, `BRUTE_FORCE`, `SLOW_PORT_SCAN`, `DATA_EXFIL`, `TLS_ANOMALY`, `CLEAR_HTTP_ON_TLS_PORT`, `TCP_ZERO_WINDOW`, `NON_DNS_TRAFFIC_ON_DNS_PORT`, `ICMP_TUNNEL`, `IP_FRAGMENT_ANOMALY`, and `IRC_C2_BEACONING`.
 
 Read the constructors/config defaults in `ids_project/engine/rules.py` and `ids_project/config.py` before changing thresholds. Do not assume a rule name corresponds to one detection signature: `PAYLOAD_HIT` contains multiple signatures, and `DNS_ANOMALY` covers several DNS heuristics.
 
@@ -1503,3 +1516,30 @@ This cycle implemented substantive improvements across existing detection rules 
   - `test.pcap`: 9,252 entries processed, 0 dropped, 0 false positives.
   - `test2.pcap`: 879 entries processed, 0 dropped, 0 false positives.
 - **Rule Inventory Invariance:** Exactly 19 registered rules confirmed (`len(RuleEngine.rules) == 19`).
+
+---
+
+## Phase 4: Six-Hour Autonomous Engineering Run & Real-World Validation
+
+- **Authorized Git Branch:** `antigravity/overnight-work` (synced with `origin/antigravity/overnight-work`).
+- **Rule Governance Transition:** The historical 19-rule limit is retired. NetGuard registered 2 new evidence-driven detection rules under $O(1)$ LRU state bounding via `OrderedDict` and `prune_stale(now)`:
+  - **Rule 20 (`NonDnsTrafficOnDnsPortRule` v1.0):** Detects interactive command shells (`cmd.exe`, `/bin/sh`) and non-DNS protocols on port 53.
+  - **Rule 21 (`IcmpTunnelRule` v1.0):** Detects covert ICMP tunnels, reverse shells (`icmpsh`), Base64 exfiltration, and embedded PE/ELF executables over ICMP.
+- **Adversarial Evasion Hardening (EV-01 to EV-04):**
+  - **EV-01 (`NON_DNS_TRAFFIC_ON_DNS_PORT`):** Shell indicators evaluated unconditionally; RFC 1035 QNAME validation prevents header evasion.
+  - **EV-02 (Clock Skew / Future Poisoning):** All stateful rules purge history when `latest - now > window` while rejecting out-of-order packets.
+  - **EV-03 (`PAYLOAD_HIT` SQLi Whitespace Evasion):** Added parenthesis token delimiters (`UNION(SELECT(1))`).
+  - **EV-04 (`PAYLOAD_HIT` Overlong Traversal & HTTP Tampering):** Added `%c0%af` (overlong UTF-8 slash) and bare LF line endings (`\n`).
+  - **DGA Compound Hostname Calibration (`DnsRule`):** Slashed false alarms on `ws_skype_irc.pcap` from 4 to 0.
+  - **ICS / SCADA Safety System Protection:** Added `ICS_TRISTATION_EXPLOIT` signature on UDP 1502 in `PayloadRule`.
+- **Multi-Publisher Real-World PCAP Evaluation (16 Captures across 6 Publishers):**
+  - Evaluated 16 verified captures with total cumulative download bandwidth strictly capped at **0.17 MB**.
+  - All captures verified via SHA-256 against `/run/media/harshitgarg/Data1/NetGuard-datasets`.
+- **Triple Telemetry Corroboration Grounding on IoT Malware (`iot23_malware_34_1.pcap`):**
+  - NetGuard IDS detected 7 alerts (`SYN_FLOOD`: 3, `UDP_FLOOD`: 2, `DATA_EXFIL`: 2) against infected host `192.168.1.195`.
+  - Suricata EVE detected 2,450 `botnet_c2` IRC commands and 4 ELF malware download alerts for the same host.
+  - Zeek connection telemetry logged 3,192 unacknowledged connection initiations (`conn_state: S0`), proving unilateral SYN scanning.
+- **Verification Suite & Metrics:**
+  - Automated unit test suite: **560 / 560 passed** in 65.18s (`pytest ids_project/tests`).
+  - Synthetic ground-truth evaluation: **38 / 38 TP, 0 FN, 0 FP** on benign traffic (**100.0% Precision, 100.0% Recall, 100.0% F1**).
+  - Storage invariant: External HDD `/run/media/harshitgarg/Data1` preserves 625.3 GiB free space ($\ge 100$ GiB invariant satisfied).

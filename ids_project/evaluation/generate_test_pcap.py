@@ -796,6 +796,90 @@ def gen_cleartext_http_on_tls_port(base: float) -> list:
 
 
 
+
+def gen_non_dns_traffic_on_dns_port(base: float) -> list:
+    """S39: Interactive command shell session over TCP 53 -> NON_DNS_TRAFFIC_ON_DNS_PORT."""
+    scenario(
+        "S39", "NON_DNS_TRAFFIC_ON_DNS_PORT",
+        "Interactive command shell prompt transmitted over TCP DNS port 53",
+        src_ip="192.168.1.106", dst_ip="203.0.113.106",
+        dst_port="53", protocol="TCP",
+    )
+    shell_payload = b"/bin/sh -i\nroot@target:~# whoami\nroot\n"
+    syn = (_make_eth() /
+           IP(src="192.168.1.106", dst="203.0.113.106") /
+           TCP(sport=54380, dport=53, flags="S", seq=100))
+    ack = (_make_eth() /
+           IP(src="192.168.1.106", dst="203.0.113.106") /
+           TCP(sport=54380, dport=53, flags="A", seq=101))
+    data = (_make_eth() /
+            IP(src="192.168.1.106", dst="203.0.113.106") /
+            TCP(sport=54380, dport=53, flags="PA", seq=101) /
+            Raw(load=shell_payload))
+    syn.time = base + 330.0
+    ack.time = base + 330.01
+    data.time = base + 330.02
+    return [syn, ack, data]
+
+
+def gen_icmp_tunnel(base: float) -> list:
+    """S40: Covert ICMP tunnel with interactive shell -> ICMP_TUNNEL."""
+    scenario(
+        "S40", "ICMP_TUNNEL",
+        "Covert ICMP tunnel transporting interactive shell payload",
+        src_ip="192.168.1.107", dst_ip="203.0.113.107",
+        protocol="ICMP",
+    )
+    payload = b"cmd.exe /c whoami & dir C:\\WINDOWS"
+    pkt = (_make_eth() /
+           IP(src="192.168.1.107", dst="203.0.113.107") /
+           ICMP(type=8, code=0) /
+           Raw(load=payload))
+    pkt.time = base + 340.0
+    return [pkt]
+
+
+def gen_ip_fragment_anomaly(base: float) -> list:
+    """S41: Teardrop overlapping fragment attack -> IP_FRAGMENT_ANOMALY."""
+    scenario(
+        "S41", "IP_FRAGMENT_ANOMALY",
+        "Teardrop overlapping fragment reassembly attack",
+        src_ip="192.168.1.108", dst_ip="192.168.1.1",
+        dst_port="", protocol="UDP",
+    )
+    # Fragment 1: offset 0, len 36, MF=1 (covers bytes 0..36)
+    frag1 = (_make_eth() /
+             IP(src="192.168.1.108", dst="192.168.1.1", id=4444, proto=17, flags=1, frag=0) /
+             UDP(sport=53000, dport=53, len=60) /
+             Raw(load=b"A" * 28))
+    # Fragment 2: offset 3 (in 8-byte units = 24 bytes), len 24, MF=0 (covers 24..48, overlaps 24..36 by 12 bytes)
+    frag2 = (_make_eth() /
+             IP(src="192.168.1.108", dst="192.168.1.1", id=4444, proto=17, flags=0, frag=3) /
+             Raw(load=b"B" * 24))
+    frag1.time = base + 350.0
+    frag2.time = base + 350.02
+    return [frag1, frag2]
+
+
+def gen_irc_c2_beaconing(base: float) -> list:
+    """S42: Repeated TCP SYN attempts to IRC port 6667 -> IRC_C2_BEACONING."""
+    scenario(
+        "S42", "IRC_C2_BEACONING",
+        "Automated IRC botnet C2 connection beaconing to port 6667",
+        src_ip="192.168.1.109", dst_ip="185.244.25.235",
+        dst_port="6667", protocol="TCP",
+    )
+    pkts = []
+    # 6 initial SYN packets (threshold is 5) with distinct source ports and sequential timestamps
+    for i in range(6):
+        pkt = (_make_eth() /
+               IP(src="192.168.1.109", dst="185.244.25.235") /
+               TCP(sport=54400 + i, dport=6667, flags="S", seq=1000 * (i + 1)))
+        pkt.time = base + 360.0 + i * 1.0
+        pkts.append(pkt)
+    return pkts
+
+
 # ---------------------------------------------------------------------------
 # Benign negative packet generators  (should NOT fire any rule)
 # ---------------------------------------------------------------------------
@@ -1163,6 +1247,51 @@ def gen_benign_two_flow_zero_window_backpressure(base: float) -> list:
     return pkts
 
 
+def gen_benign_dns_over_tcp(base: float) -> list:
+    """B26: Legitimate DNS query over TCP 53 -> valid RFC 1035 message, no alert."""
+    raw_dns = bytes(DNS(rd=1, qd=DNSQR(qname="legit.example.org", qtype="A")))
+    tcp_payload = len(raw_dns).to_bytes(2, "big") + raw_dns
+    pkt = (_make_eth() /
+           IP(src="192.168.1.10", dst="8.8.8.8") /
+           TCP(sport=54395, dport=53, flags="PA", seq=1000) /
+           Raw(load=tcp_payload))
+    pkt.time = base + 370.0
+    return [pkt]
+
+
+def gen_benign_diagnostic_ping(base: float) -> list:
+    """B27: Standard diagnostic ping with sequential byte pattern -> diagnostic ping, no alert."""
+    data = bytes(i % 256 for i in range(56))
+    pkt = (_make_eth() /
+           IP(src="192.168.1.10", dst="192.168.1.1") /
+           ICMP(type=8, code=0) /
+           Raw(load=data))
+    pkt.time = base + 375.0
+    return [pkt]
+
+
+def gen_benign_normal_fragments(base: float) -> list:
+    """B28: Non-overlapping in-order IP fragments -> normal fragmentation, no alert."""
+    frag1 = (_make_eth() /
+             IP(src="192.168.1.10", dst="192.168.1.20", id=8888, proto=17, flags=1, frag=0) /
+             Raw(load=b"X" * 80))
+    frag2 = (_make_eth() /
+             IP(src="192.168.1.10", dst="192.168.1.20", id=8888, proto=17, flags=0, frag=10) /
+             Raw(load=b"Y" * 80))
+    frag1.time = base + 380.0
+    frag2.time = base + 380.02
+    return [frag1, frag2]
+
+
+def gen_benign_irc_traffic(base: float) -> list:
+    """B29: Single IRC connection attempt (below threshold) -> no alert."""
+    pkt = (_make_eth() /
+           IP(src="192.168.1.10", dst="185.244.25.235") /
+           TCP(sport=54450, dport=6667, flags="S", seq=5000))
+    pkt.time = base + 385.0
+    return [pkt]
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1213,6 +1342,10 @@ def generate_all():
     attack_pkts += gen_webdav_method_tampering(base)
     attack_pkts += gen_tcp_zero_window(base)
     attack_pkts += gen_cleartext_http_on_tls_port(base)
+    attack_pkts += gen_non_dns_traffic_on_dns_port(base)
+    attack_pkts += gen_icmp_tunnel(base)
+    attack_pkts += gen_ip_fragment_anomaly(base)
+    attack_pkts += gen_irc_c2_beaconing(base)
 
     os.makedirs("data", exist_ok=True)
     wrpcap(OUTPUT_ATTACK, attack_pkts)
@@ -1246,6 +1379,10 @@ def generate_all():
     benign_pkts += gen_benign_rest_verbs(base)
     benign_pkts += gen_benign_tcp_normal_window(base)
     benign_pkts += gen_benign_two_flow_zero_window_backpressure(base)
+    benign_pkts += gen_benign_dns_over_tcp(base)
+    benign_pkts += gen_benign_diagnostic_ping(base)
+    benign_pkts += gen_benign_normal_fragments(base)
+    benign_pkts += gen_benign_irc_traffic(base)
 
     wrpcap(OUTPUT_BENIGN, benign_pkts)
     print(f"  [✔] {len(benign_pkts)} benign packets → {OUTPUT_BENIGN}")

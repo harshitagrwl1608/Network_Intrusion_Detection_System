@@ -115,5 +115,27 @@ class TestBlocklistPathHandling(unittest.TestCase):
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o640)
 
 
+    def test_blocklist_cache_and_prune_stale(self):
+        import ipaddress
+        data = BlocklistData(
+            exact={"198.51.100.7"},
+            networks=[ipaddress.ip_network("203.0.113.0/24"), ipaddress.ip_network("2001:db8::/32")]
+        )
+        rule = BlocklistRule(data)
+        # First check populates cache
+        self.assertTrue(rule._in_blocklist("198.51.100.7"))
+        self.assertTrue(rule._in_blocklist("203.0.113.50"))
+        self.assertFalse(rule._in_blocklist("192.168.1.1"))
+        self.assertEqual(len(rule._cache), 3)
+
+        # Subsequent check hits cache
+        self.assertTrue(rule._in_blocklist("198.51.100.7"))
+        self.assertFalse(rule._in_blocklist("192.168.1.1"))
+
+        # prune_stale maintains cache bounds
+        rule.prune_stale()
+        self.assertLessEqual(len(rule._cache), rule.MAX_CACHE_ENTRIES // 2)
+
+
 if __name__ == "__main__":
     unittest.main()

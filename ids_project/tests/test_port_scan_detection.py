@@ -213,8 +213,8 @@ class TestPortScanDetection(unittest.TestCase):
 
     def test_malformed_timestamps_are_ignored_without_corrupting_scan_window(self):
         for rule_cls, protocol, version in (
-            (PortScanRule, "TCP", "1.12"),
-            (UdpScanRule, "UDP", "1.3"),
+            (PortScanRule, "TCP", "1.13"),
+            (UdpScanRule, "UDP", "1.4"),
         ):
             for invalid_time in ("bad-time", float("nan"), float("inf")):
                 with self.subTest(rule=rule_cls.__name__, timestamp=invalid_time):
@@ -570,6 +570,72 @@ class TestPortScanDetection(unittest.TestCase):
         })
         self.assertIsNone(alert)
         self.assertEqual(len(rule._history[("203.0.113.80", 443)][0]), 1)
+
+    def test_distributed_syn_flood_prune_stale_optional_now_and_source_lru(self):
+        rule = DistributedSynFloodRule(threshold=10, min_sources=2, window=10)
+        def packet(src, ts):
+            return {
+                "type": "IP", "src_ip": src, "dst_ip": "203.0.113.80",
+                "protocol": "TCP", "dst_port": 443, "initial_syn": True,
+                "timestamp": ts,
+            }
+        # Populate sources
+        rule.check(packet("198.51.100.1", 100))
+        rule.check(packet("198.51.100.2", 101))
+        # Refresh 198.51.100.1 recency
+        rule.check(packet("198.51.100.1", 102))
+        # Add third source; since min_sources=2, oldest source (198.51.100.2) should be evicted
+        rule.check(packet("198.51.100.3", 103))
+        _, sources = rule._history[("203.0.113.80", 443)]
+        self.assertIn("198.51.100.1", sources)
+        self.assertNotIn("198.51.100.2", sources)
+        self.assertIn("198.51.100.3", sources)
+
+        # prune_stale with default now=None
+        rule.prune_stale()
+        self.assertNotIn(("203.0.113.80", 443), rule._history)
+
+    def test_port_scan_prune_stale_clears_future_drifted_cooldown_and_orphaned_saturated(self):
+        rule = PortScanRule(threshold=3, window=10)
+        # Manually populate cooldown with future drift and stale past
+        vkey_stale = ("192.0.2.1", "198.51.100.1")
+        vkey_future = ("192.0.2.2", "198.51.100.2")
+        rule._vert_fired[vkey_stale] = 50.0   # older than cutoff (now=100, window=10 -> cutoff=90)
+        rule._vert_fired[vkey_future] = 200.0  # future drift relative to now=100
+        rule._vert_saturated.add(vkey_stale)
+        rule._vert_saturated.add(vkey_future)
+
+        rule.prune_stale(now=100.0)
+
+        # Both stale past and future drift should be pruned from _vert_fired
+        self.assertNotIn(vkey_stale, rule._vert_fired)
+        self.assertNotIn(vkey_future, rule._vert_fired)
+        # Saturated sets should not retain orphaned keys
+        self.assertNotIn(vkey_stale, rule._vert_saturated)
+        self.assertNotIn(vkey_future, rule._vert_saturated)
+
+    def test_clock_skew_future_poison_does_not_blind_port_scan(self):
+        """Verifies that an injected future-timestamp packet does not blind PortScanRule (EV-02)."""
+        rule = PortScanRule(threshold=5, window=10)
+        # Attacker injects a single packet with a distant future timestamp
+        pkt_future = {
+            "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.100", "dst_ip": "192.168.1.1",
+            "src_port": 50000, "dst_port": 80, "initial_syn": True, "timestamp": 200.0,
+        }
+        rule.check(pkt_future)
+
+        # Attacker then proceeds with real scan at current chronological time (105.0)
+        alerts = []
+        for port in range(81, 90):
+            pkt = {
+                "type": "IP", "protocol": "TCP", "src_ip": "192.168.1.100", "dst_ip": "192.168.1.1",
+                "src_port": 50000 + port, "dst_port": port, "initial_syn": True, "timestamp": 105.0,
+            }
+            res = rule.check(pkt)
+            if res:
+                alerts.append(res)
+        self.assertGreaterEqual(len(alerts), 1, "Future timestamp packet must not blind PortScanRule")
+        self.assertEqual(alerts[0]["rule_name"], "PORT_SCAN")
 
 
 if __name__ == "__main__":
