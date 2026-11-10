@@ -72,73 +72,113 @@ NetGuard operates under strict evidence-driven rule governance:
 
 ### Step 2: Implement the Rule Class
 In [`ids_project/engine/rules.py`](../ids_project/engine/rules.py):
-1. Define the rule class:
+1. Define the rule class following the production interface:
    ```python
    class NewAttackRule:
        name = "NEW_ATTACK_RULE"
-       version = "1.0"
+       rule_version = "1.0"
 
-       def __init__(self, threshold: int, window: int):
+       def __init__(self, threshold: int, window: int, cooldown: float = 60.0):
            self.threshold = threshold
            self.window = window
-           self._state = OrderedDict()  # LRU state cache
+           self.cooldown = cooldown
+           self._lock = threading.RLock()
+           # Bounded LRU state: (src_ip, dst_port) -> list of timestamps
+           self._history: OrderedDict[tuple, list[float]] = OrderedDict()
+           self._last_alert: OrderedDict[tuple, float] = OrderedDict()
            self._max_entries = 2048
 
        def prune_stale(self, now: float) -> None:
            cutoff = now - self.window
-           while self._state:
-               key, (first_seen, _) = next(iter(self._state.items()))
-               if first_seen < cutoff:
-                   self._state.popitem(last=False)
-               else:
-                   break
+           cooldown_cutoff = now - self.cooldown
+           with self._lock:
+               # Expire sliding-window entries
+               for key in list(self._history):
+                   self._history[key] = [t for t in self._history[key] if cutoff <= t <= now]
+                   if not self._history[key]:
+                       del self._history[key]
+               # Expire alert cooldowns
+               for key in list(self._last_alert):
+                   if self._last_alert[key] < cooldown_cutoff or self._last_alert[key] > now:
+                       del self._last_alert[key]
 
-       def check(self, record: dict) -> list[dict]:
-           # 1. Safe timestamp extraction
+       def check(self, record: dict) -> dict | None:
+           # 1. Packet type & protocol prerequisite
+           if record.get("type") != "IP" or record.get("protocol") != "TCP":
+               return None
+
+           # 2. Safe timestamp extraction (finite float check)
            now = _finite_record_timestamp(record)
            if now is None:
-               return []
+               return None
 
-           # 2. Protocol prerequisite check
-           if record.get("protocol") != "TCP":
-               return []
+           # 3. Source validation & trusted host exclusion
+           src = record.get("src_ip", "")
+           if not src or _is_trusted(src):
+               return None
 
-           # 3. Port & address normalization
+           # 4. Port normalization (1-65535 bounds)
            dst_port = _normalize_port(record.get("dst_port"))
-           if dst_port is None:
-               return []
+           if dst_port is None or not (1 <= dst_port <= 65535):
+               return None
+           dst = record.get("dst_ip", "")
+           src_port = _normalize_port(record.get("src_port"))
 
-           # 4. State maintenance & threshold evaluation
-           self.prune_stale(now)
-           # ... detection logic ...
+           key = (src, dst_port)
 
-           # 5. Return structured alert if threshold exceeded
-           return [{
-               "rule_name": self.name,
-               "rule_version": self.version,
-               "timestamp": now,
-               "src_ip": record.get("src_ip"),
-               "dst_ip": record.get("dst_ip"),
-               "src_port": record.get("src_port"),
-               "dst_port": dst_port,
-               "protocol": "TCP",
-               "detail": f"Observed suspicious activity on port {dst_port}",
-               "severity": "high",
-               "confidence": "high",
-               "evidence_json": {
-                   "observed_count": count,
-                   "threshold": self.threshold,
-                   "window_seconds": self.window,
-               },
-               "window_start": now - self.window,
-               "window_end": now,
-               "idempotency_key": hashlib.sha256(...).hexdigest(),
-           }]
+           with self._lock:
+               # Periodic state bounding and expiration
+               self.prune_stale(now)
+
+               # Cooldown suppression
+               if key in self._last_alert and (now - self._last_alert[key]) < self.cooldown:
+                   return None
+
+               # Append current observation and bound cache size
+               if key not in self._history:
+                   if len(self._history) >= self._max_entries:
+                       self._history.popitem(last=False)
+                   self._history[key] = []
+               self._history[key].append(now)
+
+               # Threshold evaluation
+               count = len(self._history[key])
+               if count < self.threshold:
+                   return None
+
+               # Alert triggered: set cooldown and return single alert dict
+               self._last_alert[key] = now
+
+               return {
+                   "rule_name": self.name,
+                   "rule_version": self.rule_version,
+                   "src_ip": src,
+                   "dst_ip": dst,
+                   "src_port": src_port,
+                   "dst_port": dst_port,
+                   "protocol": "TCP",
+                   "severity": "high",
+                   "confidence": "high",
+                   "detail": f"{src} triggered {self.name} on {dst}:{dst_port} ({count} events in {self.window}s)",
+                   "evidence": {
+                       "observed_count": count,
+                       "threshold": self.threshold,
+                       "window_seconds": self.window,
+                       "anomaly_key": f"{src}:{dst_port}",
+                   },
+                   "window_start": now - self.window,
+                   "window_end": now,
+               }
    ```
+
+> [!NOTE]
+> `RuleEngine.check()` handles the surrounding metadata automatically: it assigns `timestamp`,
+> serializes `evidence` to `evidence_json`, generates an `idempotency_key` for deduplication,
+> enqueues the alert to `_alert_queue`, and falls back to `_spool` on disk backpressure.
 
 ### Step 3: Register the Rule in `RuleEngine`
 In `RuleEngine.__init__()` in [`ids_project/engine/rules.py`](../ids_project/engine/rules.py):
-1. Instantiate the rule with configuration parameters:
+1. Instantiate the rule with configuration parameters in `self.rules`:
    ```python
    self.rules = [
        # ... existing rules ...
@@ -148,7 +188,16 @@ In `RuleEngine.__init__()` in [`ids_project/engine/rules.py`](../ids_project/eng
        ),
    ]
    ```
-2. Add the rule class to the protocol routing tables (`self._tcp_rules`, `self._udp_rules`, etc.) to optimize packet dispatch.
+2. Add the rule class to the appropriate protocol group in `self._rules_by_proto` so the sequential dispatcher can route candidate packets to it:
+   ```python
+   self._rules_by_proto = {
+       "TCP": [r for r in self.rules if isinstance(r, (
+           # ... existing TCP rules ...
+           NewAttackRule,
+       ))],
+       # ... other protocol candidate lists ...
+   }
+   ```
 
 ### Step 4: Write Unit Tests
 Create a dedicated test file in `ids_project/tests/` (e.g. `test_new_attack_rule.py`):
@@ -157,39 +206,50 @@ import pytest
 from engine.rules import NewAttackRule
 
 def test_new_attack_rule_positive_detection():
-    rule = NewAttackRule(threshold=5, window=10)
-    # Replay 6 triggering packets
-    for i in range(6):
-        record = {
-            "protocol": "TCP",
-            "src_ip": "192.168.1.50",
-            "dst_ip": "192.168.1.1",
-            "dst_port": 80,
-            "event_timestamp": 1000.0 + i,
-        }
-        alerts = rule.check(record)
-    assert len(alerts) == 1
-    assert alerts[0]["rule_name"] == "NEW_ATTACK_RULE"
+    rule = NewAttackRule(threshold=3, window=10, cooldown=60.0)
+    record = {
+        "type": "IP",
+        "protocol": "TCP",
+        "src_ip": "192.168.1.50",
+        "dst_ip": "192.168.1.1",
+        "src_port": 12345,
+        "dst_port": 80,
+    }
+    # First 2 packets: below threshold
+    for i in range(2):
+        record["event_timestamp"] = 1000.0 + i
+        assert rule.check(record) is None
+
+    # 3rd packet: reaches threshold -> returns alert dict
+    record["event_timestamp"] = 1002.0
+    alert = rule.check(record)
+    assert alert is not None
+    assert alert["rule_name"] == "NEW_ATTACK_RULE"
+    assert alert["evidence"]["observed_count"] == 3
+
+    # 4th packet within cooldown: suppressed
+    record["event_timestamp"] = 1003.0
+    assert rule.check(record) is None
 
 def test_new_attack_rule_benign_suppression():
     rule = NewAttackRule(threshold=5, window=10)
-    # Replay packets below threshold
-    for i in range(3):
-        record = {
-            "protocol": "TCP",
-            "src_ip": "192.168.1.50",
-            "dst_ip": "192.168.1.1",
-            "dst_port": 80,
-            "event_timestamp": 1000.0 + i,
-        }
-        alerts = rule.check(record)
-    assert len(alerts) == 0
+    record = {
+        "type": "IP",
+        "protocol": "TCP",
+        "src_ip": "192.168.1.50",
+        "dst_ip": "192.168.1.1",
+        "dst_port": 80,
+    }
+    for i in range(4):
+        record["event_timestamp"] = 1000.0 + i
+        assert rule.check(record) is None
 
 def test_new_attack_rule_invalid_inputs():
     rule = NewAttackRule(threshold=5, window=10)
     # Missing timestamp, invalid port, non-TCP
-    assert rule.check({"protocol": "UDP"}) == []
-    assert rule.check({"protocol": "TCP", "dst_port": 99999}) == []
+    assert rule.check({"type": "IP", "protocol": "UDP"}) is None
+    assert rule.check({"type": "IP", "protocol": "TCP", "dst_port": 99999}) is None
+    assert rule.check({"type": "IP", "protocol": "TCP", "dst_port": 80, "event_timestamp": float("nan")}) is None
 ```
 
 ### Step 5: Update Documentation & Governance Tests
@@ -222,7 +282,7 @@ git status
 ## 5. Working with External Benchmark Datasets
 
 When executing multi-PCAP ground-truth benchmarks:
-- Mount the external dataset drive at `/run/media/harshitgarg/Data1/NetGuard-datasets/verified/`.
+- If storing large PCAPs on an external volume, ensure the dataset directory is mounted or configured to match the paths in `data/external_benchmarks/ground_truth/manifest.csv` (default mount point: `data/external_benchmarks/verified/` or via local mount).
 - Ensure converted `.pcap` files reside in `data/ciciot2023_eval/` or `data/external_benchmarks/converted_pcaps/`.
 - Use the provided benchmark runner script:
   ```bash

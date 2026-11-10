@@ -50,21 +50,18 @@ Install Wireshark command-line utilities via your distribution package manager:
 
 ---
 
-### 1.3 `FileNotFoundError: /run/media/...` During Benchmark Replay
+### 1.3 `FileNotFoundError` During Full Benchmark Replay
 **Symptom:**
 ```
-FileNotFoundError: [Errno 2] No such file or directory: '/run/media/harshitgarg/Data1/NetGuard-datasets/verified/ws_teardrop.pcap'
+FileNotFoundError: [Errno 2] No such file or directory: '.../verified/ws_teardrop.pcap'
 ```
 **Root Cause:**
-Large benchmark datasets (e.g. Wireshark samples, CTU-IoT-23, Fox-IT Log4Shell) are stored on an external storage drive to keep the git repository lightweight. The drive is not currently mounted.
+Large benchmark datasets (e.g. Wireshark samples, CTU-IoT-23, Fox-IT Log4Shell) are stored on external storage or in a dedicated data directory to keep the Git repository lightweight.
 
 **Solution:**
-1. Connect the external storage drive to the workstation.
-2. Verify the mount point:
-   ```bash
-   ls /run/media/harshitgarg/Data1/NetGuard-datasets/verified/
-   ```
-3. If mounted at a different path, update the dataset paths in `data/external_benchmarks/ground_truth/manifest.csv`.
+1. Connect or mount your external dataset volume.
+2. Verify that the file paths exist or match the paths configured in `data/external_benchmarks/ground_truth/manifest.csv`.
+3. If datasets are located in a custom directory, update the paths in `manifest.csv` or create a symlink to your dataset location.
 
 ---
 

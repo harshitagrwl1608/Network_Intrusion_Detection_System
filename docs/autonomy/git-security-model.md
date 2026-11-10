@@ -54,7 +54,7 @@ flowchart TD
 ## 3. Layer 2: Local Native Git Hook (`.git/hooks/pre-push`)
 
 - **Scope**: Native client-side Git enforcement hook executed automatically whenever `git push` is called, regardless of whether it was triggered via Antigravity, terminal, or script.
-- **Implementation**: [`scripts/git_pre_push.py`](file:///home/harshitgarg/Downloads/Networking_Project/.agents/plugins/netguard-workbench/scripts/git_pre_push.py), installed via [`scripts/install_git_hooks.py`](file:///home/harshitgarg/Downloads/Networking_Project/.agents/plugins/netguard-workbench/scripts/install_git_hooks.py).
+- **Implementation**: `scripts/git_pre_push.py` (in `.agents/plugins/netguard-workbench/scripts/git_pre_push.py`), installed via `scripts/install_git_hooks.py`.
 - **Enforcement**:
   - Inspects standard input refspec lines: `<local_ref> <local_sha1> <remote_ref> <remote_sha1>`.
   - Exits with status code 1 if `<remote_ref>` is `refs/heads/main` or `refs/heads/master`.

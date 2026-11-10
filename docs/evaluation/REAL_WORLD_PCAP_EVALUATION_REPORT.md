@@ -179,7 +179,7 @@ NetGuard registers 23 distinct detection rules. To provide complete transparency
 ## 6. Summary of Empirical Deliverables
 
 All exports are stored in `results/real_world_evaluation/exports/`:
-- [`alerts_summary.csv`](file:///home/harshitgarg/Downloads/Networking_Project/results/real_world_evaluation/exports/alerts_summary.csv): Full 267-row alert log with packet timestamps, 5-tuples, rule versions, and forensic details.
-- [`capture_statistics.csv`](file:///home/harshitgarg/Downloads/Networking_Project/results/real_world_evaluation/exports/capture_statistics.csv): Capture-by-capture packet counts, runtimes, measured throughputs, and rule breakdowns.
-- [`rule_coverage_matrix.csv`](file:///home/harshitgarg/Downloads/Networking_Project/results/real_world_evaluation/exports/rule_coverage_matrix.csv): Coverage matrix documenting all 23 rules and their test status.
-- [`evaluation_summary.json`](file:///home/harshitgarg/Downloads/Networking_Project/results/real_world_evaluation/exports/evaluation_summary.json): Machine-readable canonical evaluation schema.
+- `alerts_summary.csv`: Full 267-row alert log with packet timestamps, 5-tuples, rule versions, and forensic details.
+- `capture_statistics.csv`: Capture-by-capture packet counts, runtimes, measured throughputs, and rule breakdowns.
+- `rule_coverage_matrix.csv`: Coverage matrix documenting all 23 rules and their test status.
+- `evaluation_summary.json`: Machine-readable canonical evaluation schema.

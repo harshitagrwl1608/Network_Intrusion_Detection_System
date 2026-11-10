@@ -96,10 +96,15 @@ Total FP_benign alerts: 0
 
 ## 4. Ground-Truth Benchmark Datasets
 
-The 22-PCAP ground-truth benchmark (`scripts/evaluation/run_ground_truth_benchmark.py`) covers three
-families of real-world network captures.
+The authoritative 22-PCAP ground-truth benchmark is specified in [`data/external_benchmarks/ground_truth/manifest.csv`](../data/external_benchmarks/ground_truth/manifest.csv) and detailed in the [Dataset Registry](evaluation/dataset-registry.md). It covers 22 network captures across three distinct groups:
 
-### 4.1 GeNIS Dataset (12 captures)
+- **11 GeNIS Captures** (8 attack + 3 benign operational runs) with published flow-level ground truth.
+- **7 CICIoT2023 Captures** (7 web exploit and reconnaissance attack scenarios) with capture-level scenario truth.
+- **4 Additional Focused Captures** (1 CTU-IoT-23 IoT device baseline + 2 Wireshark exploit samples + 1 Fox-IT Log4Shell honeypot capture).
+
+Total: 11 + 7 + 4 = **22 captures** (3.24 GiB total extracted volume, 37.5 million packets).
+
+### 4.1 GeNIS Dataset (11 captures)
 
 **Source:** GeNIS (Generated Network Intrusion Scenario) dataset — a controlled, lab-generated
 multi-protocol attack dataset with **flow-level ground truth** labels in `genis-ground-truth.csv`.
@@ -121,7 +126,7 @@ multi-protocol attack dataset with **flow-level ground truth** labels in `genis-
 | `genis_benign_user_activity` | Web browsing, email | Benign (FP check) | 319 MB |
 
 **Ground truth type:** Flow-level labels (StartTime, Proto, SrcAddr, Sport, DstAddr, Dport, Label).
-Match algorithm: timestamp ± 2s, both endpoint IPs, both ports, protocol, bidirectional.
+Match algorithm: timestamp ± 2s grace window, both endpoint IPs, both ports, protocol, bidirectional.
 
 ### 4.2 CICIoT2023 Dataset (7 captures)
 
@@ -142,7 +147,7 @@ Match algorithm: timestamp ± 2s, both endpoint IPs, both ports, protocol, bidir
 **Ground truth type:** Capture-level category label only (no per-flow timestamps).
 Match type: alert presence on the expected rule during capture replay.
 
-### 4.3 Additional Captures (3 captures)
+### 4.3 Additional Focused Captures (4 captures)
 
 | Capture ID | Source | Scenario | Target Rule |
 |---|---|---|---|
@@ -154,6 +159,7 @@ Match type: alert presence on the expected rule during capture replay.
 > [!NOTE]
 > The Fox-IT Log4Shell capture is a real-world exploit PCAP from the Fox-IT Log4Shell honeypot dataset.
 > The Wireshark samples are from the Wireshark wiki sample capture library.
+> The Somfy doorlock capture is from the CTU-IoT-23 dataset (Capture 4-1 honeypot).
 
 ---
 
@@ -174,15 +180,14 @@ The following PCAPs are committed to the repository for unit testing and evaluat
 
 ---
 
-## 6. External Dataset Storage
+## 6. External Dataset Storage & Provenance
 
-Large external benchmark PCAPs are stored on a removable drive and are **not** committed to git:
+Large external benchmark PCAPs (totaling >3 GiB uncompressed) are excluded from Git to prevent repository bloat:
 
-- **Mount path:** `/run/media/harshitgarg/Data1/NetGuard-datasets/verified/`
-- **Affected captures:** `benign_iot23_doorlock`, `attack_ws_teardrop`, `attack_ws_dns_remoteshell`, `attack_foxit_log4shell`
-- **Requirement:** Mount the drive before running the full benchmark
-
-The dataset registry with SHA-256 hashes is in `docs/evaluation/dataset-registry.md`.
+- **Storage Location**: By default, large PCAPs are located in `data/external_benchmarks/` or mounted to the paths specified in `data/external_benchmarks/ground_truth/manifest.csv`.
+- **Configurable Path**: If storing PCAPs on an external volume, mount it or set the path to match the manifest paths.
+- **Affected External-Drive Captures**: `benign_iot23_doorlock`, `attack_ws_teardrop`, `attack_ws_dns_remoteshell`, and `attack_foxit_log4shell`.
+- **Dataset Registry**: Full cryptographic hashes (SHA-256), publisher URLs, and licensing records are maintained in [`docs/evaluation/dataset-registry.md`](evaluation/dataset-registry.md).
 
 ---
 
@@ -191,5 +196,5 @@ The dataset registry with SHA-256 hashes is in `docs/evaluation/dataset-registry
 The `test_dataset_hash_verify.py` test verifies SHA-256 hashes of all datasets listed in
 `data/external_benchmarks/ground_truth/manifest.csv`. Runs automatically as part of the test suite.
 
-External-drive-only datasets are skipped when the drive is not mounted (gracefully detected via path existence check).
+External-storage-only datasets are skipped when the files are not locally accessible (gracefully detected via path existence check).
 

@@ -16,6 +16,7 @@ This directory contains the complete developer and operator documentation for Ne
 | [EVALUATION_RESULTS.md](EVALUATION_RESULTS.md) | Scientifically careful evaluation results with caveats and methodology |
 | [DEVELOPMENT_WORKFLOW.md](DEVELOPMENT_WORKFLOW.md) | Adding rules, branch discipline, commit conventions, extending tests |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Common errors and fixes |
+| [RELEASE_READINESS_REPORT.md](RELEASE_READINESS_REPORT.md) | Final release candidate audit, architecture verification, and quality gates report |
 | [AI_ML_AUTONOMOUS_DEFENSE_ROADMAP.md](AI_ML_AUTONOMOUS_DEFENSE_ROADMAP.md) | **Future vision only** — long-term AI/ML evolution roadmap (not yet implemented) |
 
 > [!NOTE]

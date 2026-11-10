@@ -98,7 +98,7 @@ Evaluations must separate technical execution integrity from academic submission
 ## 6. Implementation Reference
 
 The Python implementation of this standard is located under:
-- [`ids_project/evaluation/reporting/contract.py`](file:///home/harshitgarg/Downloads/Networking_Project/ids_project/evaluation/reporting/contract.py) — Core data structures, taxonomy, and metric contracts.
-- [`ids_project/evaluation/reporting/validator.py`](file:///home/harshitgarg/Downloads/Networking_Project/ids_project/evaluation/reporting/validator.py) — Automated 11-gate validation engine.
-- [`ids_project/evaluation/reporting/builder.py`](file:///home/harshitgarg/Downloads/Networking_Project/ids_project/evaluation/reporting/builder.py) — Canonical report, JSON, and CSV generator.
+- [`ids_project/evaluation/reporting/contract.py`](../../ids_project/evaluation/reporting/contract.py) — Core data structures, taxonomy, and metric contracts.
+- [`ids_project/evaluation/reporting/validator.py`](../../ids_project/evaluation/reporting/validator.py) — Automated 11-gate validation engine.
+- [`ids_project/evaluation/reporting/builder.py`](../../ids_project/evaluation/reporting/builder.py) — Canonical report, JSON, and CSV generator.
 

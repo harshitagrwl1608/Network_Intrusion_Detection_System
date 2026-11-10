@@ -44,7 +44,7 @@ All static constraints, documentation, and hooks enforcing the 19-rule limit wer
 
 ## 3. Dynamic Rule Invariant Architecture
 
-Hardcoded `assert len(engine.rules) == 19` checks were replaced by a robust, semantic invariant test suite: [`test_rule_governance_invariants.py`](file:///home/harshitgarg/Downloads/Networking_Project/ids_project/tests/test_rule_governance_invariants.py).
+Hardcoded `assert len(engine.rules) == 19` checks were replaced by a robust, semantic invariant test suite: [`test_rule_governance_invariants.py`](../../ids_project/tests/test_rule_governance_invariants.py).
 
 This test suite continuously enforces:
 1. **Rule Identity Uniqueness (`test_rule_identities_are_unique`)**: Asserts that every registered rule name is globally unique across the engine.
@@ -66,7 +66,7 @@ An audit of the baseline 19 rules against real-world packet captures identified 
   - `DnsRule` (v1.24) only parses structured DNS messages and skips non-DNS records.
   - `PayloadRule` (v1.24) restricts deep packet inspection to designated web/application ports (`_DPI_PORTS = {80, 8080, 8000, 8888, 3000, 5000}`).
   - `CleartextHttpOnTlsPortRule` (v1.11) only inspects port 443.
-- **Empirical Evidence**: Wireshark capture [`ws_dns_remoteshell.pcap`](file:///run/media/harshitgarg/Data1/NetGuard-datasets/verified/ws_dns_remoteshell.pcap) contains an interactive Windows XP command prompt (`cmd.exe`) bound to TCP port 53, executing `dir` and `exit` commands. NetGuard generated zero detection alerts for this shell.
+- **Empirical Evidence**: Wireshark capture `ws_dns_remoteshell.pcap` contains an interactive Windows XP command prompt (`cmd.exe`) bound to TCP port 53, executing `dir` and `exit` commands. NetGuard generated zero detection alerts for this shell.
 
 ### Gap 2: Covert ICMP Data Tunnels & Reverse Shells
 - **Vulnerability**: Covert channels (e.g. `icmpsh`, `ptunnel`, `hans`) encapsulate interactive shells, file transfers, and encrypted streams inside ICMP Echo (type 8/128) and Echo Reply (type 0/129) packets.
@@ -83,7 +83,7 @@ An audit of the baseline 19 rules against real-world packet captures identified 
 Following rigorous admission criteria (demonstrated blind spot, empirical PCAP evidence, bounded $O(1)$ LRU state, zero false positives on benign baselines), two new detection rules were engineered and registered:
 
 ### Rule 20: `NonDnsTrafficOnDnsPortRule` (v1.0)
-- **Class**: [`NonDnsTrafficOnDnsPortRule`](file:///home/harshitgarg/Downloads/Networking_Project/ids_project/engine/rules.py)
+- **Class**: [`NonDnsTrafficOnDnsPortRule`](../../ids_project/engine/rules.py)
 - **Rule Name**: `NON_DNS_TRAFFIC_ON_DNS_PORT`
 - **Detection Capabilities**:
   1. `INTERACTIVE_SHELL`: Matches command shell prompts and banners (`Microsoft Windows`, `cmd.exe`, `/bin/sh`, `/bin/bash`, `root@`, `whoami`, `dir\r\n`, `ls -l`).
@@ -94,10 +94,10 @@ Following rigorous admission criteria (demonstrated blind spot, empirical PCAP e
   - Exempts DNS over TLS (DoT, RFC 7858) TLS ClientHello handshakes.
   - Ignores empty TCP control packets (SYN/ACK/FIN).
 - **State Bounding**: Direction-independent host pair deduplication with 60-second cooldown and 4,096-entry `OrderedDict` LRU bounding.
-- **Test Suite**: [`ids_project/tests/test_non_dns_on_dns_port.py`](file:///home/harshitgarg/Downloads/Networking_Project/ids_project/tests/test_non_dns_on_dns_port.py) (14 positive, negative, and state tests passing).
+- **Test Suite**: [`ids_project/tests/test_non_dns_on_dns_port.py`](../../ids_project/tests/test_non_dns_on_dns_port.py) (14 positive, negative, and state tests passing).
 
 ### Rule 21: `IcmpTunnelRule` (v1.0)
-- **Class**: [`IcmpTunnelRule`](file:///home/harshitgarg/Downloads/Networking_Project/ids_project/engine/rules.py)
+- **Class**: [`IcmpTunnelRule`](../../ids_project/engine/rules.py)
 - **Rule Name**: `ICMP_TUNNEL`
 - **Detection Capabilities**:
   1. `PTUNNEL_TRAFFIC`: Matches Ptunnel magic token (`0xD5200804`). Severity: `critical`.
@@ -109,7 +109,7 @@ Following rigorous admission criteria (demonstrated blind spot, empirical PCAP e
   - Inspects only Echo Request (type 8/128) and Echo Reply (type 0/129); ignores ICMP error messages (Destination Unreachable, Time Exceeded) carrying embedded original IP headers.
   - Implements `_is_diagnostic_ping()` to exempt legitimate MTU sweep diagnostics (all zeros, repeating small alphabets, or sequential byte cycles).
 - **State Bounding**: Host pair deduplication with 60-second cooldown and 4,096-entry `OrderedDict` LRU bounding.
-- **Test Suite**: [`ids_project/tests/test_icmp_tunnel.py`](file:///home/harshitgarg/Downloads/Networking_Project/ids_project/tests/test_icmp_tunnel.py) (14 positive, negative, and state tests passing).
+- **Test Suite**: [`ids_project/tests/test_icmp_tunnel.py`](../../ids_project/tests/test_icmp_tunnel.py) (14 positive, negative, and state tests passing).
 
 ---
 

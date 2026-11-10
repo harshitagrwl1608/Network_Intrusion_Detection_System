@@ -1,8 +1,20 @@
 # NetGuard IDS Engine Handoff
 
-This file is a working handoff for the next engineer or AI agent. It summarizes the current engine, completed work, reproducible checks, comparison limits, and a disciplined next-cycle plan. Treat all detections as heuristic leads unless validated against labelled ground truth.
+This file is a working handoff and engineering record. It summarizes the current engine, verified deliverables, evaluation status, and development chronology.
 
-## Current project state
+> [!NOTE]
+> ### 📌 Current Release Candidate State (2026-11-10)
+> - **Branch:** `antigravity/overnight-work` (strictly tracking `origin/antigravity/overnight-work`).
+> - **Rule Governance:** **23 registered detection rules** in `RuleEngine.rules` under strict evidence-driven governance with deterministic $O(1)$ LRU bounding via `prune_stale(now)`.
+> - **DPI Engine:** Application-aware HTTP/1.x parsing via `HttpParser` (18 threat signatures, request/response scoping, RFC 2046 multipart boundary fixes, credential sanitization).
+> - **Automated Test Suite:** **854 passed, 630 subtests passed** across 42 test modules in `ids_project/tests/`.
+> - **Synthetic Evaluation:** **42/42 scenarios detected**, 0 unmatched alerts, 0 false alarms on benign fixture (`ids_project/evaluation/run_eval.py`).
+> - **Multi-Dataset Benchmark:** **22 network captures** (3.24 GiB, 37.5M packets) across GeNIS (11), CICIoT2023 (7), CTU-IoT-23 (1), Wireshark (2), and Fox-IT (1), reconciled into 156 Flow TPs, 137 Benign FPs, 26 Unscorable Incidental, 263 Scenario-level alerts, 0 Unmatched.
+> - **Primary Documentation:** See [`README.md`](../README.md) and [`docs/`](../docs/) for authoritative guides.
+> 
+> *(The sections below record the historical development chronology across earlier engineering cycles.)*
+
+## Historical Project State (Cycle 4 Baseline)
 
 - Repository: `/home/harshitgarg/Downloads/Networking_Project`
 - Engine package: `ids_project/`

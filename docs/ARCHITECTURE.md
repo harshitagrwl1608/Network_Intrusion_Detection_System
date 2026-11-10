@@ -30,10 +30,14 @@ It operates by inspecting individual packets as they arrive (live capture or PCA
                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │          engine/rules.py  —  RuleEngine.check()                     │
-│  Every registered rule's check() method is called for each packet.  │
-│  No early exit — a packet may legitimately trigger multiple rules.   │
-│                                                                      │
-│  23 rules (see DETECTION_ENGINE.md for full list)                   │
+│  Protocol-aware candidate selection via _rules_by_proto:            │
+│    - "ARP"   → [ArpSpoofRule]                                       │
+│    - "TCP"   → 17 TCP-relevant rules (PortScan, SynFlood, DPI...)   │
+│    - "UDP"   → 8 UDP-relevant rules (UdpScan, UdpFlood, DPI...)     │
+│    - "ICMP"  → 7 ICMP-relevant rules (IcmpSweep, IcmpFlood...)      │
+│    - Other   → Full 23 rules fallback                               │
+│  Candidate rules execute sequentially. No early exit among           │
+│  candidates — a packet may legitimately trigger multiple rules.     │
 └──────────────────┬──────────────────────────────────────────────────┘
                    │ alerts (dicts)
                    ▼
@@ -216,10 +220,37 @@ Alert generated with sig_id, matched text (redacted), evidence
 
 ---
 
-## 8. `RuleEngine` Concurrency Model
+## 8. Execution, Concurrency & Persistence Model
 
-- Alerts are written **asynchronously** via a background writer thread and a local disk spool (`_spool`).
-- If the write queue is full, alerts are spooled to a temporary file on disk and replayed on the next cycle.
-- `RuleEngine.shutdown()` drains the queue and reports totals (alerts written, dropped, spooled).
-- **Thread safety**: each rule maintains its own state (`OrderedDict` LRU caches); no shared mutable state between rules.
+NetGuard separates packet inspection from persistence to maintain high capture throughput:
+
+### 8.1 Sequential Inspection Loop
+- The sniffer or replay thread extracts normalized event records one packet at a time.
+- In `RuleEngine.check()`, candidate rules are looked up in `self._rules_by_proto` based on `record.get("protocol")` or `record.get("type")` (falling back to all 23 rules if unclassified).
+- Selected candidate rules are executed **sequentially** in Python bytecode:
+  ```python
+  for rule in target_rules:
+      alert = rule.check(record)
+      if alert:
+          # enrich with timestamp, evidence_json, idempotency_key
+          self._alert_queue.put_nowait(("alert", alert))
+  ```
+- No candidate rule exits early: if a packet matches both `PORT_SCAN` and `PAYLOAD_HIT`, both alerts are generated.
+
+### 8.2 Asynchronous Persistence & Backpressure Spooling
+- Alerts are handed off via a non-blocking queue (`self._alert_queue`, bounded at `ALERT_QUEUE_MAXSIZE`, default: 1,000 items).
+- A dedicated background thread (`_alert_writer_loop`) drains the queue and commits batches to SQLite or PostgreSQL.
+- **Disk Spool Backpressure Policy**: If the alert queue saturates under flood conditions, `RuleEngine.check()` falls back to spooling alerts directly to a local JSON Lines file on disk (`AlertSpool` writing to `<sqlite_path>.spool.jsonl`, bounded at `ALERT_SPOOL_MAX_SIZE`, default: 5,000 items).
+- The alert writer automatically recovers and replays spooled alerts once database pressure subsides.
+- On shutdown, `RuleEngine.shutdown()` waits for in-flight queue items to flush, drains spooled records, and logs accounting statistics (`alert_writes`, `alerts_spooled`, `alerts_dropped`).
+
+### 8.3 Device Inventory Persistence
+- Communicating devices are tracked with a 5-minute deduplication refresh window (`_device_refresh_s = 300`) and bounded memory cap (65,536 keys).
+- Device updates are enqueued to a separate `_device_queue` and drained asynchronously by `_device_writer_loop`.
+
+### 8.4 Thread Safety & State Invariants
+- Each stateful rule maintains its own internal sliding-window history using `collections.OrderedDict`.
+- State is bounded deterministically by max entry caps and expiration timeouts (`prune_stale(now)`).
+- Mutable rule state is protected by per-rule reentrant locks (`threading.RLock` or `threading.Lock`) so the packet processing thread and garbage-collection routines never race.
+- There is no shared mutable state between different detection rules.
 

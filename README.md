@@ -44,12 +44,14 @@ flowchart TD
     end
 
     subgraph Engine ["Detection Engine (rules.py)"]
-        Router["RuleEngine.check()<br/>Concurrent dispatch across 23 rules"]
+        Router["RuleEngine.check()<br/>Protocol-aware routing (_rules_by_proto)"]
+        Exec["Sequential Rule Execution<br/>(No early exit among candidate rules)"]
         DPI["PayloadRule & HttpParser<br/>(Protocol-scoped DPI + Redaction)"]
         State["Stateful Trackers<br/>(Sliding windows with O(1) OrderedDict LRU)"]
         Record --> Router
-        Router --> DPI
-        Router --> State
+        Router --> Exec
+        Exec --> DPI
+        Exec --> State
     end
 
     subgraph Persistence ["Storage & Persistence (storage/db.py)"]
@@ -84,6 +86,7 @@ Detailed, developer-grade documentation is organized in the [`docs/`](docs/) dir
 | 📊 **[docs/EVALUATION_RESULTS.md](docs/EVALUATION_RESULTS.md)** | Scientifically careful evaluation metrics, alert reconciliation, ground-truth flow matching, and DPI hardening results. |
 | 🛠️ **[docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md)** | Guide for contributors: adding a detection rule, LRU memory bounding, Git branch invariants, and testing gates. |
 | 🔧 **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Solutions for common runtime errors, socket permission setup, PCAPNG conversion, and privacy safeguards. |
+| 📋 **[docs/RELEASE_READINESS_REPORT.md](docs/RELEASE_READINESS_REPORT.md)** | Release candidate audit, architecture verification, 11-gate reporting check, and quality report. |
 | 🔮 **[docs/AI_ML_AUTONOMOUS_DEFENSE_ROADMAP.md](docs/AI_ML_AUTONOMOUS_DEFENSE_ROADMAP.md)** | *(Future Vision)* Long-term architectural roadmap towards stateful intelligence and autonomous defense. |
 
 ---

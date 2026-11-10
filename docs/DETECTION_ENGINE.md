@@ -1,6 +1,6 @@
 # NetGuard IDS — Detection Engine Reference
 
-NetGuard IDS implements **23 independent detection rules**. Every rule's `check()` method is called for every packet — no early exit, no protocol pre-filter. A single packet may legitimately trigger multiple rules.
+NetGuard IDS implements **23 independent detection rules**. For each packet, the `RuleEngine` selects candidate rules via protocol-aware routing (`_rules_by_proto`) and executes them sequentially. Candidate rules evaluate without early exit — a single packet may legitimately trigger multiple rules. Unclassified protocols evaluate across all 23 rules.
 
 All rules are implemented in [`ids_project/engine/rules.py`](../ids_project/engine/rules.py).
 

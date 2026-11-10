@@ -86,9 +86,16 @@ flowchart TD
 | **Flow True Positives (`TP`)** | **156** | Alerts in flow-labeled attack traffic that match documented ground-truth 5-tuples, time intervals (±2s grace), and rule mappings. |
 | **Benign False Positives (`FP`)** | **137** | Alerts generated in genuine benign operational baselines (`admin`, `background`, `user`, `Somfy doorlock`). |
 | **Unscorable Flow Incidental (`UNSCORABLE`)** | **26** | Incidental traffic in flow-labeled attack captures (e.g. DNS bursts during DoS), unsupported evidence, or incomplete GT rows. |
-| **Scenario-Level Alerts (`SCENARIO`)** | **263** | Alerts in captures evaluated at the scenario level only (CICIoT2023 web attacks, Wireshark, Fox-IT). |
+| **Scenario-Level Alerts (`SCENARIO`)** | **263** | Alerts in captures evaluated at the scenario level only (CICIoT2023 web attacks, Wireshark, Fox-IT). Scenario-level presence confirms attack detection on the designated vector, but individual alerts are NOT counted as flow-verified true positives. |
 | **Unmatched Attack Alerts (`UNMATCHED`)** | **0** | Alerts in flow-labeled captures occurring outside documented ground-truth intervals. |
 | **TOTAL RECONCILED ALERTS** | **582** | **Exact 100% reconciliation (156 + 137 + 26 + 263 + 0 = 582)** |
+
+### Ground-Truth Provenance & Reproducibility Note
+The 582 total alerts and their reconciliation into the 5 mutually exclusive classes derive from the full 22-PCAP ground-truth benchmark recorded at commit `17f9c03` and rescored via the strict bidirectional 5-tuple matcher in `scripts/evaluation/rescore_benchmark.py` (commit `0931aa7`).
+- Flow-level ground truth is available strictly for GeNIS captures (`data/external_benchmarks/genis/0-info/0-info/genis-ground-truth.csv`).
+- Captures lacking per-flow ground-truth labels (CICIoT2023, Wireshark samples, Fox-IT Log4Shell) are categorized as **Scenario-Level Alerts** (263 alerts), not flow TPs.
+- The 137 benign false positives reflect detections on operational baseline captures before recent DPI and heuristic tunings (including 85 on high-entropy DNS and 44 on multi-destination host traffic in GeNIS).
+- Re-executing the full 22-PCAP benchmark requires access to the 3.24 GiB capture corpus (stored on external media and converted PCAP caches). When external storage is detached, reproducibility is verified through the committed canonical result databases, JSON summaries, and unit tests (`test_ground_truth_benchmark.py`).
 
 ### Rule-by-Rule Benchmark Breakdown (All 23 Rules)
 
@@ -150,7 +157,27 @@ flowchart TD
 
 ---
 
-## 5. Performance & Throughput Observations
+## 5. Evaluation Reporting Standard: Audit of the 11 Programmatic Validation Gates
+
+The NetGuard evaluation reporting standard ([`docs/evaluation/REPORTING_STANDARD.md`](evaluation/REPORTING_STANDARD.md)) specifies 11 mandatory programmatic validation gates. To maintain complete technical integrity, the table below documents the actual implementation status of each gate within [`ids_project/evaluation/reporting/validator.py`](../ids_project/evaluation/reporting/validator.py):
+
+| Gate # | Mandated Gate Requirement | Implementation Status | Enforcement Mechanism |
+|:---:|---|:---:|---|
+| **Gate 1** | **Tier Count Reconciliation** ($\sum \text{Tiers} == \text{Total Alerts}$) | **Fully Implemented & Enforced** | `_check_1_tier_reconciliation`: Fails closed with error if tier sum does not match `total_alerts`. |
+| **Gate 2** | **Confusion Matrix Reconciliation** ($TP + FP + FN + TN == \text{Units}$) | **Partially Implemented (Proxy)** | Handled via Gate 1 tier accounting; strict single-unit confusion matrix reconciliation is not enforced as an isolated check because corpora span mixed units (flows in GeNIS, scenarios in CICIoT2023). |
+| **Gate 3** | **Mathematical Reproducibility** (Ratio / Percentage recalculation) | **Fully Implemented & Enforced** | `_check_2_mathematical_reproducibility`: Re-computes ratios and percentages from numerators and denominators; checks for division by zero. |
+| **Gate 4** | **Export Schema Parity** (Header and column count matching) | **Fully Implemented & Enforced** | `_check_7_csv_schema_and_counts`: Verifies every row in every exported CSV matches expected column count. |
+| **Gate 5** | **Export Row Count & Digest Integrity** (Rows, size, SHA-256) | **Fully Implemented & Enforced** | `_check_7_csv_schema_and_counts`: Verifies row count, exact file byte size, and on-disk SHA-256 cryptographic digest. |
+| **Gate 6** | **Cross-Format Agreement** (Markdown vs. JSON summary) | **Fully Implemented & Enforced** | `_check_8_json_markdown_consistency`: Verifies verdict, total alerts, tier counts, commit hash, and export files agree across Markdown and JSON. |
+| **Gate 7** | **No Hardcoded Historical Figures** (Placeholder rejection) | **Fully Implemented & Enforced** | `_check_6_no_hardcoded_fallbacks`: Scans metadata for legacy constants (e.g. `397_to_5_historical_split`) and fails closed if detected. |
+| **Gate 8** | **Evidence Completeness** (Ambiguous & malformed tracking) | **Implemented as Warning** | `_check_5_evidence_completeness`: Emits a non-fatal warning if ambiguous evidence tracking is absent from extra metadata. |
+| **Gate 9** | **Provenance & Configuration Fingerprints** (PCAP hash, Git commit) | **Fully Implemented & Enforced** | `_check_3_provenance_fingerprints`: Requires 64-char PCAP SHA-256, Git commit hash, engine fingerprint, and positive PCAP byte size. |
+| **Gate 10** | **Evidence Source Mapping** (Explicit definitions & source links) | **Implemented as Warnings** | `_check_4_metric_units_and_evidence`: Emits warnings if metrics lack definitions, ground-truth sources, or conflate Tier-A fractions with precision. |
+| **Gate 11** | **Fail-Closed Execution** (Automatic INCONCLUSIVE verdict override) | **Fully Implemented & Enforced** | `validate_all`: If any error is recorded across active gates, the report verdict is overridden to `INCONCLUSIVE` and failures are logged. |
+
+---
+
+## 6. Performance & Throughput Observations
 
 All throughput measurements were performed on standard commodity developer workstations (x86_64, Linux 6.x, single-threaded Python execution):
 
@@ -165,7 +192,7 @@ All throughput measurements were performed on standard commodity developer works
 
 ---
 
-## 6. Known Limitations & Analysis Realism
+## 7. Known Limitations & Analysis Realism
 
 1. **Encrypted Traffic Bounding:** In the absence of TLS interception or eBPF socket-level hooks, NetGuard cannot inspect encrypted HTTPS or DoH payloads. Detection on encrypted streams is restricted to handshake metadata (`TLS_ANOMALY`) and volumetric patterns (`DATA_EXFIL`).
 2. **Volumetric Threshold Sensitivity:** Static thresholds (e.g. 15 ports in 10s for port scan, 100 SYNs in 10s for SYN flood) may require environmental tuning. In high-bandwidth enterprise environments, CDN prefetching or microservice meshes can generate traffic bursts that trigger volumetric rules.

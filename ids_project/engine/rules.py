@@ -1,98 +1,80 @@
 """
 engine/rules.py
 ---------------
-All detection rules + the RuleEngine orchestrator.
+All 23 detection rules + the RuleEngine orchestrator for NetGuard IDS.
 
-Rules are stateful and maintain short-term sliding-window memory.
-Each rule's check() method receives a normalised packet record dict and
-returns an alert dict (or None).  Multiple rules may fire on the same
-packet — the engine never exits early.
+Rules are stateful and maintain short-term sliding-window memory bounded by
+OrderedDict LRU caches and prune_stale(now) expiration.
 
-Alert schema (§5.2 of roadmap):
-  rule_name        str   — rule identifier
+Each rule's check() method receives a normalized packet record dict and
+returns a single alert dict (or None). The RuleEngine selects protocol-specific
+candidate rules via `_rules_by_proto` and executes them sequentially. No candidate
+rule exits early — a single packet may legitimately trigger multiple rules.
+
+Alert schema:
+  rule_name        str   — rule identifier (e.g. PORT_SCAN, PAYLOAD_HIT)
   rule_version     str   — "major.minor" for tracking changes
-  event_timestamp  float — from packet capture (preserved through sniffer)
-  src_ip, dst_ip   str
-  src_port, dst_port int
-  protocol         str
-  severity         str   — "high" | "medium" | "low"
-  confidence       str   — "high" | "heuristic" | "low"
-  detail           str   — human-readable summary
-  evidence         dict  — structured, JSON-serialisable facts
-  window_start     float — start of the detection window (stateful rules)
-  window_end       float — end of the detection window (stateful rules)
+  src_ip, dst_ip   str   — endpoint IP addresses
+  src_port, dst_port int — transport ports (1-65535 or None)
+  protocol         str   — "TCP" | "UDP" | "ICMP" | "ARP"
+  severity         str   — "critical" | "high" | "medium" | "low"
+  confidence       str   — "high" | "medium" | "low" | "heuristic"
+  detail           str   — human-readable incident narrative
+  evidence         dict  — structured, JSON-serializable facts (serialized to evidence_json by RuleEngine)
+  window_start     float — start of detection window (stateful rules or None)
+  window_end       float — end of detection window (stateful rules or None)
+  (timestamp, evidence_json, idempotency_key are assigned by RuleEngine on alert receipt)
 
-RuleEngine execution order (all rules run; no early exit):
-  1.  BlocklistRule          — known-malicious IP lookup
-  2.  TcpFlagAnomalyRule     — malformed or suspicious TCP flag combinations
-  3.  PortScanRule           — vertical + horizontal TCP scan
-  4.  UdpScanRule            — vertical + horizontal UDP scan
-  5.  UdpFloodRule           — UDP packet-rate flood
-  6.  TcpStealthScanRule     — FIN/NULL/Xmas vertical TCP scan
-  7.  SynFloodRule           — SYN burst + RST flood rate per source/destination
-  8.  DistributedSynFloodRule — SYN burst per destination across many sources
-  9.  IcmpSweepRule          — ICMP echo target sweep by source
- 10.  IcmpFloodRule          — ICMP echo-request flood
- 11.  ArpSpoofRule           — persistent IP→MAC mapping change
- 12.  PayloadRule (v1.18)    — bounded TCP stream DPI + regex signatures (all matches)
-     Signatures:
-       SQL_INJECTION        — UNION/SELECT, BENCHMARK, LOAD_FILE, INTO OUTFILE, quote-OR bypass
-       XSS                  — script/event handlers + SVG/img/iframe/body bypass vectors
-       CREDENTIAL_LEAK      — password=, Basic auth, Bearer (min 24 chars), X-API-Key
-       CMD_INJECTION        — /bin/sh, reverse shells, interpreter one-liners (python/perl/ruby)
-       PATH_TRAVERSAL       — ../ sequences, /etc/passwd, /proc/self, Windows paths
-       SSRF                 — file/dict/gopher schemes, cloud metadata IPs, IPv6 internal
-       LOG4SHELL            — ${jndi:} + nested lower/upper/:-: obfuscation variants
-       XXE                  — <!ENTITY SYSTEM/PUBLIC> declarations
-       SSTI                 — Jinja2 introspection/arithmetic, Freemarker ?new(), Spring EL
-       SHELLSHOCK           — bash function export CVE-2014-6271 patterns
-       DESERIALIZATION      — Java (0xaced), PHP, Python pickle gadget markers
-       HEADER_INJECTION     — CRLF-encoded Set-Cookie/Location injection
-       SCANNER_PROBE        — sqlmap/nikto/gobuster/zgrab/ZmEu/hydra/medusa User-Agents
-       SENSITIVE_FILE_PROBE — .env/.git/.htpasswd/phpinfo/server-status/backup.sql probes
-       REVERSE_SHELL_CRADLE — curl|sh, wget|sh, PowerShell cradles, socat exec shells
-       HTTP_METHOD_TAMPERING — TRACE/TRACK/DEBUG/WebDAV methods
-       WEBSHELL_INJECTION   — PHP/JSP/ASP/Python web shell execution markers
- 13.  DnsRule (v1.16)       — Shannon entropy + length + frequency + subdomain exfil
-                              + hex/base64/base32 DNS tunnel chunk detection
-                              mDNS (port 5353) and LLMNR (port 5355) are explicitly exempt.
- 14.  BruteForceRule        — repeated auth-port SYNs per (src,dst,port); covers SSH,
-                              RDP, VNC, MySQL, Redis, Elasticsearch, Tomcat/8080/8443
- 15.  SlowPortScanRule      — low-and-slow vertical/horizontal TCP scan (120s window)
- 16.  DataExfiltrationRule  — outbound payload-volume threshold
- 17.  TlsAnomalyRule        — TLS ClientHello/SNI anomalies
- 18.  CleartextHttpOnTlsPortRule — repeated cleartext HTTP on a TLS service port
- 19.  TcpZeroWindowRule     — repeated TCP zero-window advertisements
+Authoritative Rule Inventory (23 registered engine rules):
+  1.  BlocklistRule (v1.4)               — known-malicious IP and CIDR set lookup (Feodo Tracker)
+  2.  TcpFlagAnomalyRule (v1.9)          — malformed or contradictory TCP flags (SYN+FIN, SYN+RST, etc.)
+  3.  PortScanRule (v1.13)               — vertical + horizontal TCP port and host scan
+  4.  UdpScanRule (v1.4)                 — vertical + horizontal UDP port and host scan
+  5.  UdpFloodRule (v1.10)               — UDP packet flood with QUIC/web port 443 threshold
+  6.  TcpStealthScanRule (v1.8)          — FIN, NULL, and Xmas stealth TCP scans
+  7.  SynFloodRule (v1.13)               — initial SYN burst + closed-port grace RST flood
+  8.  DistributedSynFloodRule (v1.9)     — aggregate SYN flood per victim across multiple sources
+  9.  IcmpSweepRule (v1.8)               — ICMP echo target sweep by source
+ 10.  IcmpFloodRule (v1.8)               — ICMP echo-request flood
+ 11.  ArpSpoofRule (v1.8)                — persistent IP→MAC mapping change detection
+ 12.  PayloadRule (v1.24)                — application-aware DPI (HttpParser) + 18 regex signatures
+     Internal DPI Signatures:
+       SQL_INJECTION         — UNION SELECT, error-based, stacked queries, comment bypasses
+       XSS                   — <script>, javascript:, event handlers, SVG/img/iframe vectors
+       CREDENTIAL_LEAK       — passwords, tokens, API keys (scrubbed with [REDACTED] in evidence)
+       CMD_INJECTION         — shell command concatenation, interpreter one-liners, pipe chains
+       PATH_TRAVERSAL        — ../, %2e%2e, absolute system paths (/etc/passwd, win.ini)
+       SSRF                  — loopback, link-local, and cloud metadata (169.254.169.254) targets
+       LOG4SHELL             — ${jndi:} and nested lower/upper obfuscation variants (CVE-2021-44228)
+       XXE                   — <!ENTITY SYSTEM/PUBLIC> XML external entity declarations
+       SSTI                  — Jinja2, Freemarker, Spring EL template injection expressions
+       SHELLSHOCK            — bash function export CVE-2014-6271 patterns in HTTP headers
+       DESERIALIZATION       — Java (0xaced), PHP, Python pickle gadget markers
+       HEADER_INJECTION      — CRLF-encoded Set-Cookie/Location HTTP header splitting
+       SCANNER_PROBE         — sqlmap, nikto, nuclei, masscan, wpscan User-Agents
+       SENSITIVE_FILE_PROBE  — .env, .git/config, id_rsa, wp-config.php access attempts
+       REVERSE_SHELL_CRADLE  — curl|sh, bash -i /dev/tcp, socat, PowerShell cradles
+       HTTP_METHOD_TAMPERING — TRACE, TRACK, WebDAV methods (PROPFIND, SEARCH)
+       WEBSHELL_INJECTION    — PHP/JSP/ASP/Python web shell execution markers (eval, system)
+       ICS_TRISTATION_EXPLOIT— Schneider Electric Triconex TriStation 1131 injection (UDP 1502)
+ 13.  DnsRule (v1.24)                    — Shannon entropy DGA, label length, parent frequency,
+                                           subdomain exfiltration, and hex/base64 chunk tunneling
+ 14.  BruteForceRule (v1.12)             — repeated auth-port SYNs (SSH, FTP, RDP, SMB, MySQL, etc.)
+ 15.  SlowPortScanRule (v1.11)           — low-and-slow horizontal/vertical TCP scan (120s window)
+ 16.  DataExfiltrationRule (v1.20)       — outbound payload volume threshold with web port distinction
+ 17.  TlsAnomalyRule (v1.13)             — TLS ClientHello parsing: direct-IP SNI, obsolete TLS versions
+ 18.  CleartextHttpOnTlsPortRule (v1.11) — repeated cleartext HTTP request verbs on TLS ports (443/8443)
+ 19.  TcpZeroWindowRule (v1.10)          — persistent TCP zero-window (win=0) persist-timer exhaustion
+ 20.  NonDnsTrafficOnDnsPortRule (v1.1)  — non-DNS traffic or interactive command shells on port 53
+ 21.  IcmpTunnelRule (v1.1)              — high-entropy, oversized ICMP echo payload covert channels
+ 22.  IpFragmentAnomalyRule (v1.3)       — Teardrop overlapping fragments and fragment buffer overflows
+ 23.  IrcC2BeaconingRule (v1.3)          — IRC protocol commands and periodic SYN beaconing to IRC ports
 
-MITRE ATT&CK identifiers are not currently part of the alert schema or rule
-configuration. Do not infer a technique mapping from the rule name alone.
-
-False Positive Mitigations:
-  - PortScanRule: ignores hosts whose SOURCE port is a well-known service
-    (servers replying to clients, not scanners).
-  - PortScanRule: only counts SYN packets (new connection attempts).
-  - PortScanRule: severity scales with scan breadth (medium at threshold, high at 2× threshold).
-  - SynFloodRule: only fires on service destination ports (≤ 49151) for SYN floods.
-  - SynFloodRule: RST flood checks aggregate all RSTs from src→dst; fires on very high rates.
-  - Configurable TRUSTED_HOSTS whitelist for TCP/UDP scans, SYN-flood rules,
-    and ICMP sweeps.
-  - Configurable WELL_KNOWN_SERVICE_PORTS set.
-  - DnsRule: whitelists common high-entropy-but-legit CDN patterns (entropy check only).
-  - DnsRule: mDNS (5353) and LLMNR (5355) traffic explicitly excluded.
-  - DnsRule: subdomain exfiltration requires ≥ distinct_subdomain_threshold unique
-    subdomains under one parent domain in a short window; repeated same subdomain not counted.
-  - DnsRule: base64/base32 chunks require mixed case + digits (excludes plain words/UUIDs).
-  - SSTI: requires introspection object access or arithmetic operator (excludes ${VAR} shell env).
-  - CREDENTIAL_LEAK: Bearer token minimum 24 chars (excludes short benign tokens).
-  - BruteForceRule: only fires on known authentication ports; tunable thresholds per-port.
-  - SlowPortScanRule: longer window (default 120s) and higher port threshold to avoid FPs
-    from normal slow browsing patterns.
-  - Stateful rules protect their mutable state with a per-rule lock (§3.8).
-
-Thread safety:
-  Each stateful rule guards its mutable history/table/stream state with a
-  per-rule threading.Lock or threading.RLock so the capture thread (check)
-  and GC thread (prune_stale) cannot race.
+Dispatch & Execution Model:
+  RuleEngine pre-groups candidate rules into `self._rules_by_proto` ("TCP", "UDP", "ICMP", "ICMPV6", "ARP").
+  For each incoming packet, candidate rules are executed sequentially.
+  Generated alerts are enqueued non-blocking to `self._alert_queue` and drained asynchronously
+  by `self._alert_writer` to SQLite or PostgreSQL, with backpressure disk spooling (`AlertSpool`).
 """
 
 import bisect
