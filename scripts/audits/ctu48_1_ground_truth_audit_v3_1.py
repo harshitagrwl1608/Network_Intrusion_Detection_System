@@ -599,30 +599,46 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     generic_label_dist = Counter()
     detailed_label_dist = Counter()
 
-    # Dynamically extract target (src_ip, dst_port) pairs from alert database to index relevant scan flows
+    # Dynamically extract target keys from alert database to index relevant scan flows (both horizontal and vertical)
     cur.execute("""
-        SELECT DISTINCT src_ip, dst_port
+        SELECT DISTINCT src_ip, dst_ip, dst_port, evidence_json
         FROM alerts
         WHERE rule_name IN ('PORT_SCAN', 'SLOW_PORT_SCAN')
-          AND dst_port IS NOT NULL
     """)
-    target_scan_keys = set()
-    for sip, dport in cur.fetchall():
-        try:
-            p = int(dport)
-            if 1 <= p <= 65535 and sip:
-                target_scan_keys.add((sip, p))
-        except (ValueError, TypeError):
-            continue
+    target_horizontal_keys = set()
+    target_vertical_keys = set()
+    for sip, dip, dport, ev_j in cur.fetchall():
+        ev_dict = json.loads(ev_j) if ev_j else {}
+        stype = ev_dict.get("scan_type")
+        if stype == "vertical":
+            if sip and dip:
+                target_vertical_keys.add((sip, dip))
+        elif stype == "horizontal":
+            try:
+                p = int(dport)
+                if 1 <= p <= 65535 and sip:
+                    target_horizontal_keys.add((sip, p))
+            except (ValueError, TypeError):
+                pass
+        else:
+            # Defensively check both if scan_type is absent
+            try:
+                p = int(dport)
+                if 1 <= p <= 65535 and sip:
+                    target_horizontal_keys.add((sip, p))
+            except (ValueError, TypeError):
+                pass
+            if sip and dip:
+                target_vertical_keys.add((sip, dip))
 
-    if not target_scan_keys:
+    if not target_horizontal_keys and not target_vertical_keys:
         raise ValueError(
-            "Validation failure: No eligible scan alert keys (src_ip, dst_port) found in evaluation database; "
+            "Validation failure: No eligible scan alert keys (horizontal or vertical) found in evaluation database; "
             "cannot infer scan targets without alert evidence"
         )
 
     # Index: (orig_h, orig_p, resp_h, resp_p, proto) -> list of (orig_h, orig_p, resp_h, resp_p, proto, ts, end_ts, uid, label, detailed_label)
-    # Stored for TCP traffic matching alert (src_ip, dst_port) pairs
+    # Stored for TCP traffic matching alert targets
     scan_flow_index = defaultdict(list)
     publisher_scan_uids = set()
     scan_flow_start_timestamps = []
@@ -662,17 +678,18 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
 
             # Index only flows with a known duration; unknown-duration records
             # remain in the label inventory but cannot prove packet lifetime overlap.
-            if (rec["end_ts"] is not None
-                    and (rec["orig_h"], rec["resp_p"]) in target_scan_keys
-                    and rec["proto"] == "tcp"):
-                flow_key = (
-                    rec["orig_h"], rec["orig_p"], rec["resp_h"],
-                    rec["resp_p"], rec["proto"]
-                )
-                scan_flow_index[flow_key].append((
-                    rec["orig_h"], rec["orig_p"], rec["resp_h"], rec["resp_p"],
-                    rec["proto"], rec["ts"], rec["end_ts"], uid, lbl, dlbl
-                ))
+            if rec["end_ts"] is not None and rec["proto"] == "tcp":
+                is_horiz = (rec["orig_h"], rec["resp_p"]) in target_horizontal_keys
+                is_vert = (rec["orig_h"], rec["resp_h"]) in target_vertical_keys
+                if is_horiz or is_vert:
+                    flow_key = (
+                        rec["orig_h"], rec["orig_p"], rec["resp_h"],
+                        rec["resp_p"], rec["proto"]
+                    )
+                    scan_flow_index[flow_key].append((
+                        rec["orig_h"], rec["orig_p"], rec["resp_h"], rec["resp_p"],
+                        rec["proto"], rec["ts"], rec["end_ts"], uid, lbl, dlbl
+                    ))
 
     scan_flow_start_timestamps.sort()
     t_zeek = time.time() - t0
@@ -699,13 +716,9 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
     for r in alerts_rows:
         aid, ts, rname, rver, sip, dip, sport, dport, proto, wstart, wend, ev_json = r
         ev = json.loads(ev_json) if ev_json else {}
-        # Defensively preserve raw threshold for strict fail-closed classification
-        raw_thr = ev.get("threshold")
-        if raw_thr is None:
-            thr = 15 if rname == "PORT_SCAN" else 30
-        else:
-            thr = raw_thr
-        scan_type = ev.get("scan_type", "horizontal")
+        # Defensively preserve raw threshold for strict fail-closed classification; do not default
+        thr = ev.get("threshold")
+        scan_type = ev.get("scan_type")
         item = {
             "id": aid,
             "timestamp": ts,
@@ -813,9 +826,13 @@ def run_audit_v3_1(pcap_path: str, zeek_path: str, db_path: str, suricata_dir: s
                 if ascan_type == "vertical":
                     matches_alert = (sip == asrc and dip == adip)
                     target_val = dport
-                else:
+                elif ascan_type == "horizontal":
                     matches_alert = (sip == asrc and dport == adport)
                     target_val = dip
+                else:
+                    # Missing or unknown scan type: fail closed, do not match
+                    matches_alert = False
+                    target_val = None
 
                 if matches_alert:
                     alert_valid_syn_counts[aid] += 1

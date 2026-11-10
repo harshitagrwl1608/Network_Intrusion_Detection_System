@@ -48,6 +48,7 @@ data/blocklist_update.log
 *.pcap
 *.pcapng
 *.cap
+data/ciciot2023_eval/
 # Allow synthetic test attack PCAP fixture
 !ids_project/data/test_attacks.pcap
 !data/test_attacks.pcap
