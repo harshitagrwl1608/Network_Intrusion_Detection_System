@@ -81,3 +81,4 @@ data/external_benchmarks/genis/
 data/external_benchmarks/**/*.zip
 data/external_benchmarks/**/*.pcap
 data/external_benchmarks/**/*.pcapng
+results/final_ground_truth_benchmark_v1_backup/

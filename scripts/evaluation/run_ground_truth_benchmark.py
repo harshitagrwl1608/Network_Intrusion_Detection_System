@@ -34,35 +34,35 @@ if REPO_ROOT not in sys.path:
 from scripts.audits.ctu48_1_ground_truth_audit_v3_1 import PcapParser
 
 ALL_23_RULES = [
-    "ARP_SPOOF",
     "BLOCKLIST",
-    "BRUTE_FORCE",
-    "CLEAR_HTTP_ON_TLS_PORT",
-    "DATA_EXFIL",
+    "TCP_FLAG_ANOMALY",
+    "PORT_SCAN",
+    "UDP_SCAN",
+    "UDP_FLOOD",
+    "TCP_STEALTH_SCAN",
+    "SYN_FLOOD",
     "DISTRIBUTED_SYN_FLOOD",
-    "DNS_ANOMALY",
-    "ICMP_FLOOD",
     "ICMP_SWEEP",
+    "ICMP_FLOOD",
+    "ARP_SPOOF",
+    "PAYLOAD_HIT",
+    "DNS_ANOMALY",
+    "BRUTE_FORCE",
+    "SLOW_PORT_SCAN",
+    "DATA_EXFIL",
+    "TLS_ANOMALY",
+    "CLEAR_HTTP_ON_TLS_PORT",
+    "TCP_ZERO_WINDOW",
+    "NON_DNS_TRAFFIC_ON_DNS_PORT",
     "ICMP_TUNNEL",
     "IP_FRAGMENT_ANOMALY",
     "IRC_C2_BEACONING",
-    "NON_DNS_TRAFFIC_ON_DNS_PORT",
-    "PAYLOAD_HIT",
-    "PORT_SCAN",
-    "SLOW_PORT_SCAN",
-    "SYN_FLOOD",
-    "TCP_FLAG_ANOMALY",
-    "TCP_ZERO_WINDOW",
-    "TLS_ANOMALY",
-    "UDP_FLOOD",
-    "UDP_SCAN",
-    "WEBSHELL_INJECTION",  # Sub-category or 23rd distinct rule slot
 ]
 
 # Rule to Ground-Truth Label Mapping (GeNIS & similar flow benchmarks)
 LABEL_TO_RULES_MAP = {
     "recon-dns": ["DNS_ANOMALY"],
-    "recon-nmap": ["PORT_SCAN", "SLOW_PORT_SCAN", "TCP_STEALTH_SCAN", "TCP_FLAG_ANOMALY"],
+    "recon-nmap": ["PORT_SCAN", "SLOW_PORT_SCAN", "TCP_STEALTH_SCAN", "TCP_FLAG_ANOMALY", "ICMP_SWEEP"],
     "bruteforce-ssh": ["BRUTE_FORCE"],
     "bruteforce-ftp": ["BRUTE_FORCE"],
     "bruteforce-smb": ["BRUTE_FORCE"],
@@ -783,7 +783,7 @@ def main():
     parser = argparse.ArgumentParser(description="NetGuard IDS Final Ground-Truth Benchmark Runner")
     parser.add_argument(
         "--manifest",
-        required=True,
+        default=os.path.join(REPO_ROOT, "data/external_benchmarks/ground_truth/manifest.csv"),
         help="Path to manifest CSV describing the benchmark captures",
     )
     parser.add_argument(
@@ -802,8 +802,14 @@ def main():
         help="Directory to cache converted classic libpcap files",
     )
     parser.add_argument("--dry-run", action="store_true", help="Verify files and manifest without running replays")
+    parser.add_argument("--rescore-only", action="store_true", help="Re-score alerts offline without replaying PCAPs")
     parser.add_argument("--only", type=str, default=None, help="Run only a single capture ID")
     args = parser.parse_args()
+
+    if args.rescore_only:
+        from scripts.evaluation.rescore_benchmark import rescore_all
+        rescore_all(args.output)
+        return
 
     manifest_path = os.path.abspath(args.manifest)
     if not os.path.exists(manifest_path):
