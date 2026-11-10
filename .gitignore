@@ -73,3 +73,9 @@ stats.log
 ._*
 Thumbs.db
 results/real_world_evaluation/arp_tables/
+# External benchmark datasets (keep raw captures and archives out of Git)
+data/external_benchmarks/archives/
+data/external_benchmarks/genis/
+data/external_benchmarks/**/*.zip
+data/external_benchmarks/**/*.pcap
+data/external_benchmarks/**/*.pcapng

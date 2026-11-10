@@ -1,14 +1,23 @@
-rule_name,total_alerts,attack_alerts,benign_alerts,captures_fired_count,captures_list
-ARP_SPOOF,117,117,0,1,ciciot_bruteforce
-BRUTE_FORCE,21,21,0,1,ciciot_bruteforce
-DATA_EXFIL,7,7,0,3,ciciot_pingsweep;ciciot_browserhijack;ciciot_bruteforce
-DNS_ANOMALY,34,34,0,6,ciciot_pingsweep;ciciot_sqli;ciciot_xss;ciciot_browserhijack;ciciot_bruteforce;attack_ws_dns_remoteshell
-ICMP_SWEEP,1,1,0,1,ciciot_pingsweep
-IP_FRAGMENT_ANOMALY,1,1,0,1,attack_ws_teardrop
-NON_DNS_TRAFFIC_ON_DNS_PORT,2,2,0,2,ciciot_cmdinj;attack_ws_dns_remoteshell
-PAYLOAD_HIT,78,78,0,7,ciciot_pingsweep;ciciot_sqli;ciciot_xss;ciciot_cmdinj;ciciot_upload;ciciot_bruteforce;attack_foxit_log4shell
-PORT_SCAN,1,1,0,1,attack_ws_nmap_stealth
-SLOW_PORT_SCAN,1,1,0,1,attack_ws_nmap_stealth
-SYN_FLOOD,2,2,0,2,ciciot_bruteforce;attack_oisf_syn_flood
-TCP_FLAG_ANOMALY,1,1,0,1,attack_ws_nmap_stealth
-UDP_FLOOD,1,1,0,1,ciciot_browserhijack
+rule_name,test_status,total_alerts,attack_alerts,benign_alerts,captures_fired_count,captures_list,notes
+ARP_SPOOF,fired,117,117,0,1,ciciot_bruteforce,Gateway MAC takeover detected in ciciot_bruteforce; did not fire in ws_arp_storm (storm of new IPs rather than cache poisoning)
+BRUTE_FORCE,fired,21,21,0,1,ciciot_bruteforce,SSH auth port 22 connection bursts detected in ciciot_bruteforce; did not fire in iot23_hakai (pre-existing established session)
+DATA_EXFIL,fired,7,7,0,3,ciciot_pingsweep;ciciot_browserhijack;ciciot_bruteforce,Outbound payload transfers >= 1 MB in 30s to external hosts
+DNS_ANOMALY,fired,34,34,0,6,ciciot_pingsweep;ciciot_sqli;ciciot_xss;ciciot_browserhijack;ciciot_bruteforce;attack_ws_dns_remoteshell,High-frequency query bursts (DNS_FREQ) and high-entropy domain labels (DNS_DGA)
+ICMP_SWEEP,fired,1,1,0,1,ciciot_pingsweep,ICMP echo requests to 12 distinct hosts in 10s detected in ciciot_pingsweep
+IP_FRAGMENT_ANOMALY,fired,1,1,0,1,attack_ws_teardrop,Teardrop overlapping IP fragment reassembly anomaly (critical alert)
+NON_DNS_TRAFFIC_ON_DNS_PORT,fired,2,2,0,2,ciciot_cmdinj;attack_ws_dns_remoteshell,Interactive command shell data ('whoami') observed on UDP/TCP port 53
+PAYLOAD_HIT,fired,78,78,0,7,ciciot_pingsweep;ciciot_sqli;ciciot_xss;ciciot_cmdinj;ciciot_upload;ciciot_bruteforce;attack_foxit_log4shell,DPI signatures: SQL_INJECTION, XSS, CMD_INJECTION, WEBSHELL_INJECTION, PATH_TRAVERSAL, SCANNER_PROBE, LOG4SHELL
+PORT_SCAN,fired,1,1,0,1,attack_ws_nmap_stealth,TCP SYN port scan detected in ws_nmap_stealth_scan; did not fire in iot23_hakai
+SLOW_PORT_SCAN,fired,1,1,0,1,attack_ws_nmap_stealth,Low-and-slow vertical/horizontal TCP scan pattern across 120s window
+SYN_FLOOD,fired,2,2,0,2,ciciot_bruteforce;attack_oisf_syn_flood,High-frequency TCP SYN bursts without ACK completion
+TCP_FLAG_ANOMALY,fired,1,1,0,1,attack_ws_nmap_stealth,Invalid TCP flag combinations violating RFC 793 (SYN-FIN / NULL / XMAS)
+UDP_FLOOD,fired,1,1,0,1,ciciot_browserhijack,High-rate UDP datagram burst targeting dynamic ports during browser redirection
+TLS_ANOMALY,present_did_not_fire,0,0,0,0,,Present in oisf_tls_sni_anomaly test capture on port 4463; did not exceed standard TLS inspection thresholds
+BLOCKLIST,not_exercised,0,0,0,0,,Test blocklist IOCs not present in capture traffic
+CLEAR_HTTP_ON_TLS_PORT,not_exercised,0,0,0,0,,No cleartext HTTP requests targeting TLS port 443 present in corpus
+DISTRIBUTED_SYN_FLOOD,not_exercised,0,0,0,0,,No multi-source coordinated SYN flood across subnets present in corpus
+ICMP_FLOOD,not_exercised,0,0,0,0,,Ping sweeps had low packet rates; no high-rate volumetric ICMP flood present
+ICMP_TUNNEL,not_exercised,0,0,0,0,,Candidate capture used raw IPv4 (linktype 228); excluded from Ethernet replay
+IRC_C2_BEACONING,not_exercised,0,0,0,0,,IRC traffic in ws_skype_irc was benign human chat without periodic beaconing pattern
+TCP_ZERO_WINDOW,not_exercised,0,0,0,0,,No persistent TCP zero-window advertisement exhaustion traffic present in corpus
+UDP_SCAN,not_exercised,0,0,0,0,,No dedicated UDP port scan captures present in corpus
