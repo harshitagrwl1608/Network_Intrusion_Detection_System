@@ -1,0 +1,469 @@
+{
+  "benchmark_timestamp_utc": "2026-11-10T11:45:42Z",
+  "total_captures": 22,
+  "total_extracted_bytes": 3481833419,
+  "total_extracted_gib": 3.243,
+  "total_packets": 37532459,
+  "total_elapsed_seconds": 3001.16,
+  "average_throughput_pps": 12506.0,
+  "total_alerts": 582,
+  "total_true_positives": 175,
+  "total_false_positives": 137,
+  "total_unscorable_incidental": 7,
+  "total_unmatched_in_attack": 0,
+  "captures": [
+    {
+      "capture_id": "genis_attack_bruteforce_smb",
+      "name": "GeNIS attack-bruteforce-smb.pcapng",
+      "family": "GeNIS",
+      "category": "attack",
+      "scenario": "attack-bruteforce-smb",
+      "original_format": "pcapng",
+      "file_size_bytes": 14414261,
+      "packet_count": 112000,
+      "elapsed_seconds": 16.911,
+      "throughput_pps": 6622.9,
+      "alert_count": 8,
+      "tp_count": 4,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "PORT_SCAN": 1,
+        "SLOW_PORT_SCAN": 1,
+        "BRUTE_FORCE": 2,
+        "SYN_FLOOD": 4
+      }
+    },
+    {
+      "capture_id": "genis_attack_bruteforce_ssh_ftp",
+      "name": "GeNIS attack-bruteforce-ssh-ftp.pcapng",
+      "family": "GeNIS",
+      "category": "attack",
+      "scenario": "attack-bruteforce-ssh-ftp",
+      "original_format": "pcapng",
+      "file_size_bytes": 26488445,
+      "packet_count": 213000,
+      "elapsed_seconds": 33.748,
+      "throughput_pps": 6311.5,
+      "alert_count": 70,
+      "tp_count": 69,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "ICMP_SWEEP": 1,
+        "PORT_SCAN": 16,
+        "SLOW_PORT_SCAN": 2,
+        "BRUTE_FORCE": 51
+      }
+    },
+    {
+      "capture_id": "genis_attack_bruteforce_ssh",
+      "name": "GeNIS attack-bruteforce-ssh.pcapng",
+      "family": "GeNIS",
+      "category": "attack",
+      "scenario": "attack-bruteforce-ssh",
+      "original_format": "pcapng",
+      "file_size_bytes": 16935442,
+      "packet_count": 88000,
+      "elapsed_seconds": 10.587,
+      "throughput_pps": 8312.2,
+      "alert_count": 74,
+      "tp_count": 74,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "PORT_SCAN": 1,
+        "SLOW_PORT_SCAN": 1,
+        "BRUTE_FORCE": 72
+      }
+    },
+    {
+      "capture_id": "genis_attack_dos_hulk",
+      "name": "GeNIS attack-dos-hulk.pcapng",
+      "family": "GeNIS",
+      "category": "attack",
+      "scenario": "attack-dos-hulk",
+      "original_format": "pcapng",
+      "file_size_bytes": 155587615,
+      "packet_count": 586000,
+      "elapsed_seconds": 194.329,
+      "throughput_pps": 3015.5,
+      "alert_count": 14,
+      "tp_count": 14,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "PORT_SCAN": 2,
+        "SLOW_PORT_SCAN": 2,
+        "SYN_FLOOD": 9,
+        "PAYLOAD_HIT": 1
+      }
+    },
+    {
+      "capture_id": "genis_attack_dos_icmp",
+      "name": "GeNIS attack-dos-icmp.pcapng",
+      "family": "GeNIS",
+      "category": "attack",
+      "scenario": "attack-dos-icmp",
+      "original_format": "pcapng",
+      "file_size_bytes": 1151227220,
+      "packet_count": 15000000,
+      "elapsed_seconds": 745.497,
+      "throughput_pps": 20120.8,
+      "alert_count": 3,
+      "tp_count": 3,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "PORT_SCAN": 1,
+        "SLOW_PORT_SCAN": 1,
+        "ICMP_FLOOD": 1
+      }
+    },
+    {
+      "capture_id": "genis_attack_dos_pushack",
+      "name": "GeNIS attack-dos-pushack.pcapng",
+      "family": "GeNIS",
+      "category": "attack",
+      "scenario": "attack-dos-pushack",
+      "original_format": "pcapng",
+      "file_size_bytes": 776433304,
+      "packet_count": 10000000,
+      "elapsed_seconds": 865.088,
+      "throughput_pps": 11559.5,
+      "alert_count": 4,
+      "tp_count": 4,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "PORT_SCAN": 1,
+        "SLOW_PORT_SCAN": 1,
+        "SYN_FLOOD": 2
+      }
+    },
+    {
+      "capture_id": "genis_attack_dos_slowloris",
+      "name": "GeNIS attack-dos-slowloris.pcapng",
+      "family": "GeNIS",
+      "category": "attack",
+      "scenario": "attack-dos-slowloris",
+      "original_format": "pcapng",
+      "file_size_bytes": 83478476,
+      "packet_count": 701000,
+      "elapsed_seconds": 300.758,
+      "throughput_pps": 2330.8,
+      "alert_count": 6,
+      "tp_count": 4,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "PORT_SCAN": 2,
+        "SLOW_PORT_SCAN": 2,
+        "SYN_FLOOD": 2
+      }
+    },
+    {
+      "capture_id": "genis_attack_dos_udp",
+      "name": "GeNIS attack-dos-udp.pcapng",
+      "family": "GeNIS",
+      "category": "attack",
+      "scenario": "attack-dos-udp",
+      "original_format": "pcapng",
+      "file_size_bytes": 773355328,
+      "packet_count": 10000000,
+      "elapsed_seconds": 690.973,
+      "throughput_pps": 14472.4,
+      "alert_count": 3,
+      "tp_count": 3,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "PORT_SCAN": 1,
+        "SLOW_PORT_SCAN": 1,
+        "UDP_FLOOD": 1
+      }
+    },
+    {
+      "capture_id": "genis_benign_admin_activity",
+      "name": "GeNIS benign-admin-activity.pcapng",
+      "family": "GeNIS",
+      "category": "benign",
+      "scenario": "benign_activity",
+      "original_format": "pcapng",
+      "file_size_bytes": 1363323,
+      "packet_count": 8908,
+      "elapsed_seconds": 4.672,
+      "throughput_pps": 1906.8,
+      "alert_count": 43,
+      "tp_count": 0,
+      "fp_count": 43,
+      "rule_breakdown": {
+        "DNS_ANOMALY": 43
+      }
+    },
+    {
+      "capture_id": "genis_benign_background_activity",
+      "name": "GeNIS benign-background-activity.pcapng",
+      "family": "GeNIS",
+      "category": "benign",
+      "scenario": "benign_activity",
+      "original_format": "pcapng",
+      "file_size_bytes": 27731753,
+      "packet_count": 112000,
+      "elapsed_seconds": 15.589,
+      "throughput_pps": 7184.4,
+      "alert_count": 42,
+      "tp_count": 0,
+      "fp_count": 42,
+      "rule_breakdown": {
+        "DNS_ANOMALY": 42
+      }
+    },
+    {
+      "capture_id": "genis_benign_user_activity",
+      "name": "GeNIS benign-user-activity.pcapng",
+      "family": "GeNIS",
+      "category": "benign",
+      "scenario": "benign_activity",
+      "original_format": "pcapng",
+      "file_size_bytes": 313811336,
+      "packet_count": 316000,
+      "elapsed_seconds": 33.938,
+      "throughput_pps": 9311.2,
+      "alert_count": 52,
+      "tp_count": 0,
+      "fp_count": 52,
+      "rule_breakdown": {
+        "PORT_SCAN": 44,
+        "PAYLOAD_HIT": 8
+      }
+    },
+    {
+      "capture_id": "benign_iot23_doorlock",
+      "name": "IoT-23 Honeypot Somfy Doorlock",
+      "family": "CTU-IoT-23",
+      "category": "benign",
+      "scenario": "benign_iot_hardware",
+      "original_format": "pcap",
+      "file_size_bytes": 4594492,
+      "packet_count": 21000,
+      "elapsed_seconds": 5.804,
+      "throughput_pps": 3618.1,
+      "alert_count": 0,
+      "tp_count": 0,
+      "fp_count": 0,
+      "rule_breakdown": {}
+    },
+    {
+      "capture_id": "ciciot_pingsweep",
+      "name": "CICIoT2023 Recon-PingSweep",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "scenario": "recon_pingsweep",
+      "original_format": "pcap",
+      "file_size_bytes": 7853566,
+      "packet_count": 22000,
+      "elapsed_seconds": 6.406,
+      "throughput_pps": 3434.5,
+      "alert_count": 9,
+      "tp_count": 0,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "PAYLOAD_HIT": 1,
+        "DNS_ANOMALY": 6,
+        "ICMP_SWEEP": 1,
+        "DATA_EXFIL": 1
+      }
+    },
+    {
+      "capture_id": "ciciot_sqli",
+      "name": "CICIoT2023 SqlInjection",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "scenario": "web_sqli",
+      "original_format": "pcap",
+      "file_size_bytes": 9823016,
+      "packet_count": 53000,
+      "elapsed_seconds": 10.618,
+      "throughput_pps": 4991.7,
+      "alert_count": 69,
+      "tp_count": 0,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "DNS_ANOMALY": 23,
+        "PAYLOAD_HIT": 46
+      }
+    },
+    {
+      "capture_id": "ciciot_xss",
+      "name": "CICIoT2023 XSS",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "scenario": "web_xss",
+      "original_format": "pcap",
+      "file_size_bytes": 12571710,
+      "packet_count": 40000,
+      "elapsed_seconds": 8.709,
+      "throughput_pps": 4593.0,
+      "alert_count": 20,
+      "tp_count": 0,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "PAYLOAD_HIT": 19,
+        "DNS_ANOMALY": 1
+      }
+    },
+    {
+      "capture_id": "ciciot_cmdinj",
+      "name": "CICIoT2023 CommandInjection",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "scenario": "web_command_injection",
+      "original_format": "pcap",
+      "file_size_bytes": 28585606,
+      "packet_count": 55000,
+      "elapsed_seconds": 9.8,
+      "throughput_pps": 5612.0,
+      "alert_count": 2,
+      "tp_count": 0,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "PAYLOAD_HIT": 1,
+        "NON_DNS_TRAFFIC_ON_DNS_PORT": 1
+      }
+    },
+    {
+      "capture_id": "ciciot_upload",
+      "name": "CICIoT2023 Uploading_Attack",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "scenario": "web_upload_webshell",
+      "original_format": "pcap",
+      "file_size_bytes": 3326177,
+      "packet_count": 12000,
+      "elapsed_seconds": 5.414,
+      "throughput_pps": 2216.5,
+      "alert_count": 8,
+      "tp_count": 0,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "PAYLOAD_HIT": 8
+      }
+    },
+    {
+      "capture_id": "ciciot_browserhijack",
+      "name": "CICIoT2023 BrowserHijacking",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "scenario": "web_browser_hijack",
+      "original_format": "pcap",
+      "file_size_bytes": 35038616,
+      "packet_count": 59000,
+      "elapsed_seconds": 10.613,
+      "throughput_pps": 5559.1,
+      "alert_count": 3,
+      "tp_count": 0,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "DNS_ANOMALY": 1,
+        "DATA_EXFIL": 1,
+        "UDP_FLOOD": 1
+      }
+    },
+    {
+      "capture_id": "ciciot_bruteforce",
+      "name": "CICIoT2023 DictionaryBruteForce",
+      "family": "CICIoT2023",
+      "category": "attack",
+      "scenario": "auth_bruteforce",
+      "original_format": "pcap",
+      "file_size_bytes": 39130622,
+      "packet_count": 133000,
+      "elapsed_seconds": 20.624,
+      "throughput_pps": 6448.8,
+      "alert_count": 147,
+      "tp_count": 0,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "ARP_SPOOF": 117,
+        "BRUTE_FORCE": 21,
+        "DATA_EXFIL": 5,
+        "PAYLOAD_HIT": 2,
+        "DNS_ANOMALY": 1,
+        "SYN_FLOOD": 1
+      }
+    },
+    {
+      "capture_id": "attack_ws_teardrop",
+      "name": "Wireshark Teardrop IP Exploit",
+      "family": "Wireshark-Sample",
+      "category": "attack",
+      "scenario": "ip_fragment_overlap",
+      "original_format": "pcap",
+      "file_size_bytes": 1828,
+      "packet_count": 17,
+      "elapsed_seconds": 3.609,
+      "throughput_pps": 4.7,
+      "alert_count": 1,
+      "tp_count": 0,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "IP_FRAGMENT_ANOMALY": 1
+      }
+    },
+    {
+      "capture_id": "attack_ws_dns_remoteshell",
+      "name": "Wireshark DNS Remote Shell",
+      "family": "Wireshark-Sample",
+      "category": "attack",
+      "scenario": "dns_port_backdoor",
+      "original_format": "pcap",
+      "file_size_bytes": 25005,
+      "packet_count": 131,
+      "elapsed_seconds": 3.734,
+      "throughput_pps": 35.1,
+      "alert_count": 3,
+      "tp_count": 0,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "NON_DNS_TRAFFIC_ON_DNS_PORT": 1,
+        "DNS_ANOMALY": 2
+      }
+    },
+    {
+      "capture_id": "attack_foxit_log4shell",
+      "name": "Fox-IT Log4Shell JNDI RCE Exploit",
+      "family": "Fox-IT",
+      "category": "attack",
+      "scenario": "log4shell_jndi_rce",
+      "original_format": "pcap",
+      "file_size_bytes": 56278,
+      "packet_count": 403,
+      "elapsed_seconds": 3.74,
+      "throughput_pps": 107.7,
+      "alert_count": 1,
+      "tp_count": 0,
+      "fp_count": 0,
+      "rule_breakdown": {
+        "PAYLOAD_HIT": 1
+      }
+    }
+  ],
+  "all_23_rules_status": {
+    "ARP_SPOOF": "exercised_unscorable",
+    "BLOCKLIST": "not_exercised",
+    "BRUTE_FORCE": "exercised_with_tp",
+    "CLEAR_HTTP_ON_TLS_PORT": "not_exercised",
+    "DATA_EXFIL": "exercised_unscorable",
+    "DISTRIBUTED_SYN_FLOOD": "not_exercised",
+    "DNS_ANOMALY": "exercised_with_fp",
+    "ICMP_FLOOD": "exercised_with_tp",
+    "ICMP_SWEEP": "exercised_unscorable",
+    "ICMP_TUNNEL": "not_exercised",
+    "IP_FRAGMENT_ANOMALY": "exercised_unscorable",
+    "IRC_C2_BEACONING": "not_exercised",
+    "NON_DNS_TRAFFIC_ON_DNS_PORT": "exercised_unscorable",
+    "PAYLOAD_HIT": "exercised_with_tp",
+    "PORT_SCAN": "exercised_with_tp",
+    "SLOW_PORT_SCAN": "exercised_with_tp",
+    "SYN_FLOOD": "exercised_with_tp",
+    "TCP_FLAG_ANOMALY": "not_exercised",
+    "TCP_ZERO_WINDOW": "not_exercised",
+    "TLS_ANOMALY": "not_exercised",
+    "UDP_FLOOD": "exercised_with_tp",
+    "UDP_SCAN": "not_exercised",
+    "WEBSHELL_INJECTION": "not_exercised"
+  }
+}
