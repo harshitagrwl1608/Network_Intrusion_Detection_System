@@ -44,6 +44,11 @@ python3 scripts/evaluation/run_ground_truth_benchmark.py \
 To execute the complete replay, flow-level and scenario-level ground truth scoring, and report generation under complete process and state isolation:
 
 ```bash
+# Option A (Recommended — runs from any terminal directory):
+/home/harshitgarg/Downloads/Networking_Project/scripts/evaluation/run_ground_truth_benchmark.sh
+
+# Option B (From repository root):
+cd /home/harshitgarg/Downloads/Networking_Project
 python3 scripts/evaluation/run_ground_truth_benchmark.py \
     --manifest data/external_benchmarks/ground_truth/manifest.csv \
     --output results/final_ground_truth_benchmark
