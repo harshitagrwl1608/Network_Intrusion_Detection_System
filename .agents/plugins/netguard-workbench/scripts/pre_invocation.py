@@ -20,7 +20,7 @@ def main():
     reminder = (
         "NetGuard Workbench Invariants: "
         "Rule Governance (every rule distinct, justified, tested, maintainable) | "
-        "Authorized branch 'antigravity/overnight-work' | "
+        "Authorized branch 'antigravity/dashboard-forensics' | "
         "Network telemetry boundary: packet PCAP over endpoint EVTX."
     )
 

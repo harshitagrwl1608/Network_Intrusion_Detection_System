@@ -1,12 +1,12 @@
 # NetGuard IDS — Engineering Invariants and Guardrails
 
 ## 1. Branch and Git Discipline
-- **Authorized Branch**: `antigravity/overnight-work`
+- **Authorized Branch**: `antigravity/dashboard-forensics`
 - **Strict Invariants**:
   - Never commit directly to `main` or push to `main`.
   - Never force-push (`git push -f`) or delete branches.
   - Never destructively reset (`git reset --hard`) without absolute safety verification.
-  - Push only to `origin/antigravity/overnight-work`.
+  - Push only to `origin/antigravity/dashboard-forensics`.
 
 ## 2. Core Detection Governance: Distinct, Justified & Tested Rules
 - **Rule Governance Policy**: The historical 19-rule limit is retired. There is NO predetermined maximum or target number of detection rules. Every registered rule must provide distinct, justified, tested, and maintainable detection value.
