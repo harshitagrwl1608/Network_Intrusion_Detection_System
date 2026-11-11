@@ -7072,8 +7072,11 @@ class RuleEngine:
             "alerts_spooled": 0,
             "spool_recoveries": 0,
             "shutdown_timeout": False,
+            "packets_checked": 0,
+            "check_errors": 0,
         }
         self._stop_event = threading.Event()
+        self._alert_sink = None
 
         self._alert_writer = threading.Thread(
             target=self._alert_writer_loop, daemon=True, name="alert-writer"
@@ -7092,6 +7095,10 @@ class RuleEngine:
 
         import atexit
         atexit.register(self.flush)
+
+    def set_alert_sink(self, sink):
+        """Register an optional synchronous alert callback (e.g. for testing or real-time streaming)."""
+        self._alert_sink = sink
 
     def prune_stale(self, now: float = None):
         """
@@ -7400,7 +7407,12 @@ class RuleEngine:
             f"devices_dropped={self._stats['devices_dropped']}"
         )
 
+    def get_stats(self) -> dict:
+        """Return a copy of current engine statistics."""
+        return dict(self._stats)
+
     def check(self, record: dict):
+        self._stats["packets_checked"] += 1
         # Device refresh: enqueue device write on first-seen OR after the
         # refresh interval has elapsed so last_seen stays current.
         mac = record.get("src_mac")
@@ -7460,6 +7472,11 @@ class RuleEngine:
                             f"{alert.get('timestamp')}:{uuid.uuid4().hex[:8]}"
                         )
                     import queue as _queue
+                    if self._alert_sink is not None:
+                        try:
+                            self._alert_sink(alert)
+                        except Exception as e:
+                            logger.error(f"Alert sink callback error: {e}")
                     try:
                         self._alert_queue.put_nowait(("alert", alert))
                     except _queue.Full:

@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     country     TEXT,
     country_code TEXT,
     city        TEXT,
-    idempotency_key TEXT
+    idempotency_key TEXT,
+    flow_id     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS observations (
@@ -100,7 +101,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     country     TEXT,
     country_code TEXT,
     city        TEXT,
-    idempotency_key TEXT
+    idempotency_key TEXT,
+    flow_id     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS observations (
@@ -176,6 +178,14 @@ def init_db(conn):
         conn.commit()
         cur.close()
 
+    # Initialise forensics tables, indexes, and correlation columns
+    try:
+        from storage.forensics_db import init_forensics_db
+        init_forensics_db(conn)
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning(f"Forensics DB init note: {exc}")
+
 
 def _migrate_columns(conn, cur):
     """Add new columns to existing databases without dropping data."""
@@ -238,18 +248,20 @@ def write_alert(conn, alert: dict):
             src_ip, dst_ip, src_port, dst_port, protocol,
             detail, severity, confidence,
             evidence_json, window_start, window_end,
-            country, country_code, city, idempotency_key
+            country, country_code, city, idempotency_key,
+            flow_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """ if config.DB_BACKEND == "sqlite" else """
         INSERT INTO alerts (
             timestamp, rule_name, rule_version,
             src_ip, dst_ip, src_port, dst_port, protocol,
             detail, severity, confidence,
             evidence_json, window_start, window_end,
-            country, country_code, city, idempotency_key
+            country, country_code, city, idempotency_key,
+            flow_id
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (idempotency_key) DO NOTHING
     """
     values = (
@@ -271,6 +283,7 @@ def write_alert(conn, alert: dict):
         alert.get("country_code"),
         alert.get("city"),
         alert.get("idempotency_key") or alert.get("uuid"),
+        alert.get("flow_id"),
     )
     with _sqlite_lock:
         cur = conn.cursor()
@@ -567,8 +580,17 @@ def read_feedback(conn, limit: int = 100) -> list[dict]:
 
 
 def feedback_stats(conn) -> dict:
-    """Return TP/FP counts per rule for the tuning summary."""
-    sql = "SELECT rule_name, classification, COUNT(*) as cnt FROM feedback GROUP BY rule_name, classification"
+    """Return TP/FP counts per rule for the tuning summary, using the latest classification per alert."""
+    sql = (
+        "WITH latest_feedback AS ("
+        "  SELECT alert_id, rule_name, classification, "
+        "         ROW_NUMBER() OVER (PARTITION BY alert_id ORDER BY timestamp DESC, id DESC) as rn "
+        "  FROM feedback"
+        ") "
+        "SELECT rule_name, classification, COUNT(*) as cnt "
+        "FROM latest_feedback WHERE rn = 1 "
+        "GROUP BY rule_name, classification"
+    )
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(sql)

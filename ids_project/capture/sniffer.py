@@ -37,6 +37,7 @@ import os
 import hashlib
 import struct
 import socket
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -351,7 +352,15 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
     return None  # ignore non-IP, non-ARP packets
 
 
-def start_sniff(interface: str, rule_engine, packet_filter: str = "ip or ip6 or arp"):
+def start_sniff(
+    interface: str,
+    rule_engine,
+    packet_filter: str = "ip or ip6 or arp",
+    metrics: Any = None,
+    count: int = 0,
+    timeout: int | None = None,
+    stop_filter: Any = None,
+):
     """
     Start live packet capture on `interface`.
     Hands each packet to rule_engine.check() after extraction.
@@ -363,28 +372,72 @@ def start_sniff(interface: str, rule_engine, packet_filter: str = "ip or ip6 or 
         interface:     Network interface name (e.g. "eth0", "wlan0")
         rule_engine:   RuleEngine instance with a .check(record) method
         packet_filter: BPF filter string (default captures IPv4, IPv6, and ARP)
+        metrics:       Optional PacketProcessingMetrics instance (uses global if None)
+        count:         Number of packets to capture (0 = infinity)
+        timeout:       Stop capture after timeout seconds
+        stop_filter:   Optional callback pkt -> bool to stop capture
     """
     if not SCAPY_AVAILABLE:
         raise RuntimeError("Scapy is not installed")
 
+    from capture.metrics import get_active_metrics, set_active_metrics, PacketProcessingMetrics
+    if metrics is None:
+        metrics = get_active_metrics()
+    else:
+        set_active_metrics(metrics)
+
     logger.info(f"Starting capture on interface '{interface}' (filter: '{packet_filter}')")
     logger.info("Press Ctrl+C to stop.")
 
+    if not metrics.is_reporter_running():
+        metrics.start_reporter(interval_s=1.0)
+
     def _handle(pkt):
+        t0 = time.perf_counter()
+        metrics.record_callback()
+
         try:
             # capture_ts=None → _extract() uses pkt.time (kernel timestamp)
             record = _extract(pkt, capture_ts=None)
-            if record:
-                rule_engine.check(record)
-        except Exception as e:
-            logger.error(f"Packet handling error: {e}")
+        except Exception as exc:
+            metrics.record_extraction_exception(exc)
+            logger.error(f"Packet extraction error: {exc}")
+            return
 
-    sniff(
-        iface=interface,
-        prn=_handle,
-        filter=packet_filter,
-        store=False,       # don't buffer packets in memory
-    )
+        if record is None:
+            metrics.record_ignored()
+            return
+
+        metrics.record_extraction_success()
+        metrics.record_engine_submission()
+
+        try:
+            rule_engine.check(record)
+            duration = time.perf_counter() - t0
+            metrics.record_check_completed(duration)
+        except Exception as exc:
+            duration = time.perf_counter() - t0
+            metrics.record_engine_exception(exc, duration)
+            logger.error(f"Detection engine check error: {exc}")
+
+    try:
+        sniff_kwargs = {
+            "iface": interface,
+            "prn": _handle,
+            "filter": packet_filter,
+            "store": False,       # don't buffer packets in memory
+        }
+        if count > 0:
+            sniff_kwargs["count"] = count
+        if timeout is not None:
+            sniff_kwargs["timeout"] = timeout
+        if stop_filter is not None:
+            sniff_kwargs["stop_filter"] = stop_filter
+
+        sniff(**sniff_kwargs)
+    finally:
+        metrics.stop_reporter()
+        logger.info(metrics.format_summary())
 
 
 def _parse_tcpdump_endpoint(ep: str):

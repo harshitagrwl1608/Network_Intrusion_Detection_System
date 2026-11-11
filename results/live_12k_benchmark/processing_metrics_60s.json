@@ -1,0 +1,49 @@
+{
+  "run_name": "60s",
+  "target_duration_s": 60,
+  "target_rate_pps": 12000,
+  "actual_elapsed_s": 63.872,
+  "comparison_metrics": {
+    "tcpreplay_transmitted_packets": 720000,
+    "veth_rx_interface_rx_packets": 720000,
+    "scapy_callback_packets": 35855,
+    "successfully_extracted_packets": 35855,
+    "completed_rule_engine_checks": 35855
+  },
+  "drop_and_loss_analysis": {
+    "interface_to_callback_gap": 684145,
+    "interface_loss_rate_pct": 95.02,
+    "extraction_drop_count": 0,
+    "engine_drop_count": 0
+  },
+  "throughput": {
+    "callback_pps_avg": 561.36,
+    "callback_pps_current": 0.0,
+    "callback_pps_peak": 1386.37,
+    "extraction_pps_avg": 561.36,
+    "extraction_pps_current": 0.0,
+    "extraction_pps_peak": 1386.37,
+    "engine_pps_avg": 561.36,
+    "engine_pps_current": 0.0,
+    "engine_pps_peak": 1386.37
+  },
+  "latency": {
+    "total_processing_time_seconds": 20.202734,
+    "avg_latency_us": 563.46,
+    "avg_latency_ms": 0.5635,
+    "p50_latency_us": 542.05,
+    "p95_latency_us": 969.49,
+    "p95_latency_ms": 0.9695,
+    "p99_latency_us": 2400.74,
+    "p99_latency_ms": 2.4007,
+    "max_latency_us": 15541.76,
+    "max_latency_ms": 15.5418
+  },
+  "resource_averages": {
+    "avg_process_cpu_pct": 90.5,
+    "peak_process_cpu_pct": 100.3,
+    "avg_system_cpu_pct": 88.54,
+    "avg_process_rss_mb": 83.58,
+    "peak_process_rss_mb": 83.81
+  }
+}

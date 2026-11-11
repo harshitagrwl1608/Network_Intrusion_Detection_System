@@ -23,6 +23,11 @@ import json
 import logging
 import ipaddress
 import threading
+import uuid
+import csv
+import io
+import struct
+import secrets
 
 # Allow imports from project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -37,9 +42,28 @@ from storage.db import (
     write_feedback, read_feedback, feedback_stats
 )
 from analysis.aggregator import run_analysis, compute_threat_level
+from engine.rule_metadata import get_rule_metadata_inventory, RULE_METADATA
+from storage.forensics_db import write_audit_log
+from analytics.baselines import BaselineEngine
+from notifications.outbox import NotificationOutboxManager
+from reports.generator import ReportGenerator, REPORT_TYPES
+from forensics.offline_analyzer import OfflinePcapAnalyzer
+from parallel.profile import get_system_capabilities, select_performance_profile
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
+
+_baseline_engine = BaselineEngine()
+_outbox_manager = NotificationOutboxManager()
+_offline_analyzer = None
+_csrf_token = secrets.token_hex(16)
+_app_start_time = time.time()
+
+def get_offline_analyzer():
+    global _offline_analyzer
+    if _offline_analyzer is None:
+        _offline_analyzer = OfflinePcapAnalyzer(main_conn=get_db())
+    return _offline_analyzer
 
 # ---------------------------------------------------------------------------
 # ━━ GeoIP — Alert-only, cached, rate-limit-aware (Feature 2.2)
@@ -229,10 +253,18 @@ _OUI_BUILTIN: dict[str, str] = {
 
 
 def _mac_to_vendor(mac: str) -> str:
-    """Look up vendor from MAC OUI prefix (first 3 bytes)."""
+    """Look up vendor from MAC OUI prefix (first 3 bytes), with randomized MAC detection."""
     if not mac:
         return "Unknown"
-    prefix = mac.upper().replace(":", "").replace("-", "")[:6]
+    clean = mac.upper().replace(":", "").replace("-", "")
+    if len(clean) >= 2:
+        try:
+            first_byte = int(clean[:2], 16)
+            if first_byte & 0x02:
+                return "Randomized / Private MAC"
+        except ValueError:
+            pass
+    prefix = clean[:6]
     return _OUI_BUILTIN.get(prefix, "Unknown Manufacturer")
 
 
@@ -305,7 +337,7 @@ def api_status():
         if s in sev_counts:
             sev_counts[s] += 1
 
-    active_rules = 19
+    active_rules = len(RULE_METADATA)
     try:
         from engine.rules import RuleEngine
         active_rules = len(RuleEngine(None, set(), config).rules)
@@ -321,6 +353,28 @@ def api_status():
         "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "geo_cache_size": len(_GEO_CACHE),
     })
+
+
+@app.route("/api/metrics")
+def api_metrics():
+    """Live capture processing metrics snapshot."""
+    try:
+        from capture.metrics import get_active_metrics
+        return jsonify(get_active_metrics().get_snapshot())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/rules")
+def api_rules():
+    """Return complete metadata inventory for all 23 detection rules."""
+    return jsonify(get_rule_metadata_inventory())
+
+
+@app.route("/api/csrf-token")
+def api_csrf_token():
+    """Return active session CSRF token."""
+    return jsonify({"csrf_token": _csrf_token})
 
 
 @app.route("/api/alerts")
@@ -470,25 +524,8 @@ def api_chart():
     # Collect all rule names present
     rule_names = list({r["rule_name"] for r in rows})
     rule_colors = {
-        "BLOCKLIST": "rgba(59, 130, 246, 0.8)",
-        "TCP_FLAG_ANOMALY": "rgba(234, 179, 8, 0.8)",
-        "PORT_SCAN": "rgba(245, 158, 11, 0.8)",
-        "UDP_SCAN": "rgba(251, 146, 60, 0.8)",
-        "UDP_FLOOD": "rgba(225, 29, 72, 0.8)",
-        "TCP_STEALTH_SCAN": "rgba(217, 70, 239, 0.8)",
-        "SYN_FLOOD": "rgba(239, 68, 68, 0.8)",
-        "DISTRIBUTED_SYN_FLOOD": "rgba(185, 28, 28, 0.8)",
-        "ICMP_SWEEP": "rgba(14, 165, 233, 0.8)",
-        "ICMP_FLOOD": "rgba(244, 63, 94, 0.8)",
-        "ARP_SPOOF": "rgba(168, 85, 247, 0.8)",
-        "PAYLOAD_HIT": "rgba(236, 72, 153, 0.8)",
-        "DNS_ANOMALY": "rgba(6, 182, 212, 0.8)",
-        "BRUTE_FORCE": "rgba(249, 115, 22, 0.8)",
-        "SLOW_PORT_SCAN": "rgba(217, 119, 6, 0.8)",
-        "DATA_EXFIL": "rgba(192, 38, 211, 0.8)",
-        "TLS_ANOMALY": "rgba(99, 102, 241, 0.8)",
-        "CLEAR_HTTP_ON_TLS_PORT": "rgba(139, 92, 246, 0.8)",
-        "TCP_ZERO_WINDOW": "rgba(220, 38, 38, 0.8)",
+        name: meta.get("color", "rgba(100, 100, 100, 0.8)")
+        for name, meta in RULE_METADATA.items()
     }
 
     datasets = []
@@ -753,6 +790,802 @@ def api_feedback_stats():
     for r in recent:
         r["time_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r.get("timestamp", 0)))
     return jsonify({"stats": stats, "recent": recent})
+
+
+@app.route("/api/feedback/reclassify", methods=["POST"])
+def api_feedback_reclassify():
+    """Reclassify an existing alert, recording audit trail without double-counting."""
+    data = request.get_json(silent=True) or {}
+    alert_id = data.get("alert_id")
+    new_class = data.get("new_classification", data.get("classification", "")).strip()
+    note = data.get("analyst_note", "").strip()
+
+    if not alert_id or new_class not in ("true_positive", "false_positive"):
+        return jsonify({"error": "alert_id and new_classification (true_positive|false_positive) required"}), 400
+
+    db = get_db()
+    from storage.db import _sqlite_lock
+    with _sqlite_lock:
+        cur = db.cursor()
+        cur.execute("SELECT rule_name, src_ip, dst_ip FROM alerts WHERE id = ?", (alert_id,))
+        row = cur.fetchone()
+        if not row:
+            cur.close()
+            return jsonify({"error": "Alert not found"}), 404
+        r_info = dict(row)
+        cur.close()
+
+    write_feedback(
+        db, alert_id=alert_id, classification=new_class,
+        analyst_note=f"[Reclassified] {note}".strip(),
+        rule_name=r_info.get("rule_name", ""),
+        src_ip=r_info.get("src_ip", ""),
+        dst_ip=r_info.get("dst_ip", ""),
+    )
+
+    with _sqlite_lock:
+        cur = db.cursor()
+        status_val = "closed" if new_class == "false_positive" else "verified"
+        cur.execute("UPDATE alerts SET status = ? WHERE id = ?", (status_val, alert_id))
+        db.commit()
+        cur.close()
+
+    write_audit_log(db, "analyst", "reclassify_alert", "alerts", str(alert_id), {"new_classification": new_class, "note": note})
+    return jsonify({"status": "ok", "alert_id": alert_id, "new_classification": new_class})
+
+
+# ---------------------------------------------------------------------------
+# Traffic Explorer APIs (Phase 2)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/traffic")
+def api_traffic():
+    """
+    Server-side search, filtering, and pagination over normalized network flows.
+    """
+    db = get_db()
+    page = max(1, int(request.args.get("page", 1)))
+    page_size = max(1, min(int(request.args.get("page_size", request.args.get("limit", 50))), 200))
+    sort_by_raw = request.args.get("sort_by", "last_seen")
+    order = "ASC" if request.args.get("order", "desc").lower() == "asc" else "DESC"
+
+    col_map = {
+        "last_time": "last_seen",
+        "last_seen": "last_seen",
+        "start_time": "start_time",
+        "packets": "packet_count",
+        "packet_count": "packet_count",
+        "bytes": "byte_count",
+        "byte_count": "byte_count",
+        "alert_count": "alert_count",
+    }
+    sort_by = col_map.get(sort_by_raw, "last_seen")
+
+    conditions = []
+    params = []
+
+    ip_search = request.args.get("search") or request.args.get("ip")
+    if ip_search:
+        ip_search = ip_search.strip()
+        conditions.append("(src_ip LIKE ? OR dst_ip LIKE ?)")
+        params.extend([f"%{ip_search}%", f"%{ip_search}%"])
+
+    if request.args.get("src_ip"):
+        conditions.append("src_ip = ?")
+        params.append(request.args.get("src_ip").strip())
+
+    if request.args.get("dst_ip"):
+        conditions.append("dst_ip = ?")
+        params.append(request.args.get("dst_ip").strip())
+
+    port = request.args.get("port")
+    if port and port.isdigit():
+        conditions.append("(src_port = ? OR dst_port = ?)")
+        p_val = int(port)
+        params.extend([p_val, p_val])
+
+    if request.args.get("src_port") and request.args.get("src_port").isdigit():
+        conditions.append("src_port = ?")
+        params.append(int(request.args.get("src_port")))
+
+    if request.args.get("dst_port") and request.args.get("dst_port").isdigit():
+        conditions.append("dst_port = ?")
+        params.append(int(request.args.get("dst_port")))
+
+    if request.args.get("protocol"):
+        conditions.append("protocol = ?")
+        params.append(request.args.get("protocol").strip().upper())
+
+    if request.args.get("direction"):
+        conditions.append("direction = ?")
+        params.append(request.args.get("direction").strip().lower())
+
+    has_alerts = request.args.get("has_alerts", "all").lower()
+    if has_alerts == "true":
+        conditions.append("alert_count > 0")
+    elif has_alerts == "false":
+        conditions.append("alert_count = 0")
+
+    if request.args.get("start_time"):
+        try:
+            conditions.append("start_time >= ?")
+            params.append(float(request.args.get("start_time")))
+        except ValueError:
+            pass
+
+    if request.args.get("end_time"):
+        try:
+            conditions.append("last_seen <= ?")
+            params.append(float(request.args.get("end_time")))
+        except ValueError:
+            pass
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    from storage.db import _sqlite_lock
+    with _sqlite_lock:
+        cur = db.cursor()
+        count_sql = f"SELECT COUNT(*) FROM network_flows {where_clause}"
+        cur.execute(count_sql, params)
+        total = cur.fetchone()[0]
+
+        offset = (page - 1) * page_size
+        query_sql = f"""
+            SELECT * FROM network_flows
+            {where_clause}
+            ORDER BY {sort_by} {order}
+            LIMIT ? OFFSET ?
+        """
+        cur.execute(query_sql, params + [page_size, offset])
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+
+    for r in rows:
+        st = r.get("start_time", 0) or 0
+        lt = r.get("last_seen", 0) or 0
+        dur = max(0.0, lt - st) if (lt and st) else 0.0
+        r["duration_seconds"] = dur
+        r["duration_str"] = f"{dur:.2f}s"
+        r["start_time_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st)) if st else "—"
+        r["last_seen_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(lt)) if lt else "—"
+        r["last_time_str"] = r["last_seen_str"]
+        r["packets"] = r.get("packet_count", 0)
+        r["bytes"] = r.get("byte_count", 0)
+
+    return jsonify({
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+        "flows": rows,
+    })
+
+
+@app.route("/api/traffic/<flow_id>")
+def api_traffic_detail(flow_id: str):
+    """
+    Return comprehensive session detail for a single flow, including
+    associated alerts and recent packet event snapshots.
+    """
+    db = get_db()
+    from storage.db import _sqlite_lock
+    with _sqlite_lock:
+        cur = db.cursor()
+        cur.execute("SELECT * FROM network_flows WHERE flow_id = ?", (flow_id,))
+        flow_row = cur.fetchone()
+        if not flow_row:
+            cur.close()
+            return jsonify({"error": "Flow not found"}), 404
+        flow = dict(flow_row)
+
+        cur.execute("SELECT * FROM alerts WHERE flow_id = ? ORDER BY timestamp ASC", (flow_id,))
+        alerts = [dict(r) for r in cur.fetchall()]
+
+        cur.execute("SELECT * FROM packet_events WHERE flow_id = ? ORDER BY packet_index ASC LIMIT 100", (flow_id,))
+        packet_events = [dict(r) for r in cur.fetchall()]
+        cur.close()
+
+    flow["start_time_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(flow.get("start_time", 0)))
+    flow["last_time_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(flow.get("last_time", 0)))
+
+    for a in alerts:
+        a["time_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a.get("timestamp", 0)))
+        if a.get("evidence_json"):
+            try:
+                a["evidence"] = json.loads(a["evidence_json"])
+            except Exception:
+                pass
+
+    for p in packet_events:
+        p["time_str"] = time.strftime("%H:%M:%S", time.localtime(p.get("timestamp", 0)))
+
+    return jsonify({
+        "flow": flow,
+        "alerts": alerts,
+        "packet_events": packet_events,
+    })
+
+
+@app.route("/api/traffic/<flow_id>/pcap")
+def api_traffic_pcap(flow_id: str):
+    """Download PCAP segment or reconstituted packet events for flow."""
+    db = get_db()
+    from storage.db import _sqlite_lock
+    with _sqlite_lock:
+        cur = db.cursor()
+        cur.execute("SELECT timestamp, raw_hex, packet_len FROM packet_events WHERE flow_id = ? AND raw_hex IS NOT NULL ORDER BY packet_index ASC", (flow_id,))
+        rows = cur.fetchall()
+        cur.close()
+
+    if not rows:
+        return jsonify({"error": f"No raw packet capture retained for flow {flow_id}"}), 404
+
+    # Assemble libpcap format
+    buf = io.BytesIO()
+    # Global header (magic 0xd4c3b2a1, v2.4, thiszone=0, sigfigs=0, snaplen=65535, linktype=1 Ethernet)
+    buf.write(struct.pack("<IHHiIII", 0xd4c3b2a1, 2, 4, 0, 0, 65535, 1))
+    for r in rows:
+        ts = r[0] or time.time()
+        ts_sec = int(ts)
+        ts_usec = int((ts - ts_sec) * 1e6)
+        raw_bytes = bytes.fromhex(r[1])
+        incl_len = len(raw_bytes)
+        orig_len = r[2] or incl_len
+        buf.write(struct.pack("<IIII", ts_sec, ts_usec, incl_len, orig_len))
+        buf.write(raw_bytes)
+
+    pcap_data = buf.getvalue()
+    return Response(
+        pcap_data,
+        mimetype="application/vnd.tcpdump.pcap",
+        headers={"Content-Disposition": f"attachment; filename=flow_{flow_id[:16]}.pcap"}
+    )
+
+
+@app.route("/api/traffic/export")
+def api_traffic_export():
+    """Export filtered network flows as CSV."""
+    db = get_db()
+    conditions = []
+    params = []
+    ip_search = request.args.get("search") or request.args.get("ip")
+    if ip_search:
+        conditions.append("(src_ip LIKE ? OR dst_ip LIKE ?)")
+        params.extend([f"%{ip_search}%", f"%{ip_search}%"])
+    if request.args.get("protocol"):
+        conditions.append("protocol = ?")
+        params.append(request.args.get("protocol").strip().upper())
+    if request.args.get("direction"):
+        conditions.append("direction = ?")
+        params.append(request.args.get("direction").strip().lower())
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"SELECT * FROM network_flows {where_clause} ORDER BY last_seen DESC LIMIT 5000"
+
+    from storage.db import _sqlite_lock
+    with _sqlite_lock:
+        cur = db.cursor()
+        cur.execute(sql, params)
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["flow_id", "protocol", "src_ip", "src_port", "dst_ip", "dst_port", "direction", "packets", "bytes", "start_time", "last_seen", "duration_seconds", "alert_count", "threat_score"])
+    for r in rows:
+        st = r.get("start_time", 0) or 0
+        lt = r.get("last_seen", 0) or 0
+        dur = max(0.0, lt - st) if (lt and st) else 0.0
+        writer.writerow([
+            r.get("flow_id"), r.get("protocol"), r.get("src_ip"), r.get("src_port"),
+            r.get("dst_ip"), r.get("dst_port"), r.get("direction"), r.get("packet_count"),
+            r.get("byte_count"), st, lt, f"{dur:.2f}",
+            r.get("alert_count"), 0,
+        ])
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=traffic_flows.csv"}
+    )
+
+
+@app.route("/api/saved-searches", methods=["GET", "POST"])
+def api_saved_searches():
+    """Manage saved search queries."""
+    db = get_db()
+    from storage.db import _sqlite_lock
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        name = data.get("name", "").strip()
+        query_json = json.dumps(data.get("query", {}))
+        desc = data.get("description", "").strip()
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        now = time.time()
+        with _sqlite_lock:
+            cur = db.cursor()
+            cur.execute(
+                "INSERT INTO saved_searches (name, query_params_json, description, created_at) VALUES (?, ?, ?, ?)",
+                (name, query_json, desc, now)
+            )
+            search_id = cur.lastrowid
+            db.commit()
+            cur.close()
+        write_audit_log(db, "analyst", "create_saved_search", "saved_searches", str(search_id), {"name": name})
+        return jsonify({"status": "ok", "id": search_id, "name": name})
+
+    with _sqlite_lock:
+        cur = db.cursor()
+        cur.execute("SELECT * FROM saved_searches ORDER BY created_at DESC")
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+    for r in rows:
+        try:
+            r["query"] = json.loads(r.get("query_params_json", "{}"))
+        except Exception:
+            r["query"] = {}
+    return jsonify(rows)
+
+
+@app.route("/api/saved-searches/<int:search_id>", methods=["DELETE"])
+def api_delete_saved_search(search_id: int):
+    """Delete a saved search query."""
+    db = get_db()
+    from storage.db import _sqlite_lock
+    with _sqlite_lock:
+        cur = db.cursor()
+        cur.execute("DELETE FROM saved_searches WHERE id = ?", (search_id,))
+        db.commit()
+        cur.close()
+    write_audit_log(db, "analyst", "delete_saved_search", "saved_searches", str(search_id))
+    return jsonify({"status": "ok", "id": search_id})
+
+
+# ---------------------------------------------------------------------------
+# PCAP Offline Analysis APIs (Phase 5)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/pcap/upload", methods=["POST"])
+def api_pcap_upload():
+    """Upload PCAP capture file for isolated offline replay."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    file = request.files["file"]
+    if not file or not file.filename:
+        return jsonify({"error": "Empty filename"}), 400
+
+    filename = file.filename
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in (".pcap", ".pcapng", ".cap"):
+        return jsonify({"error": f"Invalid extension '{ext}'. Only .pcap, .pcapng, and .cap supported"}), 400
+
+    upload_dir = getattr(config, "PCAP_UPLOAD_DIR", "data/uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    temp_path = os.path.join(upload_dir, f"upload_{int(time.time())}_{uuid.uuid4().hex[:6]}_{filename}")
+    file.save(temp_path)
+
+    analyzer = get_offline_analyzer()
+    try:
+        job = analyzer.create_job(filename, temp_path)
+        analyzer.run_job_async(job["job_id"])
+        write_audit_log(get_db(), "analyst", "pcap_upload", "pcap_jobs", job["job_id"], {"filename": filename})
+        return jsonify({
+            "status": "queued",
+            "job_id": job["job_id"],
+            "filename": filename,
+            "file_size": job["file_size"],
+            "sha256": job["sha256"],
+        })
+    except Exception as e:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/pcap/jobs")
+def api_pcap_jobs():
+    """List offline PCAP analysis jobs."""
+    analyzer = get_offline_analyzer()
+    return jsonify(analyzer.list_jobs(limit=100))
+
+
+@app.route("/api/pcap/jobs/<job_id>")
+def api_pcap_job_detail(job_id: str):
+    """Get offline PCAP analysis job status and isolated alerts."""
+    analyzer = get_offline_analyzer()
+    job = analyzer.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify(job)
+
+
+@app.route("/api/pcap/jobs/<job_id>/export")
+def api_pcap_job_export(job_id: str):
+    """Export alerts from an offline PCAP job."""
+    analyzer = get_offline_analyzer()
+    job = analyzer.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    fmt = request.args.get("format", "json").lower()
+    alerts = []
+    if job.get("result_summary_json"):
+        try:
+            summary = json.loads(job["result_summary_json"])
+            alerts = summary.get("alerts", [])
+        except Exception:
+            pass
+
+    if fmt == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["id", "time", "rule_name", "severity", "src_ip", "src_port", "dst_ip", "dst_port", "detail"])
+        for a in alerts:
+            writer.writerow([
+                a.get("id"), a.get("timestamp"), a.get("rule_name"),
+                a.get("severity"), a.get("src_ip"), a.get("src_port"),
+                a.get("dst_ip"), a.get("dst_port"), a.get("detail"),
+            ])
+        return Response(output.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename=job_{job_id}_alerts.csv"})
+
+    return jsonify({"job_id": job_id, "alerts": alerts})
+
+
+# ---------------------------------------------------------------------------
+# Baselines & Anomaly Analytics APIs (Phase 4)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/baselines")
+def api_baselines():
+    """Return historical baseline profile and rolling metrics."""
+    _baseline_engine.set_connection(get_db())
+    return jsonify(_baseline_engine.get_all_baselines())
+
+
+@app.route("/api/anomalies")
+def api_anomalies():
+    """Return recent detected traffic anomalies."""
+    _baseline_engine.set_connection(get_db())
+    limit = min(int(request.args.get("limit", 50)), 200)
+    return jsonify(_baseline_engine.get_recent_anomalies(limit=limit))
+
+
+@app.route("/api/baselines/quarantine", methods=["POST"])
+def api_baseline_quarantine():
+    """Enable or disable baseline quarantine to protect statistics during attack."""
+    data = request.get_json(silent=True) or {}
+    quarantine = bool(data.get("quarantine", True))
+    _baseline_engine.set_quarantine(quarantine)
+    write_audit_log(get_db(), "analyst", "toggle_baseline_quarantine", "baselines", details={"quarantine": quarantine})
+    return jsonify({"status": "ok", "quarantined": bool(_baseline_engine.is_quarantined)})
+
+
+# ---------------------------------------------------------------------------
+# Cases & Incident Management APIs (Phase 7)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/cases", methods=["GET", "POST"])
+def api_cases():
+    """List or create incident investigation cases."""
+    db = get_db()
+    from storage.db import _sqlite_lock
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        title = data.get("title", "").strip()
+        if not title:
+            return jsonify({"error": "title is required"}), 400
+        desc = data.get("description", "").strip()
+        sev = data.get("severity", "medium").lower()
+        assigned = data.get("assigned_to", "SOC Analyst").strip()
+        alert_ids = data.get("alert_ids", [])
+        now = time.time()
+        case_id = f"CASE-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
+        with _sqlite_lock:
+            cur = db.cursor()
+            cur.execute(
+                """
+                INSERT INTO cases (case_id, title, description, status, severity, assignee, created_at, updated_at)
+                VALUES (?, ?, ?, 'open', ?, ?, ?, ?)
+                """,
+                (case_id, title, desc, sev, assigned, now, now)
+            )
+            for aid in alert_ids:
+                try:
+                    cur.execute("INSERT OR IGNORE INTO case_alerts (case_id, alert_id, added_at) VALUES (?, ?, ?)", (case_id, int(aid), now))
+                    cur.execute("UPDATE alerts SET assigned_case_id = ? WHERE id = ?", (case_id, int(aid)))
+                except Exception:
+                    pass
+            db.commit()
+            cur.close()
+
+        write_audit_log(db, assigned, "create_case", "cases", case_id, {"title": title, "alert_count": len(alert_ids)})
+        return jsonify({"status": "ok", "case_id": case_id, "title": title})
+
+    status_filter = request.args.get("status")
+    sev_filter = request.args.get("severity")
+    conditions = []
+    params = []
+    if status_filter and status_filter.lower() != "all":
+        conditions.append("c.status = ?")
+        params.append(status_filter.lower())
+    if sev_filter and sev_filter.lower() != "all":
+        conditions.append("c.severity = ?")
+        params.append(sev_filter.lower())
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"""
+        SELECT c.*, COUNT(ca.alert_id) as alert_count
+        FROM cases c
+        LEFT JOIN case_alerts ca ON c.case_id = ca.case_id
+        {where_clause}
+        GROUP BY c.case_id
+        ORDER BY c.created_at DESC
+    """
+    with _sqlite_lock:
+        cur = db.cursor()
+        cur.execute(sql, params)
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+
+    for r in rows:
+        r["assigned_to"] = r.get("assignee")
+        r["created_str"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("created_at", 0)))
+        r["updated_str"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("updated_at", 0)))
+    return jsonify(rows)
+
+
+@app.route("/api/cases/<case_id>", methods=["GET", "PATCH"])
+def api_case_detail(case_id: str):
+    """Retrieve or update single incident case."""
+    db = get_db()
+    from storage.db import _sqlite_lock
+    if request.method == "PATCH":
+        data = request.get_json(silent=True) or {}
+        updates = []
+        params = []
+        field_map = {"title": "title", "description": "description", "status": "status", "severity": "severity", "assigned_to": "assignee", "assignee": "assignee"}
+        for k, v in data.items():
+            if k in field_map:
+                updates.append(f"{field_map[k]} = ?")
+                params.append(v)
+        if not updates:
+            return jsonify({"status": "no changes"})
+        updates.append("updated_at = ?")
+        now = time.time()
+        params.extend([now, case_id])
+        with _sqlite_lock:
+            cur = db.cursor()
+            cur.execute(f"UPDATE cases SET {', '.join(updates)} WHERE case_id = ?", params)
+            db.commit()
+            cur.close()
+        write_audit_log(db, "analyst", "update_case", "cases", case_id, data)
+        return jsonify({"status": "ok", "case_id": case_id})
+
+    with _sqlite_lock:
+        cur = db.cursor()
+        cur.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,))
+        case_row = cur.fetchone()
+        if not case_row:
+            cur.close()
+            return jsonify({"error": "Case not found"}), 404
+        case = dict(case_row)
+
+        cur.execute("""
+            SELECT a.* FROM alerts a
+            JOIN case_alerts ca ON a.id = ca.alert_id
+            WHERE ca.case_id = ?
+            ORDER BY a.timestamp ASC
+        """, (case_id,))
+        alerts = [dict(r) for r in cur.fetchall()]
+
+        cur.execute("SELECT * FROM case_notes WHERE case_id = ? ORDER BY created_at ASC", (case_id,))
+        notes = [dict(r) for r in cur.fetchall()]
+        cur.close()
+
+    case["assigned_to"] = case.get("assignee")
+    case["created_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(case.get("created_at", 0)))
+    case["updated_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(case.get("updated_at", 0)))
+    for a in alerts:
+        a["time_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a.get("timestamp", 0)))
+    for n in notes:
+        n["time_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(n.get("created_at", 0)))
+
+    return jsonify({"case": case, "alerts": alerts, "notes": notes})
+
+
+@app.route("/api/cases/<case_id>/alerts", methods=["POST"])
+def api_case_add_alerts(case_id: str):
+    """Link alerts to case."""
+    data = request.get_json(silent=True) or {}
+    alert_ids = data.get("alert_ids", [])
+    if not alert_ids:
+        return jsonify({"error": "alert_ids list required"}), 400
+    db = get_db()
+    now = time.time()
+    from storage.db import _sqlite_lock
+    with _sqlite_lock:
+        cur = db.cursor()
+        for aid in alert_ids:
+            cur.execute("INSERT OR IGNORE INTO case_alerts (case_id, alert_id, added_at) VALUES (?, ?, ?)", (case_id, int(aid), now))
+            cur.execute("UPDATE alerts SET assigned_case_id = ? WHERE id = ?", (case_id, int(aid)))
+        cur.execute("UPDATE cases SET updated_at = ? WHERE case_id = ?", (now, case_id))
+        db.commit()
+        cur.close()
+    write_audit_log(db, "analyst", "link_alerts_to_case", "cases", case_id, {"alert_ids": alert_ids})
+    return jsonify({"status": "ok", "linked_count": len(alert_ids)})
+
+
+@app.route("/api/cases/<case_id>/notes", methods=["POST"])
+def api_case_add_note(case_id: str):
+    """Add note to case."""
+    data = request.get_json(silent=True) or {}
+    note = data.get("note", "").strip()
+    author = data.get("author", "Analyst").strip()
+    if not note:
+        return jsonify({"error": "note is required"}), 400
+    db = get_db()
+    now = time.time()
+    from storage.db import _sqlite_lock
+    with _sqlite_lock:
+        cur = db.cursor()
+        cur.execute("INSERT INTO case_notes (case_id, author, note, created_at) VALUES (?, ?, ?, ?)", (case_id, author, note, now))
+        cur.execute("UPDATE cases SET updated_at = ? WHERE case_id = ?", (now, case_id))
+        db.commit()
+        cur.close()
+    write_audit_log(db, author, "add_case_note", "cases", case_id, {"note_len": len(note)})
+    return jsonify({"status": "ok"})
+
+
+# ---------------------------------------------------------------------------
+# Notifications Outbox APIs (Phase 7)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/notifications/providers")
+def api_notifications_providers():
+    """Return status of notification providers."""
+    _outbox_manager.set_connection(get_db())
+    return jsonify(_outbox_manager.get_providers_status())
+
+
+@app.route("/api/notifications/outbox")
+def api_notifications_outbox():
+    """Return recent notification attempts and delivery status."""
+    db = get_db()
+    from storage.db import _sqlite_lock
+    with _sqlite_lock:
+        cur = db.cursor()
+        cur.execute("SELECT * FROM notification_outbox ORDER BY created_at DESC LIMIT 50")
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+    for r in rows:
+        r["created_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r.get("created_at", 0)))
+    return jsonify(rows)
+
+
+@app.route("/api/notifications/test", methods=["POST"])
+def api_notifications_test():
+    """Send test notification via specified provider."""
+    data = request.get_json(silent=True) or {}
+    provider = data.get("provider", "webhook")
+    _outbox_manager.set_connection(get_db())
+    result = _outbox_manager.send_test_notification(provider)
+    write_audit_log(get_db(), "analyst", "test_notification", "notifications", provider, result)
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Reports APIs (Phase 8)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/reports/types")
+def api_reports_types():
+    """Return available report types and formats."""
+    return jsonify({
+        "report_types": REPORT_TYPES,
+        "formats": ["html", "json", "csv"],
+    })
+
+
+@app.route("/api/reports/generate")
+def api_reports_generate():
+    """Generate and download security reports."""
+    report_type = request.args.get("type", request.args.get("report_type", "daily"))
+    fmt = request.args.get("format", request.args.get("fmt", "html"))
+    hours = int(request.args.get("hours", 24))
+    case_id = request.args.get("case_id")
+
+    generator = ReportGenerator(get_db())
+    mime, filename, content = generator.generate(report_type=report_type, hours=hours, fmt=fmt, case_id=case_id)
+    write_audit_log(get_db(), "analyst", "generate_report", "reports", report_type, {"format": fmt, "hours": hours})
+    return Response(
+        content,
+        mimetype=mime,
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+# ---------------------------------------------------------------------------
+# System Telemetry & Audit APIs (Phase 10)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/system/metrics")
+def api_system_metrics():
+    """Return host capabilities, cgroup limits, parallel profiles, and storage stats."""
+    caps = get_system_capabilities()
+    profile = select_performance_profile(profile_name=os.getenv("IDS_PERF_PROFILE", "auto"))
+    db = get_db()
+
+    db_size = 0
+    if os.path.exists(config.SQLITE_PATH):
+        try:
+            db_size = os.path.getsize(config.SQLITE_PATH)
+        except Exception:
+            pass
+
+    flow_count = 0
+    alert_count = 0
+    from storage.db import _sqlite_lock
+    try:
+        with _sqlite_lock:
+            cur = db.cursor()
+            cur.execute("SELECT COUNT(*) FROM network_flows")
+            flow_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM alerts")
+            alert_count = cur.fetchone()[0]
+            cur.close()
+    except Exception:
+        pass
+
+    uptime_s = time.time() - _app_start_time
+
+    return jsonify({
+        "uptime_seconds": int(uptime_s),
+        "uptime_str": time.strftime("%H:%M:%S", time.gmtime(uptime_s)),
+        "capabilities": caps if isinstance(caps, dict) else {
+            "physical_cores": getattr(caps, "physical_cores", None),
+            "effective_cpu_quota": getattr(caps, "effective_cpu_quota", None),
+            "available_ram_mb": getattr(caps, "available_ram_mb", None),
+            "load_avg_1m": getattr(caps, "load_avg_1m", None),
+        },
+        "performance_profile": profile if isinstance(profile, dict) else {
+            "name": getattr(profile, "name", "auto"),
+            "workers": getattr(profile, "worker_count", 1),
+            "batch_size": getattr(profile, "batch_size", 32),
+        },
+        "storage": {
+            "db_backend": config.DB_BACKEND,
+            "sqlite_path": config.SQLITE_PATH,
+            "db_size_bytes": db_size,
+            "db_size_mb": round(db_size / (1024 * 1024), 2),
+            "flow_count": flow_count,
+            "alert_count": alert_count,
+        }
+    })
+
+
+@app.route("/api/audit-log")
+def api_audit_log():
+    """Return immutable audit log trail."""
+    db = get_db()
+    limit = min(int(request.args.get("limit", 100)), 500)
+    from storage.db import _sqlite_lock
+    with _sqlite_lock:
+        cur = db.cursor()
+        cur.execute("SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?", (limit,))
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+    for r in rows:
+        r["time_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r.get("timestamp", 0)))
+        if r.get("details_json"):
+            try:
+                r["details"] = json.loads(r["details_json"])
+            except Exception:
+                pass
+    return jsonify(rows)
 
 
 if __name__ == "__main__":
