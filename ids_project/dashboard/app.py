@@ -335,6 +335,10 @@ def get_db():
     return _db_conn
 
 
+def _is_postgres() -> bool:
+    return getattr(config, "DB_BACKEND", "sqlite").lower() == "postgres"
+
+
 def _get_latest_alert_id(db) -> int:
     """Return the highest alert ID currently in the DB (0 if empty)."""
     from storage.db import _sqlite_lock
@@ -368,7 +372,7 @@ def _get_alerts_since_id(db, last_id: int) -> list[dict]:
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", csrf_token=_csrf_token)
 
 
 # ---------------------------------------------------------------------------
@@ -896,8 +900,10 @@ def api_feedback_reclassify():
 def api_traffic():
     """
     Server-side search, filtering, and pagination over normalized network flows.
+    Supports structured KQL (?kql=...) alongside standard field filters.
     """
     db = get_db()
+    t_start = time.time()
     page = max(1, int(request.args.get("page", 1)))
     page_size = max(1, min(int(request.args.get("page_size", request.args.get("limit", 50))), 200))
     sort_by_raw = request.args.get("sort_by", "last_seen")
@@ -917,6 +923,19 @@ def api_traffic():
 
     conditions = []
     params = []
+
+    # 1. KQL structured query parsing
+    kql_query = request.args.get("kql") or request.args.get("q")
+    if kql_query and kql_query.strip():
+        from forensics.kql_parser import parse_kql_to_sql, KqlParseError
+        try:
+            backend = "postgres" if _is_postgres() else "sqlite"
+            kql_where, kql_params = parse_kql_to_sql(kql_query.strip(), backend=backend)
+            if kql_where and kql_where != "1=1":
+                conditions.append(kql_where)
+                params.extend(kql_params)
+        except KqlParseError as kpe:
+            return jsonify({"error": f"KQL Syntax Error: {kpe}", "pos": getattr(kpe, "pos", None)}), 400
 
     ip_search = request.args.get("search") or request.args.get("ip")
     if ip_search:
@@ -994,6 +1013,8 @@ def api_traffic():
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
 
+    duration_ms = round((time.time() - t_start) * 1000, 2)
+
     for r in rows:
         st = r.get("start_time", 0) or 0
         lt = r.get("last_seen", 0) or 0
@@ -1012,6 +1033,366 @@ def api_traffic():
         "page_size": page_size,
         "total_pages": max(1, (total + page_size - 1) // page_size),
         "flows": rows,
+        "duration_ms": duration_ms,
+        "kql": kql_query or "",
+    })
+
+
+@app.route("/api/traffic/assistant", methods=["POST"])
+def api_traffic_assistant():
+    """Deterministic Query Generation Assistant converting intent into KQL."""
+    data = request.get_json(silent=True) or {}
+    intent = data.get("intent", "").strip()
+    if not intent:
+        return jsonify({"error": "intent is required"}), 400
+    from forensics.kql_parser import generate_kql_from_intent
+    kql = generate_kql_from_intent(intent)
+    return jsonify({"intent": intent, "kql": kql})
+
+
+@app.route("/api/dns/reverse", methods=["GET", "POST"])
+def api_reverse_dns():
+    """Asynchronous Reverse DNS (PTR) hostname enrichment with dual-cache."""
+    from analytics.reverse_dns import get_reverse_dns_resolver
+    resolver = get_reverse_dns_resolver()
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        ips = data.get("ips", [])
+        if not isinstance(ips, list):
+            return jsonify({"error": "ips must be a list"}), 400
+        results = resolver.resolve_batch([str(ip).strip() for ip in ips[:100]])
+        return jsonify({"results": results})
+    ip = request.args.get("ip", "").strip()
+    if not ip:
+        return jsonify({"error": "ip parameter required"}), 400
+    hostname = resolver.resolve(ip)
+    return jsonify({"ip": ip, "hostname": hostname, "status": "resolved" if hostname else "unavailable"})
+
+
+@app.route("/api/hunting/search")
+def api_hunting_search():
+    """
+    Hypothesis-driven threat hunting across flows, packet events, anomalies, and alerts.
+    """
+    db = get_db()
+    t_start = time.time()
+    search_type = request.args.get("type", "preset").lower()
+    preset = request.args.get("preset", "").lower()
+    query = (request.args.get("q") or request.args.get("query") or "").strip()
+    hours = float(request.args.get("hours", 24))
+    limit = max(1, min(int(request.args.get("limit", 50)), 200))
+    since = time.time() - (hours * 3600)
+
+    results = []
+    from storage.db import _sqlite_lock
+
+    with _sqlite_lock:
+        cur = db.cursor()
+
+        if search_type == "preset":
+            if preset == "high_entropy_dns":
+                cur.execute(
+                    """
+                    SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
+                    FROM alerts
+                    WHERE rule_name = 'DNS_ANOMALY' AND timestamp >= ? AND (detail LIKE '%entropy%' OR evidence_json LIKE '%entropy%')
+                    ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (since, limit)
+                )
+                results.extend([dict(r) for r in cur.fetchall()])
+                cur.execute(
+                    """
+                    SELECT flow_id as id, timestamp, 'SUSPICIOUS_DNS_QUERY' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol, payload_preview as detail, 'Suspicious traffic indicator' as classification
+                    FROM packet_events
+                    WHERE payload_preview LIKE '%DNS%' AND timestamp >= ?
+                    ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (since, limit)
+                )
+                results.extend([dict(r) for r in cur.fetchall()])
+
+            elif preset == "stealth_scan":
+                cur.execute(
+                    """
+                    SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
+                    FROM alerts
+                    WHERE rule_name = 'TCP_STEALTH_SCAN' AND timestamp >= ?
+                    ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (since, limit)
+                )
+                results.extend([dict(r) for r in cur.fetchall()])
+                cur.execute(
+                    """
+                    SELECT flow_id as id, last_seen as timestamp, 'STEALTH_PROBE_FLOW' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
+                           'TCP connection with stealth flags' as detail, 'Suspicious traffic indicator' as classification
+                    FROM network_flows
+                    WHERE protocol = 'TCP' AND tcp_flags in ('FIN', 'NULL', 'XMAS', '0x01', '0x00', '0x29') AND last_seen >= ?
+                    ORDER BY last_seen DESC LIMIT ?
+                    """,
+                    (since, limit)
+                )
+                results.extend([dict(r) for r in cur.fetchall()])
+
+            elif preset == "icmp_tunnel":
+                cur.execute(
+                    """
+                    SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
+                    FROM alerts
+                    WHERE rule_name = 'ICMP_TUNNEL' AND timestamp >= ?
+                    ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (since, limit)
+                )
+                results.extend([dict(r) for r in cur.fetchall()])
+                cur.execute(
+                    """
+                    SELECT flow_id as id, last_seen as timestamp, 'LARGE_ICMP_PAYLOAD' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
+                           'High byte volume ICMP flow (>500 bytes)' as detail, 'Suspicious traffic indicator' as classification
+                    FROM network_flows
+                    WHERE protocol = 'ICMP' AND byte_count > 500 AND last_seen >= ?
+                    ORDER BY last_seen DESC LIMIT ?
+                    """,
+                    (since, limit)
+                )
+                results.extend([dict(r) for r in cur.fetchall()])
+
+            elif preset == "fragment_anomaly":
+                cur.execute(
+                    """
+                    SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
+                    FROM alerts
+                    WHERE rule_name = 'IP_FRAGMENT_ANOMALY' AND timestamp >= ?
+                    ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (since, limit)
+                )
+                results.extend([dict(r) for r in cur.fetchall()])
+
+            elif preset == "cleartext_on_443":
+                cur.execute(
+                    """
+                    SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
+                    FROM alerts
+                    WHERE rule_name = 'CLEAR_HTTP_ON_TLS_PORT' AND timestamp >= ?
+                    ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (since, limit)
+                )
+                results.extend([dict(r) for r in cur.fetchall()])
+                cur.execute(
+                    """
+                    SELECT flow_id as id, last_seen as timestamp, 'CLEARTEXT_PORT_443' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
+                           'TCP traffic to port 443' as detail, 'Suspicious traffic indicator' as classification
+                    FROM network_flows
+                    WHERE dst_port = 443 AND protocol = 'TCP' AND last_seen >= ?
+                    ORDER BY last_seen DESC LIMIT ?
+                    """,
+                    (since, limit)
+                )
+                results.extend([dict(r) for r in cur.fetchall()])
+
+            elif preset == "irc_beaconing":
+                cur.execute(
+                    """
+                    SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
+                    FROM alerts
+                    WHERE rule_name = 'IRC_C2_BEACONING' AND timestamp >= ?
+                    ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (since, limit)
+                )
+                results.extend([dict(r) for r in cur.fetchall()])
+                cur.execute(
+                    """
+                    SELECT flow_id as id, last_seen as timestamp, 'IRC_PORT_FLOW' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
+                           'Traffic to standard IRC port (6667)' as detail, 'Suspicious traffic indicator' as classification
+                    FROM network_flows
+                    WHERE dst_port in (6667, 6697) AND last_seen >= ?
+                    ORDER BY last_seen DESC LIMIT ?
+                    """,
+                    (since, limit)
+                )
+                results.extend([dict(r) for r in cur.fetchall()])
+
+        elif search_type == "rule":
+            cur.execute(
+                """
+                SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
+                FROM alerts
+                WHERE rule_name = ? AND timestamp >= ?
+                ORDER BY timestamp DESC LIMIT ?
+                """,
+                (query, since, limit)
+            )
+            results.extend([dict(r) for r in cur.fetchall()])
+
+        elif search_type == "ip":
+            cur.execute(
+                """
+                SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
+                FROM alerts
+                WHERE (src_ip = ? OR dst_ip = ?) AND timestamp >= ?
+                ORDER BY timestamp DESC LIMIT ?
+                """,
+                (query, query, since, limit)
+            )
+            results.extend([dict(r) for r in cur.fetchall()])
+            cur.execute(
+                """
+                SELECT flow_id as id, last_seen as timestamp, 'HOST_SESSION' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
+                       'Historical network session' as detail, 'Unclassified observation' as classification
+                FROM network_flows
+                WHERE (src_ip = ? OR dst_ip = ?) AND last_seen >= ?
+                ORDER BY last_seen DESC LIMIT ?
+                """,
+                (query, query, since, limit)
+            )
+            results.extend([dict(r) for r in cur.fetchall()])
+
+        elif search_type == "port":
+            port_num = int(query) if query.isdigit() else 80
+            cur.execute(
+                """
+                SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
+                FROM alerts
+                WHERE (src_port = ? OR dst_port = ?) AND timestamp >= ?
+                ORDER BY timestamp DESC LIMIT ?
+                """,
+                (port_num, port_num, since, limit)
+            )
+            results.extend([dict(r) for r in cur.fetchall()])
+            cur.execute(
+                """
+                SELECT flow_id as id, last_seen as timestamp, 'PORT_SESSION' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
+                       'Historical port session' as detail, 'Unclassified observation' as classification
+                FROM network_flows
+                WHERE (src_port = ? OR dst_port = ?) AND last_seen >= ?
+                ORDER BY last_seen DESC LIMIT ?
+                """,
+                (port_num, port_num, since, limit)
+            )
+            results.extend([dict(r) for r in cur.fetchall()])
+
+        elif search_type == "domain":
+            p = f"%{query}%"
+            cur.execute(
+                """
+                SELECT event_id as id, timestamp, 'SUSPICIOUS_DOMAIN_EVENT' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
+                       payload_preview as detail, 'Suspicious traffic indicator' as classification
+                FROM packet_events
+                WHERE payload_preview LIKE ? AND timestamp >= ?
+                ORDER BY timestamp DESC LIMIT ?
+                """,
+                (p, since, limit)
+            )
+            results.extend([dict(r) for r in cur.fetchall()])
+            cur.execute(
+                """
+                SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
+                FROM alerts
+                WHERE (detail LIKE ? OR evidence_json LIKE ?) AND timestamp >= ?
+                ORDER BY timestamp DESC LIMIT ?
+                """,
+                (p, p, since, limit)
+            )
+            results.extend([dict(r) for r in cur.fetchall()])
+
+        elif search_type == "cidr":
+            clean_cidr = query.split("/")[0].rsplit(".", 1)[0] + ".%" if "/" in query else f"{query}%"
+            cur.execute(
+                """
+                SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
+                FROM alerts
+                WHERE (src_ip LIKE ? OR dst_ip LIKE ?) AND timestamp >= ?
+                ORDER BY timestamp DESC LIMIT ?
+                """,
+                (clean_cidr, clean_cidr, since, limit)
+            )
+            results.extend([dict(r) for r in cur.fetchall()])
+            cur.execute(
+                """
+                SELECT flow_id as id, last_seen as timestamp, 'SUBNET_FLOW' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
+                       'Subnet traffic session' as detail, 'Unclassified observation' as classification
+                FROM network_flows
+                WHERE (src_ip LIKE ? OR dst_ip LIKE ?) AND last_seen >= ?
+                ORDER BY last_seen DESC LIMIT ?
+                """,
+                (clean_cidr, clean_cidr, since, limit)
+            )
+            results.extend([dict(r) for r in cur.fetchall()])
+
+        elif search_type == "string":
+            p = f"%{query}%"
+            cur.execute(
+                """
+                SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
+                FROM alerts
+                WHERE (detail LIKE ? OR evidence_json LIKE ?) AND timestamp >= ?
+                ORDER BY timestamp DESC LIMIT ?
+                """,
+                (p, p, since, limit)
+            )
+            results.extend([dict(r) for r in cur.fetchall()])
+
+        elif search_type == "anomaly":
+            p = f"%{query}%" if query else "%"
+            cur.execute(
+                """
+                SELECT id, timestamp, metric_name as rule_name, '127.0.0.1' as src_ip, '127.0.0.1' as dst_ip, NULL as src_port, NULL as dst_port, 'IP' as protocol,
+                       explanation as detail, 'Statistical anomaly' as classification
+                FROM traffic_anomalies
+                WHERE (metric_name LIKE ? OR explanation LIKE ?) AND timestamp >= ?
+                ORDER BY timestamp DESC LIMIT ?
+                """,
+                (p, p, since, limit)
+            )
+            results.extend([dict(r) for r in cur.fetchall()])
+
+        elif search_type in ("kql", "query"):
+            from forensics.kql_parser import parse_kql_to_sql, KqlParseError
+            try:
+                sql_where, kql_params = parse_kql_to_sql(query, backend="postgres" if _is_postgres() else "sqlite")
+                sql = f"""
+                    SELECT flow_id as id, last_seen as timestamp,
+                           CASE WHEN alert_count > 0 THEN 'ALERTED_FLOW' ELSE 'TELEMETRY_FLOW' END as rule_name,
+                           src_ip, dst_ip, src_port, dst_port, protocol,
+                           'KQL matched session' as detail,
+                           CASE WHEN alert_count > 0 THEN 'Existing IDS alert' ELSE 'Unclassified observation' END as classification
+                    FROM network_flows
+                    WHERE {sql_where} AND last_seen >= ?
+                    ORDER BY last_seen DESC LIMIT ?
+                """
+                cur.execute(sql, kql_params + [since, limit])
+                results.extend([dict(r) for r in cur.fetchall()])
+            except KqlParseError as e:
+                cur.close()
+                return jsonify({"error": f"KQL error: {e}"}), 400
+
+        cur.close()
+
+    # Deduplicate results by (rule_name, src_ip, dst_ip, int(timestamp))
+    seen = set()
+    deduped = []
+    for r in results:
+        key = (r.get("rule_name"), r.get("src_ip"), r.get("dst_ip"), int(r.get("timestamp") or 0))
+        if key not in seen:
+            seen.add(key)
+            ts = r.get("timestamp", 0) or 0
+            r["time_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) if ts else "—"
+            r["indicator"] = r.get("src_ip") if (r.get("src_ip") and r.get("src_ip") != "127.0.0.1") else (r.get("rule_name") or r.get("indicator") or "Unknown")
+            r["context"] = r.get("rule_name") or "Network"
+            r["proto_port"] = f"{r.get('protocol', 'IP')}:{r.get('dst_port') or ''}"
+            deduped.append(r)
+
+    duration_ms = round((time.time() - t_start) * 1000, 2)
+    return jsonify({
+        "type": search_type,
+        "preset": preset,
+        "total": len(deduped),
+        "duration_ms": duration_ms,
+        "results": deduped[:limit]
     })
 
 
@@ -1361,20 +1742,24 @@ def api_cases():
 
         with _sqlite_lock:
             cur = db.cursor()
-            cur.execute(
-                """
-                INSERT INTO cases (case_id, title, description, status, severity, assignee, created_at, updated_at)
-                VALUES (?, ?, ?, 'open', ?, ?, ?, ?)
-                """,
-                (case_id, title, desc, sev, assigned, now, now)
-            )
-            for aid in alert_ids:
-                try:
-                    cur.execute("INSERT OR IGNORE INTO case_alerts (case_id, alert_id, added_at) VALUES (?, ?, ?)", (case_id, int(aid), now))
-                    cur.execute("UPDATE alerts SET assigned_case_id = ? WHERE id = ?", (case_id, int(aid)))
-                except Exception:
-                    pass
-            db.commit()
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO cases (case_id, title, description, status, severity, assignee, created_at, updated_at)
+                    VALUES (?, ?, ?, 'open', ?, ?, ?, ?)
+                    """,
+                    (case_id, title, desc, sev, assigned, now, now)
+                )
+                for aid in alert_ids:
+                    if _is_postgres():
+                        cur.execute("INSERT INTO case_alerts (case_id, alert_id, added_at) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING", (case_id, int(aid), now))
+                    else:
+                        cur.execute("INSERT OR IGNORE INTO case_alerts (case_id, alert_id, added_at) VALUES (?, ?, ?)", (case_id, int(aid), now))
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                cur.close()
+                return jsonify({"error": f"Database error creating case: {e}"}), 500
             cur.close()
 
         write_audit_log(db, assigned, "create_case", "cases", case_id, {"title": title, "alert_count": len(alert_ids)})
@@ -1485,8 +1870,10 @@ def api_case_add_alerts(case_id: str):
     with _sqlite_lock:
         cur = db.cursor()
         for aid in alert_ids:
-            cur.execute("INSERT OR IGNORE INTO case_alerts (case_id, alert_id, added_at) VALUES (?, ?, ?)", (case_id, int(aid), now))
-            cur.execute("UPDATE alerts SET assigned_case_id = ? WHERE id = ?", (case_id, int(aid)))
+            if _is_postgres():
+                cur.execute("INSERT INTO case_alerts (case_id, alert_id, added_at) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING", (case_id, int(aid), now))
+            else:
+                cur.execute("INSERT OR IGNORE INTO case_alerts (case_id, alert_id, added_at) VALUES (?, ?, ?)", (case_id, int(aid), now))
         cur.execute("UPDATE cases SET updated_at = ? WHERE case_id = ?", (now, case_id))
         db.commit()
         cur.close()
@@ -1541,13 +1928,39 @@ def api_notifications_outbox():
     return jsonify(rows)
 
 
+@app.route("/api/notifications/config", methods=["GET", "POST"])
+def api_notifications_config():
+    """Read or update notification provider configuration."""
+    _outbox_manager.set_connection(get_db())
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        provider = data.get("provider", "").lower()
+        cfg = data.get("config", {})
+        if not provider:
+            return jsonify({"error": "provider name is required"}), 400
+        ok, msg = _outbox_manager.configure_provider(provider, cfg, persist=True)
+        write_audit_log(get_db(), "analyst", "configure_notification", "notifications", provider, {"status": ok})
+        if ok:
+            return jsonify({"status": "ok", "message": msg, "config": _outbox_manager.get_provider_config(provider)})
+        return jsonify({"error": msg}), 400
+
+    # GET: return all provider configs
+    _outbox_manager.reload_providers_from_db()
+    all_cfg = {}
+    for p_name in ("email", "telegram", "webhook", "sms"):
+        all_cfg[p_name] = _outbox_manager.get_provider_config(p_name)
+    return jsonify(all_cfg)
+
+
 @app.route("/api/notifications/test", methods=["POST"])
 def api_notifications_test():
-    """Send test notification via specified provider."""
+    """Send test notification via specified provider with optional direct config."""
     data = request.get_json(silent=True) or {}
     provider = data.get("provider", "webhook")
+    recipient = data.get("recipient")
+    custom_cfg = data.get("custom_cfg") or data.get("config")
     _outbox_manager.set_connection(get_db())
-    result = _outbox_manager.send_test_notification(provider)
+    result = _outbox_manager.send_test_notification(provider, recipient=recipient, custom_cfg=custom_cfg)
     write_audit_log(get_db(), "analyst", "test_notification", "notifications", provider, result)
     return jsonify(result)
 

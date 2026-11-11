@@ -130,9 +130,11 @@ class OfflinePcapAnalyzer:
             "created_at": now,
         }
 
-        if self._main_conn:
-            with self._lock:
-                cur = self._main_conn.cursor()
+        from storage.db import get_connection, _sqlite_lock
+        try:
+            conn = get_connection()
+            with _sqlite_lock:
+                cur = conn.cursor()
                 cur.execute(
                     """
                     INSERT INTO pcap_jobs (
@@ -151,8 +153,11 @@ class OfflinePcapAnalyzer:
                         job_record["error_message"], job_record["created_at"],
                     )
                 )
-                self._main_conn.commit()
+                conn.commit()
                 cur.close()
+            conn.close()
+        except Exception as exc:
+            logger.warning(f"Error persisting pcap_jobs row: {exc}")
 
         with self._lock:
             self._active_jobs[job_id] = job_record
@@ -291,17 +296,20 @@ class OfflinePcapAnalyzer:
             if job_id in self._active_jobs:
                 self._active_jobs[job_id].update(kwargs)
 
-            if self._main_conn:
+        from storage.db import get_connection, _sqlite_lock
+        try:
+            conn = get_connection()
+            with _sqlite_lock:
                 set_clauses = [f"{k} = ?" for k in kwargs.keys()]
                 values = list(kwargs.values()) + [job_id]
                 sql = f"UPDATE pcap_jobs SET {', '.join(set_clauses)} WHERE job_id = ?"
-                try:
-                    cur = self._main_conn.cursor()
-                    cur.execute(sql, values)
-                    self._main_conn.commit()
-                    cur.close()
-                except Exception as exc:
-                    logger.debug(f"Job update note ({job_id}): {exc}")
+                cur = conn.cursor()
+                cur.execute(sql, values)
+                conn.commit()
+                cur.close()
+            conn.close()
+        except Exception as exc:
+            logger.debug(f"Job update note ({job_id}): {exc}")
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Fetch job details from DB or memory cache."""
@@ -310,12 +318,19 @@ class OfflinePcapAnalyzer:
             if job_id in self._active_jobs:
                 res = self._active_jobs[job_id].copy()
 
-        if res is None and self._main_conn:
-            cur = self._main_conn.cursor()
-            cur.execute("SELECT * FROM pcap_jobs WHERE job_id = ?", (job_id,))
-            row = cur.fetchone()
-            cur.close()
-            res = dict(row) if row else None
+        if res is None:
+            from storage.db import get_connection, _sqlite_lock
+            try:
+                conn = get_connection()
+                with _sqlite_lock:
+                    cur = conn.cursor()
+                    cur.execute("SELECT * FROM pcap_jobs WHERE job_id = ?", (job_id,))
+                    row = cur.fetchone()
+                    cur.close()
+                    res = dict(row) if row else None
+                conn.close()
+            except Exception as exc:
+                logger.debug(f"Job fetch note ({job_id}): {exc}")
 
         if res and "result_summary_json" in res and res["result_summary_json"]:
             try:
@@ -362,17 +377,21 @@ class OfflinePcapAnalyzer:
                     os.remove(isolated_db_path)
                 except Exception:
                     pass
-            # Clean up job record from active_jobs or database
+            # Clean up job record from active_jobs and database
             if job_id in self._active_jobs:
                 del self._active_jobs[job_id]
-            if self._main_conn:
-                try:
-                    cur = self._main_conn.cursor()
+
+            from storage.db import get_connection, _sqlite_lock
+            try:
+                conn = get_connection()
+                with _sqlite_lock:
+                    cur = conn.cursor()
                     cur.execute("DELETE FROM pcap_jobs WHERE job_id = ?", (job_id,))
-                    self._main_conn.commit()
+                    conn.commit()
                     cur.close()
-                except Exception:
-                    pass
+                conn.close()
+            except Exception:
+                pass
             return True
 
     def prune_expired_jobs(self, max_age_seconds: float = 86400):

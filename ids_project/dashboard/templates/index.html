@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NetGuard IDS — Professional SOC Dashboard &amp; Forensics Suite</title>
   <meta name="description" content="Integrated network security monitoring, traffic forensics, historical replay, and anomaly analytics platform." />
+  <meta name="csrf-token" content="{{ csrf_token }}" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -168,6 +169,51 @@
       </div>
     </div>
 
+    <!-- ── Live Recent Alerts Section (Phase 3) ── -->
+    <div class="panel" id="recent-alerts-section" style="margin-top:20px;">
+      <div class="panel-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <h2 class="panel-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            Recent Security Alerts
+          </h2>
+          <span class="status-dot" id="live-alerts-dot" style="background:#22c55e;" title="Streaming live detection events via SSE"></span>
+          <span style="font-size:0.75rem;color:var(--text-muted);">Real-Time IDS Feed</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <div id="overview-sev-chips" style="display:flex;gap:6px;">
+            <span class="severity-badge sev-critical" id="chip-crit">Crit: 0</span>
+            <span class="severity-badge sev-high" id="chip-high">High: 0</span>
+            <span class="severity-badge sev-medium" id="chip-med">Med: 0</span>
+            <span class="severity-badge sev-low" id="chip-low">Low: 0</span>
+          </div>
+          <button class="btn-secondary" onclick="switchWorkspace('alerts')" style="font-size:0.75rem;padding:4px 10px;">
+            View All in Alerts Tab ➔
+          </button>
+        </div>
+      </div>
+      <div class="table-wrapper">
+        <table class="alerts-table" id="recent-alerts-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Severity</th>
+              <th>Rule</th>
+              <th>Source</th>
+              <th>Destination</th>
+              <th>Proto</th>
+              <th>Port</th>
+              <th>Details</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="recent-alerts-tbody">
+            <tr><td colspan="9" class="empty-state">Loading recent security alerts…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Calendar Log Viewer -->
     <div class="panel" id="calendar-section" style="margin-top:20px;">
       <div class="panel-header">
@@ -256,13 +302,42 @@
         </div>
       </div>
 
-      <!-- Traffic Search & 5-tuple Filter Bar -->
+      <!-- Structured KQL Query Bar & Actions -->
+      <div style="padding:12px 16px;background:rgba(15,23,42,0.6);border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:10px;">
+        <div style="display:flex;gap:10px;align-items:center;">
+          <div style="position:relative;flex:1;">
+            <svg style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--text-muted);" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="traffic-kql-input" class="filter-search-input" style="padding-left:34px;width:100%;font-family:var(--font-mono);font-size:0.82rem;" placeholder='KQL Query (e.g. src_ip : "10.64.85.221" or (dst_port : 443 and protocol : "TCP"))…' onkeydown="if(event.key==='Enter') executeKqlSearch(1)" />
+          </div>
+          <button class="btn-primary" onclick="executeKqlSearch(1)" style="padding:7px 14px;">
+            Search
+          </button>
+          <button class="btn-secondary" onclick="openQueryBuilderModal()" title="Visual Query Builder dialog">
+            🛠 Build Query
+          </button>
+          <button class="btn-secondary" onclick="openQueryAssistantModal()" title="Natural language query generation assistant">
+            🤖 Assistant
+          </button>
+          <button class="btn-secondary" onclick="clearKqlSearch()" title="Reset query">
+            ✕ Clear
+          </button>
+        </div>
+        <!-- Query Helper Chips -->
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:0.72rem;color:var(--text-muted);">
+          <span>Quick queries:</span>
+          <button class="btn-secondary" style="padding:2px 8px;font-size:0.7rem;" onclick="setKqlQuery('alerted : true')">🚨 Alerted Flows</button>
+          <button class="btn-secondary" style="padding:2px 8px;font-size:0.7rem;" onclick="setKqlQuery('dst_port : 443 and protocol : &quot;TCP&quot;')">🔒 HTTPS (443)</button>
+          <button class="btn-secondary" style="padding:2px 8px;font-size:0.7rem;" onclick="setKqlQuery('dst_port : 53 or protocol : &quot;DNS&quot;')">🌐 DNS (53)</button>
+          <button class="btn-secondary" style="padding:2px 8px;font-size:0.7rem;" onclick="setKqlQuery('protocol : &quot;UDP&quot; and packet_count > 100')">⚡ High UDP Volume</button>
+          <button class="btn-secondary" style="padding:2px 8px;font-size:0.7rem;" onclick="setKqlQuery('src_ip : &quot;192.168.1.0/24&quot;')">📡 Subnet 192.168.1.0/24</button>
+          <span id="kql-timing-badge" style="margin-left:auto;font-family:var(--font-mono);color:var(--accent);"></span>
+        </div>
+      </div>
+
+      <!-- Secondary 5-tuple Filter Bar -->
       <div class="table-filter-bar">
         <div class="filter-inputs-group">
-          <div class="filter-search-box">
-            <svg class="filter-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input type="text" id="traffic-search-input" class="filter-search-input" placeholder="Search IP address or hostname…" onkeydown="if(event.key==='Enter') loadTraffic(1)" />
-          </div>
+          <input type="text" id="traffic-search-input" class="filter-search-input" placeholder="Simple IP / Hostname…" onkeydown="if(event.key==='Enter') loadTraffic(1)" />
           <input type="text" id="traffic-port-filter" class="filter-search-input" style="max-width:110px;" placeholder="Port (e.g. 443)" onkeydown="if(event.key==='Enter') loadTraffic(1)" />
           <select id="traffic-proto-filter" class="filter-select" onchange="loadTraffic(1)">
             <option value="">All Protocols</option>
@@ -283,7 +358,7 @@
             <option value="true">Alerted Flows Only</option>
             <option value="false">Clean Flows Only</option>
           </select>
-          <button class="btn-secondary" style="padding:5px 10px;" onclick="loadTraffic(1)">Apply</button>
+          <button class="btn-secondary" style="padding:5px 10px;" onclick="loadTraffic(1)">Filter</button>
         </div>
         <div class="filter-meta" id="traffic-meta-text">Loading flows…</div>
       </div>
@@ -398,8 +473,8 @@
         </h2>
         <span style="font-size:0.75rem;color:var(--text-muted)">Hypothesis-driven search across flows and packet events</span>
       </div>
-      <div style="padding:16px;border-bottom:1px solid var(--border);">
-        <div style="font-size:0.8rem;font-weight:600;color:#cbd5e1;margin-bottom:8px;">Pre-Configured Threat Hunting Hypotheses</div>
+      <div style="padding:16px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:12px;">
+        <div style="font-size:0.8rem;font-weight:600;color:#cbd5e1;">Pre-Configured Threat Hunting Hypotheses</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn-secondary" onclick="applyHuntingPreset('high_entropy_dns')">🔎 High Shannon Entropy DNS</button>
           <button class="btn-secondary" onclick="applyHuntingPreset('stealth_scan')">⚡ TCP Stealth Port Probes</button>
@@ -408,12 +483,32 @@
           <button class="btn-secondary" onclick="applyHuntingPreset('cleartext_on_443')">🔒 Cleartext HTTP on Port 443</button>
           <button class="btn-secondary" onclick="applyHuntingPreset('irc_beaconing')">📡 IRC Botnet Beaconing</button>
         </div>
+
+        <div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;">
+          <select id="hunting-type-select" class="filter-select" style="min-width:140px;">
+            <option value="preset">Preset Hypothesis</option>
+            <option value="rule">Rule Name</option>
+            <option value="ip">IP Address</option>
+            <option value="port">Port</option>
+            <option value="anomaly">Statistical Anomaly</option>
+            <option value="kql">KQL Expression</option>
+          </select>
+          <input type="text" id="hunting-query-input" class="filter-search-input" style="flex:1;min-width:200px;font-family:var(--font-mono);font-size:0.8rem;" placeholder="Search term, IP, port, or custom query…" onkeydown="if(event.key==='Enter') executeCustomHunt()" />
+          <select id="hunting-hours-select" class="filter-select" style="min-width:110px;">
+            <option value="1">Last 1 Hour</option>
+            <option value="6">Last 6 Hours</option>
+            <option value="24" selected>Last 24 Hours</option>
+            <option value="168">Last 7 Days</option>
+          </select>
+          <button class="btn-primary" onclick="executeCustomHunt()" style="padding:6px 14px;">Execute Hunt</button>
+        </div>
       </div>
       <div class="table-wrapper">
         <table class="alerts-table" id="hunting-results-table">
           <thead>
             <tr>
               <th>Timestamp</th>
+              <th>Classification</th>
               <th>Matched Pattern</th>
               <th>Source</th>
               <th>Destination</th>
@@ -423,7 +518,7 @@
             </tr>
           </thead>
           <tbody id="hunting-results-tbody">
-            <tr><td colspan="7" class="empty-state">Select a hunting preset above to execute hypothesis search across captured telemetry.</td></tr>
+            <tr><td colspan="8" class="empty-state">Select a hunting preset above or enter a search term to execute hypothesis search across captured telemetry.</td></tr>
           </tbody>
         </table>
       </div>
@@ -654,14 +749,142 @@
       </div>
 
       <div style="padding:20px;display:flex;flex-direction:column;gap:20px;">
-        <!-- Notification Providers Status & Test -->
+        <!-- Notification Providers Status Overview -->
         <div style="background:rgba(15,23,42,0.4);border:1px solid var(--border);border-radius:var(--radius);padding:16px;">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-            <h3 style="font-size:0.88rem;font-weight:600;color:#f1f5f9;">Notification Outbox Integrations</h3>
-            <button class="btn-secondary" onclick="sendTestNotification()">Dispatch Test Webhook Alert</button>
+            <h3 style="font-size:0.88rem;font-weight:600;color:#f1f5f9;">Active Provider Status</h3>
+            <button class="btn-secondary" onclick="loadNotificationConfig()">Refresh Status</button>
           </div>
           <div id="providers-status-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;">
             <div class="loading-state">Loading provider status…</div>
+          </div>
+        </div>
+
+        <!-- ── Notification Integrations Configuration Wizard (Phase 6) ── -->
+        <div style="background:rgba(15,23,42,0.4);border:1px solid var(--border);border-radius:var(--radius);padding:16px;">
+          <h3 style="font-size:0.88rem;font-weight:600;color:#f1f5f9;margin-bottom:6px;">Alert Notification Configuration Wizard</h3>
+          <p style="font-size:0.75rem;color:#94a3b8;margin-bottom:16px;">Configure outbound incident alerting channels. NetGuard dispatches qualifying alerts asynchronously via background outbox workers with cooldown deduplication.</p>
+
+          <!-- Integration Tabs -->
+          <div style="display:flex;gap:8px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:16px;">
+            <button class="btn-secondary" id="tab-btn-email" onclick="showNotifTab('email')">📧 SMTP Email</button>
+            <button class="btn-secondary" id="tab-btn-telegram" onclick="showNotifTab('telegram')">✈️ Telegram</button>
+            <button class="btn-secondary" id="tab-btn-webhook" onclick="showNotifTab('webhook')">🔗 Webhook</button>
+            <button class="btn-secondary" id="tab-btn-sms" onclick="showNotifTab('sms')">📱 Twilio SMS</button>
+          </div>
+
+          <!-- Tab 1: SMTP Email -->
+          <div id="notif-tab-email" class="notif-tab-pane">
+            <div style="background:rgba(30,41,59,0.3);border-radius:6px;padding:12px;margin-bottom:14px;font-size:0.75rem;color:#94a3b8;line-height:1.5;">
+              <strong style="color:#e2e8f0;">How Email Works in NetGuard:</strong> NetGuard does not run its own mail server. It connects securely to your SMTP relay (e.g. Gmail, Office 365, or internal Postfix) using your credentials, and sends alerts from your <em>Sender Address</em> to your <em>Recipient Address</em>.
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:14px;">
+              <span style="font-size:0.72rem;color:var(--text-muted);align-self:center;">Quick Presets:</span>
+              <button class="btn-secondary" style="font-size:0.7rem;padding:3px 8px;" onclick="applySmtpPreset('gmail')">Gmail (smtp.gmail.com)</button>
+              <button class="btn-secondary" style="font-size:0.7rem;padding:3px 8px;" onclick="applySmtpPreset('office365')">Office 365 (smtp.office365.com)</button>
+              <button class="btn-secondary" style="font-size:0.7rem;padding:3px 8px;" onclick="applySmtpPreset('local')">Local Relay (localhost:25)</button>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <div class="form-group">
+                <label class="form-label" for="cfg-smtp-host">SMTP Host</label>
+                <input type="text" id="cfg-smtp-host" class="form-input" placeholder="smtp.gmail.com" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-smtp-port">SMTP Port</label>
+                <input type="number" id="cfg-smtp-port" class="form-input" value="587" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-smtp-user">SMTP Username</label>
+                <input type="text" id="cfg-smtp-user" class="form-input" placeholder="soc-alerts@example.com" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-smtp-pass">SMTP Password / App Password</label>
+                <input type="password" id="cfg-smtp-pass" class="form-input" placeholder="Enter password (leave blank to keep existing)" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-smtp-from">Sender Address (From)</label>
+                <input type="email" id="cfg-smtp-from" class="form-input" placeholder="netguard-alerts@example.com" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-smtp-to">Recipient Address (To)</label>
+                <input type="email" id="cfg-smtp-to" class="form-input" placeholder="analyst@example.com" />
+              </div>
+            </div>
+            <div style="display:flex;gap:10px;margin-top:10px;">
+              <button class="btn-primary" onclick="saveNotificationProvider('email')">Save Email Settings</button>
+              <button class="btn-secondary" onclick="testNotificationProvider('email')">Dispatch Test Email</button>
+            </div>
+          </div>
+
+          <!-- Tab 2: Telegram -->
+          <div id="notif-tab-telegram" class="notif-tab-pane" style="display:none;">
+            <div style="background:rgba(30,41,59,0.3);border-radius:6px;padding:12px;margin-bottom:14px;font-size:0.75rem;color:#94a3b8;line-height:1.5;">
+              <strong style="color:#e2e8f0;">Telegram Bot Setup:</strong> 1. Create a bot via <code>@BotFather</code> to get your <em>Bot Token</em>. 2. Message <code>@userinfobot</code> or add your bot to a channel to get your <em>Chat ID</em>.
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <div class="form-group">
+                <label class="form-label" for="cfg-tg-token">Bot Token</label>
+                <input type="password" id="cfg-tg-token" class="form-input" placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-tg-chat">Target Chat ID</label>
+                <input type="text" id="cfg-tg-chat" class="form-input" placeholder="-100123456789 or 987654321" />
+              </div>
+            </div>
+            <div style="display:flex;gap:10px;margin-top:10px;">
+              <button class="btn-primary" onclick="saveNotificationProvider('telegram')">Save Telegram Settings</button>
+              <button class="btn-secondary" onclick="testNotificationProvider('telegram')">Dispatch Test Telegram Alert</button>
+            </div>
+          </div>
+
+          <!-- Tab 3: Webhook -->
+          <div id="notif-tab-webhook" class="notif-tab-pane" style="display:none;">
+            <div style="background:rgba(30,41,59,0.3);border-radius:6px;padding:12px;margin-bottom:14px;font-size:0.75rem;color:#94a3b8;line-height:1.5;">
+              <strong style="color:#e2e8f0;">Webhook Delivery:</strong> Sends HTTP POST JSON alert payloads to your SIEM, SOAR, or custom endpoint. Includes HMAC-SHA256 signature header <code>X-NetGuard-Signature</code> when secret is specified.
+            </div>
+            <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;">
+              <div class="form-group">
+                <label class="form-label" for="cfg-wh-url">Webhook Destination URL</label>
+                <input type="url" id="cfg-wh-url" class="form-input" placeholder="https://siem.corp.internal/api/v1/netguard-alerts" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-wh-secret">HMAC Signature Secret (Optional)</label>
+                <input type="password" id="cfg-wh-secret" class="form-input" placeholder="Shared signing secret" />
+              </div>
+            </div>
+            <div style="display:flex;gap:10px;margin-top:10px;">
+              <button class="btn-primary" onclick="saveNotificationProvider('webhook')">Save Webhook Settings</button>
+              <button class="btn-secondary" onclick="testNotificationProvider('webhook')">Dispatch Test Webhook Alert</button>
+            </div>
+          </div>
+
+          <!-- Tab 4: Twilio SMS -->
+          <div id="notif-tab-sms" class="notif-tab-pane" style="display:none;">
+            <div style="background:rgba(30,41,59,0.3);border-radius:6px;padding:12px;margin-bottom:14px;font-size:0.75rem;color:#94a3b8;line-height:1.5;">
+              <strong style="color:#e2e8f0;">Twilio SMS Gateway:</strong> Dispatches high/critical incident SMS alerts via Twilio REST API. Requires active Twilio Account SID, Auth Token, and verified phone number. Standard carrier SMS rates apply.
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <div class="form-group">
+                <label class="form-label" for="cfg-sms-sid">Twilio Account SID</label>
+                <input type="text" id="cfg-sms-sid" class="form-input" placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-sms-token">Auth Token</label>
+                <input type="password" id="cfg-sms-token" class="form-input" placeholder="Your Twilio auth token" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-sms-from">Sender Phone Number (From)</label>
+                <input type="tel" id="cfg-sms-from" class="form-input" placeholder="+15005550006" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-sms-to">Recipient Phone Number (To)</label>
+                <input type="tel" id="cfg-sms-to" class="form-input" placeholder="+15551234567" />
+              </div>
+            </div>
+            <div style="display:flex;gap:10px;margin-top:10px;">
+              <button class="btn-primary" onclick="saveNotificationProvider('sms')">Save SMS Settings</button>
+              <button class="btn-secondary" onclick="testNotificationProvider('sms')">Dispatch Test SMS</button>
+            </div>
           </div>
         </div>
 
@@ -800,6 +1023,199 @@
       <textarea id="case-desc-input" class="form-textarea" rows="3" placeholder="Summary of suspicious behavior, affected subnets, and containment steps…"></textarea>
     </div>
     <button class="btn-primary" style="width:100%;justify-content:center;" onclick="submitNewCase()">Create Case</button>
+  </div>
+</div>
+
+<!-- Case Detail Modal (Phase 5 - Accessible Case Workspace) -->
+<div class="drawer-overlay" id="case-detail-overlay" onclick="closeCaseDetailModal()"></div>
+<div class="modal" id="case-detail-modal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:215;width:640px;max-width:92vw;max-height:88vh;overflow-y:auto;background:#0f172a;border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-lg);">
+  <div class="modal-header">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <h3 class="modal-title" id="cd-title">Incident Case</h3>
+      <span class="severity-badge" id="cd-sev-badge">Medium</span>
+      <span class="status-pill" id="cd-status-badge" style="font-size:0.7rem;padding:2px 8px;">Open</span>
+    </div>
+    <button class="modal-close" onclick="closeCaseDetailModal()">✕</button>
+  </div>
+  <div class="modal-body" style="padding:20px;display:flex;flex-direction:column;gap:16px;">
+    <!-- Case Metadata & Workflow Controls -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;background:rgba(30,41,59,0.4);border:1px solid var(--border);border-radius:6px;padding:12px;">
+      <div>
+        <div style="font-size:0.7rem;color:var(--text-muted);">Case ID</div>
+        <div id="cd-id" class="mono-val" style="color:var(--accent);font-size:0.82rem;">—</div>
+      </div>
+      <div>
+        <div style="font-size:0.7rem;color:var(--text-muted);">Assigned Investigator</div>
+        <div style="display:flex;gap:6px;margin-top:2px;">
+          <input type="text" id="cd-assignee-input" class="form-input" style="font-size:0.78rem;padding:3px 6px;" />
+          <button class="btn-secondary" style="padding:2px 8px;font-size:0.72rem;" onclick="updateCaseAssignee()">Update</button>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:0.7rem;color:var(--text-muted);">Status Transition</div>
+        <select id="cd-status-select" class="form-select" style="font-size:0.78rem;padding:3px 6px;margin-top:2px;" onchange="updateCaseStatus(this.value)">
+          <option value="open">Open</option>
+          <option value="investigating">Investigating</option>
+          <option value="resolved">Resolved</option>
+          <option value="closed">Closed</option>
+        </select>
+      </div>
+      <div>
+        <div style="font-size:0.7rem;color:var(--text-muted);">Severity Level</div>
+        <select id="cd-sev-select" class="form-select" style="font-size:0.78rem;padding:3px 6px;margin-top:2px;" onchange="updateCaseSeverity(this.value)">
+          <option value="critical">Critical</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Scope / Description -->
+    <div>
+      <div style="font-size:0.75rem;font-weight:600;color:#cbd5e1;margin-bottom:4px;">Incident Scope &amp; Summary</div>
+      <div id="cd-desc" style="font-size:0.78rem;color:#94a3b8;background:rgba(15,23,42,0.5);border:1px solid var(--border);border-radius:6px;padding:10px;line-height:1.5;"></div>
+    </div>
+
+    <!-- Associated Alerts -->
+    <div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+        <span style="font-size:0.75rem;font-weight:600;color:#cbd5e1;">Linked Detection Alerts (<span id="cd-alert-count">0</span>)</span>
+      </div>
+      <div class="table-wrapper" style="max-height:160px;overflow-y:auto;">
+        <table class="alerts-table" style="font-size:0.72rem;">
+          <thead>
+            <tr><th>ID</th><th>Time</th><th>Rule</th><th>Source</th><th>Dest</th><th>Action</th></tr>
+          </thead>
+          <tbody id="cd-alerts-tbody">
+            <tr><td colspan="6" class="empty-state">No alerts linked.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Analyst Notes Timeline -->
+    <div>
+      <div style="font-size:0.75rem;font-weight:600;color:#cbd5e1;margin-bottom:6px;">Investigation Notes &amp; Findings</div>
+      <div id="cd-notes-list" style="max-height:140px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;margin-bottom:10px;">
+        <div style="font-size:0.72rem;color:var(--text-muted);">No notes recorded yet.</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <input type="text" id="cd-new-note" class="form-input" style="flex:1;font-size:0.78rem;" placeholder="Add investigative note (e.g. 'Quarantined host 10.0.0.45 at switch port')..." onkeydown="if(event.key==='Enter') submitCaseNote()" />
+        <button class="btn-primary" style="padding:4px 12px;font-size:0.75rem;" onclick="submitCaseNote()">Add Note</button>
+      </div>
+    </div>
+
+    <!-- Case Actions Footer -->
+    <div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:12px;">
+      <button class="btn-secondary" onclick="exportCurrentCaseReport()">📑 Export Case Report (HTML)</button>
+      <button class="btn-danger" style="background:rgba(239,68,68,0.2);color:#fca5a5;border:1px solid rgba(239,68,68,0.4);" onclick="closeCurrentCase()">Close Case</button>
+    </div>
+  </div>
+</div>
+
+<!-- Visual Query Builder Modal (Phase 1 - Mode A) -->
+<div class="drawer-overlay" id="query-builder-overlay" onclick="closeQueryBuilderModal()"></div>
+<div class="modal" id="query-builder-modal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:220;width:560px;max-width:92vw;background:#0f172a;border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-lg);">
+  <div class="modal-header">
+    <h3 class="modal-title">Build a Search Query</h3>
+    <button class="modal-close" onclick="closeQueryBuilderModal()">✕</button>
+  </div>
+  <div class="modal-body" style="padding:20px;display:flex;flex-direction:column;gap:14px;">
+    <!-- Quick IP Helper -->
+    <div style="background:rgba(30,41,59,0.4);border:1px solid var(--border);border-radius:6px;padding:12px;">
+      <div style="font-size:0.78rem;font-weight:600;color:#cbd5e1;margin-bottom:6px;">Quick IP Search Helper</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input type="text" id="qb-quick-ip" class="form-input" style="flex:1;" placeholder="Enter IPv4 or IPv6 (e.g. 10.64.85.221)" />
+        <select id="qb-ip-endpoint" class="filter-select">
+          <option value="either">Source or Destination</option>
+          <option value="source">Source Only</option>
+          <option value="destination">Destination Only</option>
+        </select>
+        <button class="btn-secondary" onclick="applyQuickIpBuilder()">Insert</button>
+      </div>
+    </div>
+
+    <!-- Structured Condition Rows -->
+    <div>
+      <div style="font-size:0.78rem;font-weight:600;color:#cbd5e1;margin-bottom:6px;">Query Conditions</div>
+      <div id="qb-conditions-container" style="display:flex;flex-direction:column;gap:8px;">
+        <!-- Initial condition row -->
+        <div class="qb-row" style="display:flex;gap:8px;align-items:center;">
+          <select class="filter-select qb-field" style="width:130px;">
+            <option value="src_ip">Source IP</option>
+            <option value="dst_ip">Destination IP</option>
+            <option value="dst_port" selected>Destination Port</option>
+            <option value="src_port">Source Port</option>
+            <option value="protocol">Protocol</option>
+            <option value="direction">Direction</option>
+            <option value="alerted">Alerted</option>
+            <option value="packet_count">Packet Count</option>
+            <option value="byte_count">Byte Count</option>
+            <option value="dns_query">DNS Query</option>
+          </select>
+          <select class="filter-select qb-op" style="width:110px;">
+            <option value=":" selected>Equals (:)</option>
+            <option value="!=">Not Equals (!=)</option>
+            <option value=">">Greater Than (&gt;)</option>
+            <option value="<">Less Than (&lt;)</option>
+            <option value="contains">Contains</option>
+            <option value="startswith">Starts With</option>
+          </select>
+          <input type="text" class="form-input qb-val" style="flex:1;" placeholder="Value (e.g. 443)" value="443" />
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px;">
+        <button class="btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="addQueryBuilderRow('and')">+ AND Condition</button>
+        <button class="btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="addQueryBuilderRow('or')">+ OR Condition</button>
+      </div>
+    </div>
+
+    <!-- Generated Query Preview -->
+    <div>
+      <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:4px;">Generated KQL Expression:</div>
+      <textarea id="qb-preview-box" class="form-textarea" rows="2" style="font-family:var(--font-mono);font-size:0.8rem;background:#090d16;" readonly></textarea>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:10px;border-top:1px solid var(--border);padding-top:12px;">
+      <button class="btn-secondary" onclick="closeQueryBuilderModal()">Cancel</button>
+      <button class="btn-primary" onclick="applyQueryBuilderToTraffic()">Apply &amp; Search</button>
+    </div>
+  </div>
+</div>
+
+<!-- Query Assistant Modal (Phase 1.4) -->
+<div class="drawer-overlay" id="query-assistant-overlay" onclick="closeQueryAssistantModal()"></div>
+<div class="modal" id="query-assistant-modal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:220;width:520px;max-width:92vw;background:#0f172a;border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-lg);">
+  <div class="modal-header">
+    <h3 class="modal-title">Query Generation Assistant</h3>
+    <button class="modal-close" onclick="closeQueryAssistantModal()">✕</button>
+  </div>
+  <div class="modal-body" style="padding:20px;display:flex;flex-direction:column;gap:14px;">
+    <p style="font-size:0.75rem;color:#94a3b8;line-height:1.5;">
+      Describe the network traffic or security telemetry you are looking for in plain English. The assistant translates your intent deterministically into valid KQL without external APIs.
+    </p>
+    <div class="form-group">
+      <label class="form-label" for="qa-intent-input">Search Requirement</label>
+      <input type="text" id="qa-intent-input" class="form-input" placeholder="e.g. Find all traffic involving IP 10.64.85.221" onkeydown="if(event.key==='Enter') generateAssistantKql()" />
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;">
+      <span style="font-size:0.7rem;color:var(--text-muted);">Examples:</span>
+      <button class="btn-secondary" style="font-size:0.68rem;padding:2px 6px;" onclick="setAssistantExample('Find all traffic involving IP 10.64.85.221')">Traffic on IP 10.64.85.221</button>
+      <button class="btn-secondary" style="font-size:0.68rem;padding:2px 6px;" onclick="setAssistantExample('Find all TCP connections to port 443')">TCP Port 443</button>
+      <button class="btn-secondary" style="font-size:0.68rem;padding:2px 6px;" onclick="setAssistantExample('Show suspicious high-severity traffic')">High-Severity Traffic</button>
+      <button class="btn-secondary" style="font-size:0.68rem;padding:2px 6px;" onclick="setAssistantExample('UDP traffic with more than 100 packets')">High UDP Volume</button>
+    </div>
+    <button class="btn-primary" onclick="generateAssistantKql()">Generate KQL</button>
+
+    <div id="qa-result-section" style="display:none;margin-top:6px;">
+      <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:4px;">Generated Query:</div>
+      <div id="qa-kql-output" class="mono-val" style="padding:8px 12px;background:#090d16;border:1px solid var(--border);border-radius:6px;color:#818cf8;font-size:0.82rem;word-break:break-all;"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;">
+        <button class="btn-secondary" onclick="copyAssistantKql()">Copy</button>
+        <button class="btn-primary" onclick="applyAssistantKql()">Execute Search</button>
+      </div>
+    </div>
   </div>
 </div>
 

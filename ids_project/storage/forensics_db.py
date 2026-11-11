@@ -195,6 +195,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
     details_json     TEXT,
     ip_address       TEXT
 );
+
+CREATE TABLE IF NOT EXISTS system_settings (
+    setting_key      TEXT PRIMARY KEY,
+    value_json       TEXT NOT NULL,
+    updated_at       REAL NOT NULL
+);
 """
 
 # ---------------------------------------------------------------------------
@@ -369,6 +375,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
     resource_id      TEXT,
     details_json     TEXT,
     ip_address       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS system_settings (
+    setting_key      TEXT PRIMARY KEY,
+    value_json       TEXT NOT NULL,
+    updated_at       DOUBLE PRECISION NOT NULL
 );
 """
 
@@ -906,6 +918,53 @@ def read_audit_log(conn, limit: int = 100) -> list[dict]:
         cur.execute(sql, (limit,))
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# System Settings Operations
+# ---------------------------------------------------------------------------
+
+def _is_postgres() -> bool:
+    return getattr(config, "DB_BACKEND", "sqlite").lower() == "postgres"
+
+
+def save_system_setting(conn, key: str, value: Any) -> None:
+    """Persist system setting with JSON serialization."""
+    now = time.time()
+    v_json = json.dumps(value)
+    if _is_postgres():
+        sql = """
+            INSERT INTO system_settings (setting_key, value_json, updated_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (setting_key) DO UPDATE SET
+                value_json = EXCLUDED.value_json,
+                updated_at = EXCLUDED.updated_at
+        """
+    else:
+        sql = "INSERT OR REPLACE INTO system_settings (setting_key, value_json, updated_at) VALUES (?, ?, ?)"
+    with _sqlite_lock:
+        cur = conn.cursor()
+        cur.execute(sql, (key, v_json, now))
+        conn.commit()
+        cur.close()
+
+
+def get_system_setting(conn, key: str, default: Any = None) -> Any:
+    """Retrieve JSON-deserialized system setting."""
+    param = "%s" if _is_postgres() else "?"
+    sql = f"SELECT value_json FROM system_settings WHERE setting_key = {param}"
+    with _sqlite_lock:
+        cur = conn.cursor()
+        cur.execute(sql, (key,))
+        row = cur.fetchone()
+        cur.close()
+    if row and row[0]:
+        try:
+            return json.loads(row[0])
+        except Exception:
+            return row[0]
+    return default
     for r in rows:
         try:
             r["details"] = json.loads(r.get("details_json", "{}"))

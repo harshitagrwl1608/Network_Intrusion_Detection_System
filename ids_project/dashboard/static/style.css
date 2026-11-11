@@ -1536,3 +1536,22 @@ tbody tr:hover { background: rgba(99, 102, 241, 0.05); }
   from { transform: translateX(100%); opacity: 0; }
   to   { transform: translateX(0); opacity: 1; }
 }
+
+@keyframes fadeHighlight {
+  0% { background: rgba(99, 102, 241, 0.35); }
+  100% { background: transparent; }
+}
+
+.dns-host {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: #818cf8;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notif-tab-pane {
+  animation: modalIn 0.15s ease;
+}

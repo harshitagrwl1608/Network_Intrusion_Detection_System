@@ -55,6 +55,127 @@ class NotificationOutboxManager:
         self._stop_event = threading.Event()
         self._worker_thread: threading.Thread | None = None
 
+        if self._conn:
+            self.reload_providers_from_db()
+
+    def reload_providers_from_db(self):
+        """Load configured notification provider credentials from persistent system settings."""
+        if not self._conn:
+            return
+        from storage.forensics_db import get_system_setting
+        for name in ("email", "telegram", "webhook", "sms"):
+            try:
+                cfg = get_system_setting(self._conn, f"notification_{name}")
+                if cfg and isinstance(cfg, dict):
+                    self.configure_provider(name, cfg, persist=False)
+            except Exception as exc:
+                logger.debug(f"Failed loading provider setting for {name}: {exc}")
+
+    def configure_provider(self, name: str, cfg: dict, persist: bool = True) -> tuple[bool, str]:
+        """Configure or update a notification provider with persistence."""
+        name_lower = name.lower()
+        if name_lower == "smtp":
+            name_lower = "email"
+        if name_lower not in self._providers:
+            return False, f"Unknown provider '{name}'"
+
+        current_p = self._providers[name_lower]
+
+        if name_lower == "email":
+            pwd = cfg.get("password")
+            if (not pwd or pwd == "********") and hasattr(current_p, "password"):
+                pwd = current_p.password
+            self._providers["email"] = EmailProvider(
+                host=cfg.get("host", ""),
+                port=int(cfg.get("port") or 587),
+                user=cfg.get("user", ""),
+                password=pwd,
+                from_addr=cfg.get("from_addr", ""),
+                to_addr=cfg.get("to_addr", ""),
+                use_tls=bool(cfg.get("use_tls", True)),
+            )
+
+        elif name_lower == "telegram":
+            token = cfg.get("bot_token")
+            if (not token or token == "********") and hasattr(current_p, "bot_token"):
+                token = current_p.bot_token
+            self._providers["telegram"] = TelegramProvider(
+                bot_token=token,
+                chat_id=cfg.get("chat_id", ""),
+            )
+
+        elif name_lower == "webhook":
+            secret = cfg.get("secret")
+            if (not secret or secret == "********") and hasattr(current_p, "secret"):
+                secret = current_p.secret
+            self._providers["webhook"] = WebhookProvider(
+                url=cfg.get("url", ""),
+                secret=secret,
+            )
+
+        elif name_lower == "sms":
+            auth_token = cfg.get("auth_token")
+            if (not auth_token or auth_token == "********") and hasattr(current_p, "auth_token"):
+                auth_token = current_p.auth_token
+            self._providers["sms"] = SmsProvider(
+                account_sid=cfg.get("account_sid", ""),
+                auth_token=auth_token,
+                from_number=cfg.get("from_number", ""),
+                to_number=cfg.get("to_number", ""),
+            )
+
+        if persist and self._conn:
+            from storage.forensics_db import save_system_setting
+            # Persist masked or sanitized dict
+            save_system_setting(self._conn, f"notification_{name_lower}", cfg)
+
+        return True, f"Configured {name_lower}"
+
+    def get_provider_config(self, name: str) -> dict[str, Any]:
+        """Return masked configuration for a provider."""
+        name_lower = name.lower()
+        if name_lower == "smtp":
+            name_lower = "email"
+        p = self._providers.get(name_lower)
+        if not p:
+            return {}
+        if name_lower == "email":
+            return {
+                "host": getattr(p, "host", ""),
+                "port": getattr(p, "port", 587),
+                "user": getattr(p, "user", ""),
+                "from_addr": getattr(p, "from_addr", ""),
+                "to_addr": getattr(p, "to_addr", ""),
+                "use_tls": getattr(p, "use_tls", True),
+                "password_set": bool(getattr(p, "password", "")),
+                "is_configured": p.is_configured,
+                "has_recipient": p.has_recipient,
+            }
+        elif name.lower() == "telegram":
+            return {
+                "chat_id": getattr(p, "chat_id", ""),
+                "bot_token_set": bool(getattr(p, "bot_token", "")),
+                "is_configured": p.is_configured,
+                "has_recipient": p.has_recipient,
+            }
+        elif name.lower() == "webhook":
+            return {
+                "url": getattr(p, "url", ""),
+                "secret_set": bool(getattr(p, "secret", "")),
+                "is_configured": p.is_configured,
+                "has_recipient": p.has_recipient,
+            }
+        elif name.lower() == "sms":
+            return {
+                "account_sid": getattr(p, "account_sid", ""),
+                "from_number": getattr(p, "from_number", ""),
+                "to_number": getattr(p, "to_number", ""),
+                "auth_token_set": bool(getattr(p, "auth_token", "")),
+                "is_configured": p.is_configured,
+                "has_recipient": p.has_recipient,
+            }
+        return {}
+
     def set_connection(self, conn):
         with self._lock:
             self._conn = conn
@@ -240,16 +361,50 @@ class NotificationOutboxManager:
             self._worker_thread.join(timeout=3)
             self._worker_thread = None
 
-    def send_test_notification(self, provider_name: str, recipient: str | None = None) -> dict[str, Any]:
+    def send_test_notification(self, provider_name: str, recipient: str | None = None, custom_cfg: dict | None = None) -> dict[str, Any]:
         """Send a test diagnostic notification through the requested provider."""
-        p = self._providers.get(provider_name.lower())
+        name_lower = provider_name.lower()
+        if name_lower == "smtp":
+            name_lower = "email"
+        p = self._providers.get(name_lower)
         if not p:
             return {"success": False, "provider": provider_name, "message": "Provider not supported"}
+
+        # If custom configuration is provided for testing, use a temporary provider instance
+        if custom_cfg and isinstance(custom_cfg, dict):
+            if name_lower == "email":
+                p = EmailProvider(
+                    host=custom_cfg.get("host", getattr(p, "host", "")),
+                    port=int(custom_cfg.get("port") or getattr(p, "port", 587)),
+                    user=custom_cfg.get("user", getattr(p, "user", "")),
+                    password=custom_cfg.get("password") or getattr(p, "password", ""),
+                    from_addr=custom_cfg.get("from_addr", getattr(p, "from_addr", "")),
+                    to_addr=custom_cfg.get("to_addr", getattr(p, "to_addr", "")),
+                    use_tls=bool(custom_cfg.get("use_tls", getattr(p, "use_tls", True))),
+                )
+            elif name_lower == "telegram":
+                p = TelegramProvider(
+                    bot_token=custom_cfg.get("bot_token") or getattr(p, "bot_token", ""),
+                    chat_id=custom_cfg.get("chat_id", getattr(p, "chat_id", "")),
+                )
+            elif name_lower == "webhook":
+                p = WebhookProvider(
+                    url=custom_cfg.get("url", getattr(p, "url", "")),
+                    secret=custom_cfg.get("secret") or getattr(p, "secret", ""),
+                )
+            elif name_lower == "sms":
+                p = SmsProvider(
+                    account_sid=custom_cfg.get("account_sid", getattr(p, "account_sid", "")),
+                    auth_token=custom_cfg.get("auth_token") or getattr(p, "auth_token", ""),
+                    from_number=custom_cfg.get("from_number", getattr(p, "from_number", "")),
+                    to_number=custom_cfg.get("to_number", getattr(p, "to_number", "")),
+                )
+
         if not p.is_configured:
             return {
                 "success": False,
                 "provider": provider_name,
-                "message": f"Provider '{provider_name}' is not configured in environment / .env",
+                "message": f"Provider '{provider_name}' is not configured (missing host, from-address, token, or URL)",
             }
 
         subj = "Diagnostic Test Alert"

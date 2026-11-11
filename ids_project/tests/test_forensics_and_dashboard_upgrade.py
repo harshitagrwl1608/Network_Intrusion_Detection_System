@@ -36,6 +36,8 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.tmp_dir, "test_forensics.db")
+        self.orig_sqlite = config.SQLITE_PATH
+        self.orig_backend = config.DB_BACKEND
         config.DB_BACKEND = "sqlite"
         config.SQLITE_PATH = self.db_path
 
@@ -60,6 +62,8 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
                 pass
             d_app._db_conn = None
         d_app._offline_analyzer = None
+        config.SQLITE_PATH = self.orig_sqlite
+        config.DB_BACKEND = self.orig_backend
         if os.path.exists(self.tmp_dir):
             shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
