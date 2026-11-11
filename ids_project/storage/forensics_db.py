@@ -443,6 +443,33 @@ def _create_forensics_indexes(conn, cur):
 
 def upsert_network_flow(conn, flow: dict):
     """Insert or update a network flow record."""
+    full_flow = {
+        "flow_id": flow["flow_id"],
+        "start_time": flow.get("start_time", time.time()),
+        "last_seen": flow.get("last_seen", time.time()),
+        "src_ip": flow.get("src_ip", ""),
+        "dst_ip": flow.get("dst_ip", ""),
+        "src_port": flow.get("src_port"),
+        "dst_port": flow.get("dst_port"),
+        "protocol": flow.get("protocol", "IP"),
+        "packet_count": flow.get("packet_count", 1),
+        "byte_count": flow.get("byte_count", 0),
+        "tcp_flags": flow.get("tcp_flags"),
+        "interface": flow.get("interface"),
+        "src_mac": flow.get("src_mac"),
+        "dst_mac": flow.get("dst_mac"),
+        "direction": flow.get("direction"),
+        "hostname": flow.get("hostname"),
+        "app_protocol": flow.get("app_protocol"),
+        "dns_query": flow.get("dns_query"),
+        "http_method": flow.get("http_method"),
+        "http_host": flow.get("http_host"),
+        "http_uri": flow.get("http_uri"),
+        "tls_sni": flow.get("tls_sni"),
+        "alert_count": flow.get("alert_count", 0),
+        "last_alert_id": flow.get("last_alert_id"),
+        "pcap_segment_id": flow.get("pcap_segment_id"),
+    }
     if config.DB_BACKEND == "sqlite":
         sql = """
             INSERT INTO network_flows (
@@ -473,7 +500,7 @@ def upsert_network_flow(conn, flow: dict):
         """
         with _sqlite_lock:
             cur = conn.cursor()
-            cur.execute(sql, flow)
+            cur.execute(sql, full_flow)
             conn.commit()
             cur.close()
     else:
@@ -506,7 +533,7 @@ def upsert_network_flow(conn, flow: dict):
                 pcap_segment_id = COALESCE(EXCLUDED.pcap_segment_id, network_flows.pcap_segment_id)
         """
         cur = conn.cursor()
-        cur.execute(sql, flow)
+        cur.execute(sql, full_flow)
         conn.commit()
         cur.close()
 
@@ -626,14 +653,24 @@ def get_flow_by_id(conn, flow_id: str) -> dict | None:
 
 def write_packet_event(conn, event: dict):
     """Insert a forensic packet event record."""
-    sql = """
-        INSERT INTO packet_events (
-            event_id, timestamp, flow_id, src_ip, dst_ip, src_port, dst_port,
-            protocol, packet_len, tcp_flags, payload_preview, alert_id,
-            pcap_segment_id, packet_index
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
+    if config.DB_BACKEND == "postgres":
+        sql = """
+            INSERT INTO packet_events (
+                event_id, timestamp, flow_id, src_ip, dst_ip, src_port, dst_port,
+                protocol, packet_len, tcp_flags, payload_preview, alert_id,
+                pcap_segment_id, packet_index, raw_hex
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+    else:
+        sql = """
+            INSERT INTO packet_events (
+                event_id, timestamp, flow_id, src_ip, dst_ip, src_port, dst_port,
+                protocol, packet_len, tcp_flags, payload_preview, alert_id,
+                pcap_segment_id, packet_index, raw_hex
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(sql, (
@@ -651,6 +688,7 @@ def write_packet_event(conn, event: dict):
             event.get("alert_id"),
             event.get("pcap_segment_id"),
             event.get("packet_index"),
+            event.get("raw_hex"),
         ))
         conn.commit()
         cur.close()

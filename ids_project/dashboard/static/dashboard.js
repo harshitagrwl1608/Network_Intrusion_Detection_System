@@ -19,6 +19,25 @@ let _calYear = new Date().getFullYear();
 let _calMonth = new Date().getMonth() + 1;
 let _calSelectedDay = null;
 let _calDayData = {};
+let _csrfToken = "";
+
+async function initCsrf() {
+  try {
+    const res = await fetch("/api/csrf-token");
+    const data = await res.json();
+    _csrfToken = data.csrf_token || "";
+  } catch (e) {
+    console.warn("Could not load CSRF token:", e);
+  }
+}
+
+function getAuthHeaders(extra = {}) {
+  const h = { ...extra };
+  if (_csrfToken) {
+    h["X-CSRFToken"] = _csrfToken;
+  }
+  return h;
+}
 
 const CAL_MONTHS = [
   "January", "February", "March", "April", "May", "June",
@@ -536,7 +555,7 @@ async function submitFeedback(classification) {
   try {
     const res = await fetch("/api/feedback/reclassify", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         alert_id: _currentModalAlert.id,
         new_classification: classification,
@@ -733,7 +752,7 @@ function openSaveSearchModal() {
   const proto = document.getElementById("traffic-proto-filter")?.value || "";
   fetch("/api/saved-searches", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ name: name, query: { search, port, protocol: proto } }),
   }).then(r => r.json()).then(res => {
     if (res.status === "ok") showToast(`Saved search "${name}" created`, "success");
@@ -792,6 +811,7 @@ function handlePcapFileUpload(file) {
 
   fetch("/api/pcap/upload", {
     method: "POST",
+    headers: getAuthHeaders(),
     body: formData,
   })
     .then(r => r.json())
@@ -878,7 +898,7 @@ async function submitNewCase() {
   try {
     const res = await fetch("/api/cases", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         title: title,
         severity: sev,
@@ -946,7 +966,7 @@ function viewCaseDetail(caseId) {
     if (newStatus && ["open", "investigating", "resolved", "closed"].includes(newStatus.toLowerCase())) {
       fetch(`/api/cases/${caseId}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ status: newStatus.toLowerCase() }),
       }).then(() => {
         showToast(`Case ${caseId} moved to ${newStatus}`, "success");
@@ -1020,10 +1040,13 @@ async function loadRuleHealth() {
       const tp = s.true_positive;
       const fp = s.false_positive;
       const total = tp + fp;
-      const prec = total > 0 ? ((tp / total) * 100).toFixed(1) + "%" : "100.0% (Default)";
-      let rec = "Optimal Threshold";
-      if (fp > 5 && fp > tp) rec = "Consider Raising Threshold or Port Scope";
-      else if (tp > 10 && fp === 0) rec = "High-Fidelity Deterministic Signature";
+      const prec = total > 0 ? ((tp / total) * 100).toFixed(1) + "%" : "N/A (No reviews yet)";
+      let rec = "Awaiting Analyst Reviews (Sample N=0)";
+      if (total > 0) {
+        rec = "Optimal Threshold";
+        if (fp > 5 && fp > tp) rec = "Consider Raising Threshold or Port Scope";
+        else if (tp > 10 && fp === 0) rec = "High-Fidelity Deterministic Signature";
+      }
 
       return `
         <tr>
@@ -1099,7 +1122,7 @@ async function sendTestNotification() {
   try {
     const res = await fetch("/api/notifications/test", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ provider: "webhook" }),
     }).then(r => r.json());
     showToast(res.message || "Test dispatched", "success");
@@ -1115,7 +1138,7 @@ async function toggleBaselineQuarantine() {
     const target = !(status.quarantine_active ?? false);
     const res = await fetch("/api/baselines/quarantine", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ quarantine: target }),
     }).then(r => r.json());
     showToast(`Quarantine mode: ${res.quarantined ? 'ENABLED (Frozen)' : 'DISABLED (Active)'}`, "success");
@@ -1178,6 +1201,7 @@ function refreshAll() {
 
 // ── App Startup ──
 document.addEventListener("DOMContentLoaded", () => {
+  initCsrf();
   initChart();
   loadRuleMetadata();
   loadStatus();

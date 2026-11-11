@@ -15,6 +15,7 @@ import sqlite3
 import hashlib
 import logging
 import threading
+import concurrent.futures
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -73,11 +74,15 @@ class OfflinePcapAnalyzer:
     Orchestrates secure background PCAP analysis jobs in full isolation.
     """
 
-    def __init__(self, main_conn=None, upload_dir: str = "storage/uploads", db=None):
+    def __init__(self, main_conn=None, upload_dir: str = "storage/uploads", db=None, max_workers: int = 2,
+                 blocklist: set | None = None, jobs_dir: str | None = None):
         self._main_conn = main_conn if main_conn is not None else db
-        self._upload_dir = upload_dir
+        self._upload_dir = jobs_dir if jobs_dir is not None else upload_dir
+        self._blocklist = blocklist
         self._active_jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._max_workers = max_workers
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="pcap-analyzer")
         os.makedirs(self._upload_dir, exist_ok=True)
 
     def set_connection(self, conn):
@@ -155,10 +160,13 @@ class OfflinePcapAnalyzer:
         return job_record
 
     def run_job_async(self, job_id: str):
-        """Spawn background worker thread for offline job execution."""
-        t = threading.Thread(target=self._execute_job, args=(job_id,), daemon=True)
-        t.start()
-        return t
+        """Submit offline job execution to the bounded worker pool."""
+        return self._executor.submit(self._execute_job, job_id)
+
+    def run_job_sync(self, job_id: str) -> dict[str, Any]:
+        """Execute job synchronously on caller thread and return final job status."""
+        self._execute_job(job_id)
+        return self.get_job(job_id) or {}
 
     def _execute_job(self, job_id: str):
         """
@@ -170,12 +178,15 @@ class OfflinePcapAnalyzer:
 
         file_path = job["file_path"]
         isolated_db_path = f"/tmp/netguard_isolated_{job_id}.db"
+        isolated_arp_path = f"/tmp/netguard_arp_{job_id}.json"
+        isolated_spool_path = f"/tmp/netguard_spool_{job_id}.jsonl"
 
         start_t = time.time()
         self._update_job_status(job_id, status="running", start_time=start_t, progress=10.0)
 
         isolated_conn = None
         engine = None
+        job_cfg = None
         try:
             # Create isolated database
             isolated_conn = sqlite3.connect(isolated_db_path, check_same_thread=False)
@@ -186,39 +197,22 @@ class OfflinePcapAnalyzer:
             import types
             job_cfg = types.SimpleNamespace(**{k: getattr(config, k) for k in dir(config) if not k.startswith("__")})
             job_cfg.SQLITE_PATH = isolated_db_path
-            isolated_arp_path = f"/tmp/netguard_arp_{job_id}.json"
             job_cfg.ARP_TABLE_PATH = isolated_arp_path
-            job_cfg.ALERT_SPOOL_PATH = f"/tmp/netguard_spool_{job_id}.jsonl"
+            job_cfg.ALERT_SPOOL_PATH = isolated_spool_path
 
-            blocklist = load_blocklist(config.BLOCKLIST_PATH)
-            trusted = getattr(config, "TRUSTED_HOSTS", set())
-            engine = RuleEngine(blocklist, trusted, job_cfg)
-            # Route writes to isolated DB
-            engine._write_alert = lambda conn, alert: isolated_conn.execute(
-                """
-                INSERT OR IGNORE INTO alerts (
-                    timestamp, rule_name, rule_version, src_ip, dst_ip, src_port, dst_port,
-                    protocol, detail, severity, confidence, evidence_json, idempotency_key
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    alert.get("timestamp"), alert.get("rule_name"), alert.get("rule_version"),
-                    alert.get("src_ip"), alert.get("dst_ip"), alert.get("src_port"),
-                    alert.get("dst_port"), alert.get("protocol"), alert.get("detail"),
-                    alert.get("severity"), alert.get("confidence"), alert.get("evidence_json"),
-                    alert.get("idempotency_key"),
-                )
-            )
+            threat_blocklist = self._blocklist if self._blocklist is not None else load_blocklist(getattr(job_cfg, "BLOCKLIST_PATH", config.BLOCKLIST_PATH))
+            engine = RuleEngine(isolated_conn, threat_blocklist, job_cfg)
 
-            self._update_job_status(job_id, progress=30.0)
+            def _on_progress(proc, tot, pct):
+                progress_val = pct if pct is not None else min(95.0, round((proc / max(tot, 1)) * 100.0, 1))
+                self._update_job_status(job_id, progress=progress_val, processed_packets=proc, total_packets=tot)
 
-            # Replay PCAP
-            replay_res = replay_pcap(file_path, engine)
+            # Replay PCAP with actual progress callbacks
+            replay_res = replay_pcap(file_path, engine, progress_callback=_on_progress)
             processed = replay_res.get("processed", 0)
             total = replay_res.get("total", 0)
 
-            # Flush engine
+            # Flush engine to guarantee all alert writes and device writes complete
             engine.flush()
             isolated_conn.commit()
 
@@ -236,7 +230,7 @@ class OfflinePcapAnalyzer:
             cur.execute("SELECT severity, COUNT(*) as cnt FROM alerts GROUP BY severity")
             sev_counts = {r[0]: r[1] for r in cur.fetchall()}
 
-            cur.execute("SELECT * FROM alerts ORDER BY timestamp ASC LIMIT 500")
+            cur.execute("SELECT * FROM alerts ORDER BY timestamp ASC LIMIT 5000")
             sample_alerts = [dict(r) for r in cur.fetchall()]
             cur.close()
 
@@ -311,17 +305,32 @@ class OfflinePcapAnalyzer:
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Fetch job details from DB or memory cache."""
+        res = None
         with self._lock:
             if job_id in self._active_jobs:
-                return self._active_jobs[job_id].copy()
+                res = self._active_jobs[job_id].copy()
 
-        if self._main_conn:
+        if res is None and self._main_conn:
             cur = self._main_conn.cursor()
             cur.execute("SELECT * FROM pcap_jobs WHERE job_id = ?", (job_id,))
             row = cur.fetchone()
             cur.close()
-            return dict(row) if row else None
-        return None
+            res = dict(row) if row else None
+
+        if res and "result_summary_json" in res and res["result_summary_json"]:
+            try:
+                parsed = json.loads(res["result_summary_json"])
+                if isinstance(parsed, dict):
+                    if "alerts" in parsed:
+                        res["alerts"] = parsed["alerts"]
+                    if "rule_breakdown" in parsed:
+                        res["rule_breakdown"] = parsed["rule_breakdown"]
+                    if "severity_breakdown" in parsed:
+                        res["severity_breakdown"] = parsed["severity_breakdown"]
+            except Exception:
+                pass
+
+        return res
 
     def list_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
         """List historical PCAP analysis jobs."""
@@ -332,3 +341,48 @@ class OfflinePcapAnalyzer:
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
         return rows
+
+    def cleanup_job(self, job_id: str) -> bool:
+        """Purge temporary storage files, isolated DB, and uploaded capture for a completed/failed job."""
+        job = self.get_job(job_id)
+        if not job:
+            return False
+        with self._lock:
+            # Remove uploaded file
+            file_path = job.get("file_path")
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+            # Remove isolated database
+            isolated_db_path = f"/tmp/netguard_isolated_{job_id}.db"
+            if os.path.exists(isolated_db_path):
+                try:
+                    os.remove(isolated_db_path)
+                except Exception:
+                    pass
+            # Clean up job record from active_jobs or database
+            if job_id in self._active_jobs:
+                del self._active_jobs[job_id]
+            if self._main_conn:
+                try:
+                    cur = self._main_conn.cursor()
+                    cur.execute("DELETE FROM pcap_jobs WHERE job_id = ?", (job_id,))
+                    self._main_conn.commit()
+                    cur.close()
+                except Exception:
+                    pass
+            return True
+
+    def prune_expired_jobs(self, max_age_seconds: float = 86400):
+        """Enforce disk retention policy by purging jobs older than max_age_seconds."""
+        now = time.time()
+        for job in self.list_jobs(limit=200):
+            created_at = job.get("created_at") or 0.0
+            if now - created_at > max_age_seconds:
+                self.cleanup_job(job["job_id"])
+
+    def shutdown(self, wait: bool = False):
+        """Cleanly shutdown the worker pool."""
+        self._executor.shutdown(wait=wait)

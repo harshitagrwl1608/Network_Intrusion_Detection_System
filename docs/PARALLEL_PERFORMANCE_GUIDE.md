@@ -129,3 +129,4 @@ export NETGUARD_REORDER_BUFFER=512
 ```
 
 For edge devices running on limited power budgets, set `NETGUARD_PERF_PROFILE=low` to keep memory utilization below $45\text{ MB}$.
+

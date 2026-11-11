@@ -110,3 +110,4 @@ Response:
 curl -O http://localhost:5000/api/traffic/flow_8d94e2f10c3b/pcap
 ```
 Streams a valid libpcap binary stream containing only the frames exchanged during that specific session.
+

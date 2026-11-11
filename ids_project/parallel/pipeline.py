@@ -32,6 +32,8 @@ class ParallelReorderBuffer:
         self._next_seq = start_seq
         self._max_size = max_size
         self._heap: list[tuple[int, dict | None]] = []
+        self.dropped_records_count = 0
+        self.gaps_skipped = 0
 
     @property
     def next_seq(self) -> int:
@@ -55,11 +57,15 @@ class ParallelReorderBuffer:
 
         # Safety valve: if buffer exceeds max_size, advance to avoid deadlock on dropped packet
         if len(self._heap) > self._max_size:
+            target_seq = self._heap[0][0]
+            gap = target_seq - self._next_seq
+            self.gaps_skipped += 1
+            self.dropped_records_count += max(0, gap)
             logger.warning(
                 f"Reorder buffer overflow ({len(self._heap)} > {self._max_size}). "
-                f"Skipping gap at seq {self._next_seq} to {self._heap[0][0]}"
+                f"Skipping gap of {gap} packets at seq {self._next_seq} to {target_seq}"
             )
-            self._next_seq = self._heap[0][0]
+            self._next_seq = target_seq
             while self._heap and self._heap[0][0] == self._next_seq:
                 _, rec = heapq.heappop(self._heap)
                 self._next_seq += 1
@@ -218,6 +224,8 @@ class ParallelCapturePipeline:
         return {
             "total_packets": total_packets,
             "processed_packets": processed_packets,
+            "dropped_records": self.reorder_buffer.dropped_records_count,
+            "gaps_skipped": self.reorder_buffer.gaps_skipped,
             "duration_seconds": duration,
             "packets_per_sec": pps,
             "workers_used": self.workers,

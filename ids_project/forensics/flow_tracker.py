@@ -86,8 +86,9 @@ class FlowTracker:
     """
 
     def __init__(self, conn=None, max_active_flows: int = 8192,
-                 flow_idle_timeout: float = 60.0, max_context_packets: int = 8):
-        self._conn = conn
+                 flow_idle_timeout: float = 60.0, max_context_packets: int = 8,
+                 db_conn=None, db=None):
+        self._conn = conn if conn is not None else (db_conn if db_conn is not None else db)
         self._max_active_flows = max_active_flows
         self._flow_idle_timeout = flow_idle_timeout
         self._max_context_packets = max_context_packets
@@ -100,6 +101,12 @@ class FlowTracker:
         # Set of flow_ids marked dirty that need flushing to DB
         self._dirty_flow_ids: set[str] = set()
 
+        import queue as _queue
+        self._write_queue: _queue.Queue = _queue.Queue(maxsize=4096)
+        self._stop_event = threading.Event()
+        self._writer_thread = threading.Thread(target=self._persistence_worker, daemon=True, name="flow-tracker-writer")
+        self._writer_thread.start()
+
         self._last_prune = time.time()
         self._stats = {
             "packets_processed": 0,
@@ -107,6 +114,28 @@ class FlowTracker:
             "flows_flushed": 0,
             "alerts_correlated": 0,
         }
+
+    def _persistence_worker(self):
+        """Asynchronous database writer draining flow and packet event records off capture hot path."""
+        import queue as _queue
+        while not self._stop_event.is_set():
+            try:
+                item_type, data = self._write_queue.get(timeout=0.2)
+                if item_type == "stop":
+                    self._write_queue.task_done()
+                    break
+                if self._conn is not None:
+                    try:
+                        if item_type == "flow":
+                            upsert_network_flow(self._conn, data)
+                            self._stats["flows_flushed"] += 1
+                        elif item_type == "event":
+                            write_packet_event(self._conn, data)
+                    except Exception as exc:
+                        logger.debug(f"Flow async write error ({item_type}): {exc}")
+                self._write_queue.task_done()
+            except _queue.Empty:
+                pass
 
     def set_connection(self, conn):
         """Update database connection reference."""
@@ -236,6 +265,7 @@ class FlowTracker:
                 "packet_len": pkt_len,
                 "tcp_flags": flags,
                 "payload_preview": payload_sample,
+                "raw_hex": record.get("raw_hex"),
                 "pcap_segment_id": pcap_segment_id,
                 "packet_index": packet_index,
             }
@@ -283,12 +313,15 @@ class FlowTracker:
                     if pkt.get("event_id") == event_id or alert_id is not None:
                         evt_data["alert_id"] = alert_id
                     try:
-                        write_packet_event(self._conn, evt_data)
-                    except Exception as exc:
-                        logger.debug(f"Could not persist packet event {evt_data.get('event_id')}: {exc}")
+                        self._write_queue.put_nowait(("event", evt_data))
+                    except Exception:
+                        try:
+                            write_packet_event(self._conn, evt_data)
+                        except Exception as exc:
+                            logger.debug(f"Could not persist packet event {evt_data.get('event_id')}: {exc}")
 
     def flush(self):
-        """Flush all modified active flows to the database."""
+        """Flush all modified active flows to the database and drain persistence queue."""
         with self._lock:
             if not self._conn or not self._dirty_flow_ids:
                 return
@@ -297,16 +330,35 @@ class FlowTracker:
                 if flow:
                     self._flush_flow_locked(flow)
             self._dirty_flow_ids.clear()
+        try:
+            self._write_queue.join()
+        except Exception:
+            pass
 
     def _flush_flow_locked(self, flow: dict):
-        """Internal helper to upsert a flow while lock is held."""
+        """Internal helper to enqueue a flow upsert off the capture hot path."""
         if not self._conn:
             return
+        flow_copy = flow.copy()
         try:
-            upsert_network_flow(self._conn, flow)
-            self._stats["flows_flushed"] += 1
-        except Exception as exc:
-            logger.warning(f"Flow flush error ({flow.get('flow_id')}): {exc}")
+            self._write_queue.put_nowait(("flow", flow_copy))
+        except Exception:
+            try:
+                upsert_network_flow(self._conn, flow_copy)
+                self._stats["flows_flushed"] += 1
+            except Exception as exc:
+                logger.warning(f"Flow flush error ({flow.get('flow_id')}): {exc}")
+
+    def stop(self):
+        """Stop background persistence worker thread cleanly."""
+        self.flush()
+        self._stop_event.set()
+        try:
+            self._write_queue.put_nowait(("stop", None))
+        except Exception:
+            pass
+        if self._writer_thread.is_alive():
+            self._writer_thread.join(timeout=2.0)
 
     def prune_stale(self, now: float | None = None):
         """Prune inactive flows older than flow_idle_timeout and flush them."""

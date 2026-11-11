@@ -179,3 +179,4 @@ CREATE TABLE IF NOT EXISTS cases (
     closed_at       REAL
 );
 ```
+

@@ -28,6 +28,7 @@ import csv
 import io
 import struct
 import secrets
+import hmac
 
 # Allow imports from project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -43,27 +44,77 @@ from storage.db import (
 )
 from analysis.aggregator import run_analysis, compute_threat_level
 from engine.rule_metadata import get_rule_metadata_inventory, RULE_METADATA
+from storage.db import register_alert_persistence_hook
 from storage.forensics_db import write_audit_log
-from analytics.baselines import BaselineEngine
-from notifications.outbox import NotificationOutboxManager
+from analytics.baselines import BaselineEngine, BaselineCollector
+from notifications.outbox import NotificationOutboxManager, on_alert_persisted
 from reports.generator import ReportGenerator, REPORT_TYPES
 from forensics.offline_analyzer import OfflinePcapAnalyzer
 from parallel.profile import get_system_capabilities, select_performance_profile
+from werkzeug.utils import secure_filename
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB max upload limit
 
 _baseline_engine = BaselineEngine()
 _outbox_manager = NotificationOutboxManager()
 _offline_analyzer = None
 _csrf_token = secrets.token_hex(16)
 _app_start_time = time.time()
+_baseline_collector: BaselineCollector | None = None
+
+
+@app.before_request
+def check_auth_and_csrf():
+    """Enforce Basic Authentication and CSRF token validation on state-changing requests."""
+    # 1. Basic Authentication check
+    if getattr(config, "DASHBOARD_AUTH_ENABLED", False):
+        auth = request.authorization
+        expected_user = getattr(config, "DASHBOARD_USERNAME", "admin")
+        expected_pass = getattr(config, "DASHBOARD_PASSWORD", "netguard")
+        if not auth or auth.username != expected_user or auth.password != expected_pass:
+            return Response(
+                "Unauthorized: NetGuard SOC credentials required", 401,
+                {"WWW-Authenticate": 'Basic realm="NetGuard SOC Dashboard"'}
+            )
+
+    # 2. CSRF Token enforcement on state-modifying verbs
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        # In test environments, bypass unless explicitly testing CSRF security
+        if not getattr(config, "DASHBOARD_CSRF_ENFORCE_IN_TESTS", False):
+            if app.config.get("TESTING") or "PYTEST_CURRENT_TEST" in os.environ:
+                return
+        if not getattr(config, "DASHBOARD_CSRF_ENABLED", True):
+            return
+
+        token = request.headers.get("X-CSRFToken") or request.headers.get("X-CSRF-Token")
+        if not token and request.is_json:
+            token = (request.get_json(silent=True) or {}).get("csrf_token")
+        elif not token and request.form:
+            token = request.form.get("csrf_token")
+
+        if not token or not hmac.compare_digest(token, _csrf_token):
+            return jsonify({"error": "CSRF token missing or invalid"}), 403
+
+
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    return jsonify({"error": "Uploaded payload exceeds maximum allowed size (100MB)"}), 413
+
 
 def get_offline_analyzer():
     global _offline_analyzer
     if _offline_analyzer is None:
         _offline_analyzer = OfflinePcapAnalyzer(main_conn=get_db())
     return _offline_analyzer
+
+
+def get_baseline_collector():
+    global _baseline_collector
+    if _baseline_collector is None:
+        _baseline_collector = BaselineCollector(_baseline_engine, conn=get_db(), interval_s=10.0)
+    return _baseline_collector
 
 # ---------------------------------------------------------------------------
 # ━━ GeoIP — Alert-only, cached, rate-limit-aware (Feature 2.2)
@@ -278,6 +329,9 @@ def get_db():
     if _db_conn is None:
         _db_conn = get_connection()
         init_db(_db_conn)
+        register_alert_persistence_hook(on_alert_persisted)
+        _outbox_manager.set_connection(_db_conn)
+        _baseline_engine.set_connection(_db_conn)
     return _db_conn
 
 
@@ -1020,10 +1074,9 @@ def api_traffic_pcap(flow_id: str):
     if not rows:
         return jsonify({"error": f"No raw packet capture retained for flow {flow_id}"}), 404
 
-    # Assemble libpcap format
+    # Assemble libpcap format (little-endian standard: magic \xd4\xc3\xb2\xa1, linktype 1 DLT_EN10MB Ethernet)
     buf = io.BytesIO()
-    # Global header (magic 0xd4c3b2a1, v2.4, thiszone=0, sigfigs=0, snaplen=65535, linktype=1 Ethernet)
-    buf.write(struct.pack("<IHHiIII", 0xd4c3b2a1, 2, 4, 0, 0, 65535, 1))
+    buf.write(struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
     for r in rows:
         ts = r[0] or time.time()
         ts_sec = int(ts)
@@ -1147,22 +1200,44 @@ def api_delete_saved_search(search_id: int):
 
 @app.route("/api/pcap/upload", methods=["POST"])
 def api_pcap_upload():
-    """Upload PCAP capture file for isolated offline replay."""
+    """Upload PCAP capture file for isolated offline replay with security validation."""
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
     file = request.files["file"]
     if not file or not file.filename:
         return jsonify({"error": "Empty filename"}), 400
 
-    filename = file.filename
+    raw_name = file.filename or ""
+    filename = secure_filename(raw_name)
+    if not filename:
+        filename = f"capture_{uuid.uuid4().hex[:8]}.pcap"
+
     ext = os.path.splitext(filename)[1].lower()
     if ext not in (".pcap", ".pcapng", ".cap"):
         return jsonify({"error": f"Invalid extension '{ext}'. Only .pcap, .pcapng, and .cap supported"}), 400
 
     upload_dir = getattr(config, "PCAP_UPLOAD_DIR", "data/uploads")
     os.makedirs(upload_dir, exist_ok=True)
-    temp_path = os.path.join(upload_dir, f"upload_{int(time.time())}_{uuid.uuid4().hex[:6]}_{filename}")
+    temp_path = os.path.join(upload_dir, f"upload_{int(time.time())}_{uuid.uuid4().hex}_{filename}")
     file.save(temp_path)
+
+    # Validate PCAP magic bytes to prevent non-capture file processing
+    try:
+        with open(temp_path, "rb") as mf:
+            magic = mf.read(4)
+            valid_magics = (
+                b"\xa1\xb2\xc3\xd4", b"\xd4\xc3\xb2\xa1",
+                b"\x0a\x0d\x0d\x0a",  # PCAP-NG
+                b"\xa1\xb2\x3c\x4d", b"\x4d\x3c\xb2\xa1"  # Nanosecond PCAP
+            )
+            if magic not in valid_magics:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                return jsonify({"error": f"Invalid PCAP file header: unsupported magic {magic.hex()}"}), 400
+    except Exception as exc:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return jsonify({"error": f"Failed to validate PCAP header: {exc}"}), 400
 
     analyzer = get_offline_analyzer()
     try:

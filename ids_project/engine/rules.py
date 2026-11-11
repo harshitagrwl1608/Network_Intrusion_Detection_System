@@ -6906,6 +6906,9 @@ class RuleEngine:
         import engine.rules as _rules_mod
         import queue
 
+        self._db_conn = db_conn
+        self.cfg = cfg
+        self.blocklist = blocklist
         self._write_alert  = write_alert
         self._upsert_device = upsert_device
         self._event_clock = event_clock
@@ -7077,6 +7080,7 @@ class RuleEngine:
         }
         self._stop_event = threading.Event()
         self._alert_sink = None
+        self._flow_tracker = None
 
         self._alert_writer = threading.Thread(
             target=self._alert_writer_loop, daemon=True, name="alert-writer"
@@ -7099,6 +7103,10 @@ class RuleEngine:
     def set_alert_sink(self, sink):
         """Register an optional synchronous alert callback (e.g. for testing or real-time streaming)."""
         self._alert_sink = sink
+
+    def set_flow_tracker(self, tracker):
+        """Attach a FlowTracker instance for alert-to-flow correlation."""
+        self._flow_tracker = tracker
 
     def prune_stale(self, now: float = None):
         """
@@ -7126,6 +7134,26 @@ class RuleEngine:
         while not self._stop_event.is_set():
             time.sleep(10)
             self.prune_stale()
+
+    def _create_db_connection(self):
+        """Acquire a database connection bound to this engine's configuration or target path."""
+        from storage.db import get_connection
+        target_path = None
+        if isinstance(self._db_conn, str):
+            target_path = self._db_conn
+        elif self.cfg is not None:
+            cfg_path = getattr(self.cfg, "SQLITE_PATH", None)
+            import config as _global_cfg
+            if cfg_path and cfg_path != getattr(_global_cfg, "SQLITE_PATH", None):
+                target_path = cfg_path
+
+        if target_path:
+            try:
+                return get_connection(db_path=target_path)
+            except TypeError:
+                return get_connection()
+
+        return get_connection()
 
     def _alert_writer_loop(self):
         """
@@ -7156,7 +7184,7 @@ class RuleEngine:
             nonlocal conn, consecutive_failures, last_connect_time
             last_connect_time = time.time()
             try:
-                c = get_connection()
+                c = self._create_db_connection()
                 init_db(c)
                 conn = c
                 consecutive_failures = 0
@@ -7325,13 +7353,12 @@ class RuleEngine:
     def _device_writer_loop(self):
         """Drain the device queue. Drops and connection failures are non-fatal."""
         import queue as _queue
-        from storage.db import get_connection
 
         conn = None
         while not self._stop_event.is_set() or not self._device_queue.empty():
             if conn is None:
                 try:
-                    conn = get_connection()
+                    conn = self._create_db_connection()
                 except Exception:
                     conn = None
             try:
@@ -7464,6 +7491,21 @@ class RuleEngine:
                     # Serialise evidence dict to JSON string for DB persistence
                     if "evidence" in alert:
                         alert["evidence_json"] = json.dumps(alert["evidence"], default=str)
+                    if "flow_id" not in alert and record.get("flow_id"):
+                        alert["flow_id"] = record["flow_id"]
+                    if "event_id" not in alert and record.get("event_id"):
+                        alert["event_id"] = record["event_id"]
+                    if "pcap_segment_id" not in alert and record.get("pcap_segment_id"):
+                        alert["pcap_segment_id"] = record["pcap_segment_id"]
+                    if "packet_index" not in alert and record.get("packet_index") is not None:
+                        alert["packet_index"] = record["packet_index"]
+
+                    if self._flow_tracker is not None:
+                        try:
+                            self._flow_tracker.correlate_alert(alert, triggering_record=record)
+                        except Exception as exc:
+                            logger.debug(f"Flow correlation error: {exc}")
+
                     if "idempotency_key" not in alert:
                         import uuid
                         alert["idempotency_key"] = (

@@ -18,6 +18,14 @@ from notifications.providers import (
 logger = logging.getLogger(__name__)
 
 
+def _is_postgres() -> bool:
+    try:
+        import config
+        return getattr(config, "DB_BACKEND", "sqlite") == "postgres"
+    except Exception:
+        return False
+
+
 class NotificationOutboxManager:
     """
     Manages non-blocking outbox enqueueing and asynchronous background delivery.
@@ -40,6 +48,8 @@ class NotificationOutboxManager:
 
         # Cooldown cache: (rule_name, dst_ip) -> last_notification_time
         self._cooldown_cache: dict[tuple[str, str], float] = {}
+        self._last_delivery: dict[str, float] = {}
+        self._recent_errors: dict[str, list[str]] = {}
         self._lock = threading.Lock()
 
         self._stop_event = threading.Event()
@@ -55,10 +65,15 @@ class NotificationOutboxManager:
     def get_providers_status(self) -> dict[str, dict[str, Any]]:
         """Return configuration and health status of all notification providers."""
         res = {}
+        worker_running = self._worker_thread is not None and self._worker_thread.is_alive()
         for name, p in self._providers.items():
             res[name] = {
                 "name": name,
                 "configured": getattr(p, "is_configured", False),
+                "recipient_configured": getattr(p, "has_recipient", False),
+                "worker_running": worker_running,
+                "last_delivery": self._last_delivery.get(name),
+                "recent_errors": self._recent_errors.get(name, []),
             }
         return res
 
@@ -104,18 +119,20 @@ class NotificationOutboxManager:
 
         with self._lock:
             cur = self._conn.cursor()
+            ph = "(%s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s)" if _is_postgres() else "(?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)"
+            insert_sql = f"""
+                INSERT INTO notification_outbox (
+                    provider, recipient, subject, message_body, severity,
+                    rule_name, alert_id, status, retry_count, max_retries, next_retry_at, created_at
+                )
+                VALUES {ph}
+            """
             for p_name in providers:
                 p = self._providers.get(p_name.lower())
                 if p is not None:
                     job_status = "pending" if p.is_configured else "unconfigured"
                     cur.execute(
-                        """
-                        INSERT INTO notification_outbox (
-                            provider, recipient, subject, message_body, severity,
-                            rule_name, alert_id, status, retry_count, max_retries, next_retry_at, created_at
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
-                        """,
+                        insert_sql,
                         (
                             p_name.lower(), getattr(p, "recipient", None), subject,
                             body, sev, rule_name, alert_id, job_status, self._max_retries, now, now
@@ -137,12 +154,13 @@ class NotificationOutboxManager:
 
         now = time.time()
         cur = self._conn.cursor()
+        ph = "%s" if _is_postgres() else "?"
         cur.execute(
-            """
+            f"""
             SELECT id, provider, recipient, subject, message_body, retry_count, max_retries
             FROM notification_outbox
-            WHERE status = 'pending' AND next_retry_at <= ?
-            ORDER BY next_retry_at ASC LIMIT ?
+            WHERE status = 'pending' AND next_retry_at <= {ph}
+            ORDER BY next_retry_at ASC LIMIT {ph}
             """,
             (now, max_items)
         )
@@ -161,10 +179,16 @@ class NotificationOutboxManager:
             success, msg = p.send(r.get("recipient"), r["subject"], r["message_body"])
             if success:
                 self._update_outbox_status(n_id, status="sent", sent_at=time.time())
+                self._last_delivery[p_name] = time.time()
                 delivered += 1
             else:
                 retry_count = r["retry_count"] + 1
                 max_retries = r["max_retries"]
+                err_list = self._recent_errors.setdefault(p_name, [])
+                err_list.append(str(msg))
+                if len(err_list) > 10:
+                    err_list.pop(0)
+
                 if retry_count >= max_retries:
                     self._update_outbox_status(
                         n_id, status="dead", retry_count=retry_count, error_message=msg
@@ -182,9 +206,10 @@ class NotificationOutboxManager:
         """Update notification record status."""
         if not self._conn:
             return
-        set_parts = [f"{k} = ?" for k in kwargs.keys()]
+        ph = "%s" if _is_postgres() else "?"
+        set_parts = [f"{k} = {ph}" for k in kwargs.keys()]
         values = list(kwargs.values()) + [n_id]
-        sql = f"UPDATE notification_outbox SET {', '.join(set_parts)} WHERE id = ?"
+        sql = f"UPDATE notification_outbox SET {', '.join(set_parts)} WHERE id = {ph}"
         with self._lock:
             cur = self._conn.cursor()
             cur.execute(sql, values)
@@ -213,6 +238,7 @@ class NotificationOutboxManager:
         self._stop_event.set()
         if self._worker_thread:
             self._worker_thread.join(timeout=3)
+            self._worker_thread = None
 
     def send_test_notification(self, provider_name: str, recipient: str | None = None) -> dict[str, Any]:
         """Send a test diagnostic notification through the requested provider."""
@@ -230,3 +256,27 @@ class NotificationOutboxManager:
         body = "This is a verified diagnostic test message from NetGuard IDS."
         ok, msg = p.send(recipient, subj, body)
         return {"success": ok, "provider": provider_name, "message": msg}
+
+
+_global_outbox_manager: NotificationOutboxManager | None = None
+
+
+def get_outbox_manager(conn=None) -> NotificationOutboxManager:
+    global _global_outbox_manager
+    if _global_outbox_manager is None:
+        _global_outbox_manager = NotificationOutboxManager(conn=conn)
+    elif conn is not None and _global_outbox_manager._conn is None:
+        _global_outbox_manager.set_connection(conn)
+    return _global_outbox_manager
+
+
+def on_alert_persisted(conn, alert: dict, alert_id: int | None = None):
+    """Hook invoked by storage.db.write_alert to enqueue notifications for qualifying alerts."""
+    if alert.get("_is_offline_replay") or getattr(conn, "_is_offline_replay", False):
+        return
+    mgr = get_outbox_manager(conn=conn)
+    if mgr:
+        try:
+            mgr.enqueue_alert(alert, alert_id=alert_id)
+        except Exception as exc:
+            logger.debug(f"Failed to enqueue alert notification: {exc}")

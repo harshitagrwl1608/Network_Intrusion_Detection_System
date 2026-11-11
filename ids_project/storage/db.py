@@ -240,6 +240,21 @@ def _migrate_columns(conn, cur):
 # Alert operations
 # ---------------------------------------------------------------------------
 
+_alert_persistence_hooks: list = []
+
+
+def register_alert_persistence_hook(hook):
+    """Register a callback fn(conn, alert, alert_id) invoked when an alert is committed."""
+    if hook not in _alert_persistence_hooks:
+        _alert_persistence_hooks.append(hook)
+
+
+def unregister_alert_persistence_hook(hook):
+    """Unregister an alert persistence hook."""
+    if hook in _alert_persistence_hooks:
+        _alert_persistence_hooks.remove(hook)
+
+
 def write_alert(conn, alert: dict):
     """Insert one alert into the alerts table. Thread-safe and idempotent."""
     sql = """
@@ -288,8 +303,15 @@ def write_alert(conn, alert: dict):
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(sql, values)
+        alert_id = getattr(cur, "lastrowid", None)
         conn.commit()
         cur.close()
+
+    for hook in list(_alert_persistence_hooks):
+        try:
+            hook(conn, alert, alert_id)
+        except Exception:
+            pass
 
 
 def read_recent_alerts(conn, minutes: int = 60) -> list[dict]:

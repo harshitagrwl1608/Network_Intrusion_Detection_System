@@ -9,10 +9,19 @@ Includes baseline quarantine safeguards to prevent incident poisoning.
 import time
 import math
 import logging
+import threading
 from collections import deque
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _is_postgres() -> bool:
+    try:
+        import config
+        return getattr(config, "DB_BACKEND", "sqlite") == "postgres"
+    except Exception:
+        return False
 
 
 def compute_median_and_mad(samples: list[float]) -> tuple[float, float]:
@@ -162,8 +171,26 @@ class BaselineEngine:
         if self._conn:
             try:
                 cur = self._conn.cursor()
-                cur.execute(
+                if _is_postgres():
+                    sql = """
+                    INSERT INTO traffic_baselines (
+                        metric_name, sample_count, rolling_median, mad, ewma, mean, std, p95, min_val, max_val, last_updated
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(metric_name) DO UPDATE SET
+                        sample_count = EXCLUDED.sample_count,
+                        rolling_median = EXCLUDED.rolling_median,
+                        mad = EXCLUDED.mad,
+                        ewma = EXCLUDED.ewma,
+                        mean = EXCLUDED.mean,
+                        std = EXCLUDED.std,
+                        p95 = EXCLUDED.p95,
+                        min_val = EXCLUDED.min_val,
+                        max_val = EXCLUDED.max_val,
+                        last_updated = EXCLUDED.last_updated
                     """
+                else:
+                    sql = """
                     INSERT INTO traffic_baselines (
                         metric_name, sample_count, rolling_median, mad, ewma, mean, std, p95, min_val, max_val, last_updated
                     )
@@ -179,7 +206,9 @@ class BaselineEngine:
                         min_val = excluded.min_val,
                         max_val = excluded.max_val,
                         last_updated = excluded.last_updated
-                    """,
+                    """
+                cur.execute(
+                    sql,
                     (
                         metric_name, b["sample_count"], b["rolling_median"], b["mad"],
                         b["ewma"], b["mean"], b["std"], b["p95"], b["min_val"],
@@ -241,13 +270,14 @@ class BaselineEngine:
             if self._conn:
                 try:
                     cur = self._conn.cursor()
+                    ph = "(%s, %s, %s, %s, %s, %s, %s, %s, %s)" if _is_postgres() else "(?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     cur.execute(
-                        """
+                        f"""
                         INSERT INTO traffic_anomalies (
                             timestamp, metric_name, observed_value, expected_value, deviation_score,
                             method, confidence, explanation, related_flow_id
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES {ph}
                         """,
                         (
                             anomaly["timestamp"], anomaly["metric_name"], anomaly["observed_value"],
@@ -296,10 +326,171 @@ class BaselineEngine:
             return []
         try:
             cur = self._conn.cursor()
-            cur.execute("SELECT * FROM traffic_anomalies ORDER BY timestamp DESC LIMIT ?", (limit,))
+            ph = "%s" if _is_postgres() else "?"
+            cur.execute(f"SELECT * FROM traffic_anomalies ORDER BY timestamp DESC LIMIT {ph}", (limit,))
             rows = [dict(r) for r in cur.fetchall()]
             cur.close()
             return rows
         except Exception as exc:
             logger.debug(f"Could not read anomalies: {exc}")
             return []
+
+
+class BaselineCollector:
+    """
+    Background telemetry ingestion thread that periodically collects live traffic
+    metrics and feeds them into the BaselineEngine, while enforcing anti-poisoning safeguards.
+    """
+
+    def __init__(self, baseline_engine: BaselineEngine, flow_tracker=None,
+                 metrics_tracker=None, conn=None, interval_s: float = 5.0):
+        self._engine = baseline_engine
+        self._flow_tracker = flow_tracker
+        self._metrics = metrics_tracker
+        self._conn = conn
+        self._interval_s = interval_s
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+        self._last_sample_time = time.time()
+        self._last_bytes = 0
+        self._last_packets = 0
+        self._last_dns_queries = 0
+
+    def set_connection(self, conn):
+        self._conn = conn
+        if self._engine:
+            self._engine.set_connection(conn)
+
+    def set_flow_tracker(self, tracker):
+        self._flow_tracker = tracker
+
+    def set_metrics_tracker(self, metrics):
+        self._metrics = metrics
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, name="baseline-collector", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=3.0)
+            self._thread = None
+
+    def _check_incident_in_progress(self, now: float) -> bool:
+        """
+        Anti-poisoning check: query whether high/critical alerts fired within the
+        last 60 seconds. If so, telemetry is flagged suspicious to avoid poisoning benign baselines.
+        """
+        if not self._conn:
+            return False
+        try:
+            cur = self._conn.cursor()
+            since = now - 60.0
+            ph = "%s" if _is_postgres() else "?"
+            cur.execute(
+                f"SELECT COUNT(*) FROM alerts WHERE severity IN ('high', 'critical') AND timestamp >= {ph}",
+                (since,)
+            )
+            row = cur.fetchone()
+            count = row[0] if row else 0
+            cur.close()
+            return count > 0
+        except Exception as exc:
+            logger.debug(f"Baseline anti-poisoning check error: {exc}")
+            return False
+
+    def sample_once(self, now: float | None = None) -> dict[str, float]:
+        """
+        Perform a single metric collection pass, updating the BaselineEngine.
+        Returns the dictionary of collected metrics.
+        """
+        ts = time.time() if now is None else float(now)
+        dt = max(ts - self._last_sample_time, 0.001)
+
+        # 1. Packet & byte rates
+        pps = 0.0
+        bps = 0.0
+        if self._metrics is not None:
+            pps = getattr(self._metrics, "_current_callback_pps", 0.0)
+            if pps <= 0.0:
+                snap = self._metrics.get_snapshot() if hasattr(self._metrics, "get_snapshot") else {}
+                pps = snap.get("current_pps", 0.0)
+
+        # 2. Flow stats & DNS
+        active_flows = 0
+        unique_src_ips = set()
+        unique_dst_ips = set()
+        dns_queries = 0
+        total_bytes = 0
+        total_packets = 0
+
+        if self._flow_tracker is not None:
+            with getattr(self._flow_tracker, "_lock", threading.Lock()):
+                flows = list(getattr(self._flow_tracker, "_flows", {}).values())
+                active_flows = len(flows)
+                for f in flows:
+                    src = f.get("src_ip")
+                    dst = f.get("dst_ip")
+                    if src:
+                        unique_src_ips.add(src)
+                    if dst:
+                        unique_dst_ips.add(dst)
+                    if f.get("dns_query"):
+                        dns_queries += 1
+                    total_bytes += f.get("byte_count", 0)
+                    total_packets += f.get("packet_count", 0)
+
+        # If pps / bps were not from metrics, compute delta from flow counts
+        if pps <= 0.0 and self._last_packets > 0:
+            delta_pkts = max(0, total_packets - self._last_packets)
+            pps = round(delta_pkts / dt, 2)
+        if self._last_bytes > 0:
+            delta_bytes = max(0, total_bytes - self._last_bytes)
+            bps = round(delta_bytes / dt, 2)
+
+        dns_rate = 0.0
+        if self._last_dns_queries > 0:
+            delta_dns = max(0, dns_queries - self._last_dns_queries)
+            dns_rate = round(delta_dns / dt, 2)
+        elif dns_queries > 0:
+            dns_rate = round(dns_queries / dt, 2)
+
+        self._last_sample_time = ts
+        self._last_packets = total_packets
+        self._last_bytes = total_bytes
+        self._last_dns_queries = dns_queries
+
+        metrics_data = {
+            "packets_per_sec": float(pps),
+            "bytes_per_sec": float(bps),
+            "active_flows": float(active_flows),
+            "unique_source_ips": float(len(unique_src_ips)),
+            "unique_dest_ips": float(len(unique_dst_ips)),
+            "dns_query_rate": float(dns_rate),
+        }
+
+        # Anti-poisoning safeguard check
+        is_suspicious = self._check_incident_in_progress(ts)
+
+        for m_name, val in metrics_data.items():
+            self._engine.update_metric(m_name, val, is_suspicious=is_suspicious, timestamp=ts)
+            self._engine.evaluate_anomaly(m_name, val, timestamp=ts)
+
+        return metrics_data
+
+    def _run(self):
+        logger.info(f"BaselineCollector started (interval: {self._interval_s}s)")
+        while not self._stop_event.is_set():
+            try:
+                self.sample_once()
+            except Exception as exc:
+                logger.debug(f"BaselineCollector tick error: {exc}")
+            self._stop_event.wait(self._interval_s)
