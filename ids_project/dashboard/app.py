@@ -48,7 +48,17 @@ from storage.db import register_alert_persistence_hook
 from storage.forensics_db import write_audit_log
 from analytics.baselines import BaselineEngine, BaselineCollector
 from notifications.outbox import NotificationOutboxManager, on_alert_persisted
-from reports.generator import ReportGenerator, REPORT_TYPES
+from reports.generator import ReportGenerator, REPORT_TYPES, SUPPORTED_FORMATS
+from notifications.email_utils import parse_all_recipients
+from notifications.email_render import render_report_email
+from notifications.report_delivery import (
+    MAX_ATTACHMENT_BYTES,
+    ReportDeliveryError,
+    ReportTooLargeError,
+    build_report_payload,
+    generate_artifact,
+    prune_artifacts,
+)
 from forensics.offline_analyzer import OfflinePcapAnalyzer
 from parallel.profile import get_system_capabilities, select_performance_profile
 from werkzeug.utils import secure_filename
@@ -2208,7 +2218,198 @@ def api_reports_types():
     return jsonify({
         "report_types": REPORT_TYPES,
         "formats": ["html", "json", "csv"],
+        "email_available": bool(
+            _outbox_manager.get_provider("email")
+            and _outbox_manager.get_provider("email").is_configured
+        ),
+        "max_attachment_mb": MAX_ATTACHMENT_BYTES // (1024 * 1024),
     })
+
+
+def _dashboard_base_url() -> str | None:
+    """Only an explicitly configured public URL is embedded in emails."""
+    candidate = (os.getenv("NETGUARD_DASHBOARD_URL") or "").strip()
+    if candidate.lower().startswith(("http://", "https://")) and not any(
+        ch in candidate for ch in "\r\n\t \"'<>"
+    ):
+        return candidate.rstrip("/")
+    return None
+
+
+@app.route("/api/reports/email", methods=["POST"])
+def api_reports_email():
+    """Generate a report and queue it for email delivery.
+
+    The report is rendered into an application-owned artifact directory and only
+    a bounded reference is stored on the outbox row. Delivery happens
+    asynchronously through the durable outbox worker, so a slow or unavailable
+    SMTP server never blocks the HTTP request.
+    """
+    data = request.get_json(silent=True) or {}
+
+    report_type = str(data.get("type") or data.get("report_type") or "daily").lower()
+    fmt = str(data.get("format") or data.get("fmt") or "html").lower()
+    case_id = data.get("case_id")
+
+    if report_type not in REPORT_TYPES:
+        return jsonify({"error": f"Unknown report type '{report_type}'"}), 400
+    if fmt not in SUPPORTED_FORMATS:
+        return jsonify({
+            "error": f"Unsupported format '{fmt}'. Supported: {', '.join(SUPPORTED_FORMATS)}"
+        }), 400
+
+    try:
+        hours = int(data.get("hours") or 24)
+    except (TypeError, ValueError):
+        return jsonify({"error": "hours must be an integer"}), 400
+    if not 1 <= hours <= 8760:
+        return jsonify({"error": "hours must be between 1 and 8760"}), 400
+
+    parsed = parse_all_recipients(
+        data.get("to"), data.get("cc"), data.get("bcc")
+    )
+    if parsed["errors"]:
+        return jsonify({
+            "error": parsed["errors"][0],
+            "invalid": parsed["invalid"],
+        }), 400
+    if parsed["invalid"]:
+        return jsonify({
+            "error": "One or more recipient addresses are invalid",
+            "invalid": parsed["invalid"],
+        }), 400
+
+    email_provider = _outbox_manager.get_provider("email")
+    if email_provider is None or not email_provider.is_configured:
+        return jsonify({
+            "error": (
+                "Email notifications are not configured. Set the SMTP host and "
+                "sender address in Notification settings before emailing reports."
+            )
+        }), 400
+    if getattr(email_provider, "auth_required_but_missing", False):
+        return jsonify({
+            "error": (
+                "SMTP username is configured but no password is stored. "
+                "Add the password in Notification settings."
+            )
+        }), 400
+
+    db = get_db()
+    _outbox_manager.set_connection(db)
+
+    generator = ReportGenerator(db)
+    try:
+        artifact = generate_artifact(generator, report_type, hours, fmt, case_id)
+    except ReportTooLargeError as exc:
+        return jsonify({"error": str(exc), "code": "attachment_too_large"}), 413
+    except ReportDeliveryError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        logger.exception("Report generation for email failed")
+        return jsonify({"error": f"Report generation failed: {exc}"}), 500
+
+    dashboard_url = _dashboard_base_url()
+    generated_at = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    recipient_count = len(parsed["to"]) + len(parsed["cc"]) + len(parsed["bcc"])
+
+    rendered = render_report_email(
+        report_title=REPORT_TYPES.get(report_type, "NetGuard IDS Report"),
+        report_type=report_type,
+        fmt=fmt,
+        filename=artifact.filename,
+        hours=hours,
+        recipient_count=recipient_count,
+        dashboard_base_url=dashboard_url,
+        generated_at=generated_at,
+    )
+
+    payload = build_report_payload(
+        artifact,
+        report_title=REPORT_TYPES.get(report_type, "NetGuard IDS Report"),
+        report_type=report_type,
+        fmt=fmt,
+        hours=hours,
+        generated_at=generated_at,
+    )
+
+    try:
+        job_count = _outbox_manager.enqueue_report_email(
+            artifact,
+            report_payload=payload,
+            subject=rendered.subject,
+            text_body=rendered.text,
+            html_body=rendered.html,
+            to=", ".join(parsed["to"]),
+            cc=", ".join(parsed["cc"]),
+            bcc=", ".join(parsed["bcc"]),
+            severity="medium",
+        )
+    except Exception as exc:
+        logger.exception("Failed to queue report email")
+        return jsonify({"error": f"Failed to queue report email: {exc}"}), 500
+
+    write_audit_log(
+        db, "analyst", "email_report", "reports", report_type,
+        {
+            "format": fmt,
+            "hours": hours,
+            "recipients": recipient_count,
+            "attachment_bytes": artifact.size_bytes,
+            "attachment_sha256": artifact.sha256,
+            "queued_jobs": job_count,
+        },
+    )
+
+    try:
+        prune_artifacts()
+    except Exception:
+        pass
+
+    return jsonify({
+        "status": "queued",
+        "queued_jobs": job_count,
+        "report": {
+            "type": report_type,
+            "format": fmt,
+            "hours": hours,
+            "filename": artifact.filename,
+            "size_bytes": artifact.size_bytes,
+            "sha256": artifact.sha256,
+        },
+        "recipients": {
+            "to": parsed["to"],
+            "cc": parsed["cc"],
+            "bcc_count": len(parsed["bcc"]),
+            "total": recipient_count,
+        },
+    }), 202
+
+
+@app.route("/api/reports/outbox")
+def api_reports_outbox():
+    """Return recent report-delivery jobs and their status."""
+    _outbox_manager.set_connection(get_db())
+    db = get_db()
+    try:
+        cur = db.cursor()
+        cur.execute(
+            "SELECT id, recipient, subject, status, retry_count, max_retries, "
+            "sent_at, error_message, created_at FROM notification_outbox "
+            "WHERE rule_name = 'REPORT' ORDER BY created_at DESC LIMIT 25"
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+    except Exception as exc:
+        return jsonify({"error": f"Unable to read report outbox: {exc}"}), 500
+
+    for r in rows:
+        for key in ("created_at", "sent_at"):
+            if r.get(key):
+                r[f"{key}_str"] = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(r[key])
+                )
+    return jsonify({"jobs": rows, "stats": _outbox_manager.get_outbox_stats()})
 
 
 @app.route("/api/reports/generate")

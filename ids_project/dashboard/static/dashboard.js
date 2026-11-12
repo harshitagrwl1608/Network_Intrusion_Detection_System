@@ -1758,6 +1758,71 @@ function triggerReportDownload() {
   window.location.href = `/api/reports/generate?type=${encodeURIComponent(type)}&format=${encodeURIComponent(fmt)}&hours=${encodeURIComponent(hours)}`;
 }
 
+// ── Reports: Generate and email ──
+async function triggerReportEmail() {
+  const type = document.getElementById("report-type-select")?.value || "daily";
+  const fmt = document.getElementById("report-fmt-select")?.value || "html";
+  const hours = document.getElementById("report-hours-select")?.value || "24";
+  const to = document.getElementById("report-email-to")?.value?.trim() || "";
+  const cc = document.getElementById("report-email-cc")?.value?.trim() || "";
+  const bcc = document.getElementById("report-email-bcc")?.value?.trim() || "";
+  const statusEl = document.getElementById("report-email-status");
+  const btn = document.getElementById("report-email-btn");
+
+  if (!to) {
+    showToast("Enter at least one recipient address for the report email", "error");
+    if (statusEl) {
+      statusEl.textContent = "A 'To' recipient is required.";
+      statusEl.style.color = "var(--danger)";
+    }
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  if (statusEl) {
+    statusEl.textContent = `Generating ${type} report (${fmt.toUpperCase()}) and queueing delivery…`;
+    statusEl.style.color = "var(--text-muted)";
+  }
+
+  try {
+    const res = await fetch("/api/reports/email", {
+      method: "POST",
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ type, format: fmt, hours: parseInt(hours, 10), to, cc, bcc }),
+    });
+    const data = await res.json();
+
+    if (res.ok) {
+      showToast(`Report queued for ${data.recipients?.total || 0} recipient(s)`, "success");
+      if (statusEl) {
+        const sizeKb = Math.round((data.report?.size_bytes || 0) / 1024);
+        statusEl.style.color = "var(--text-muted)";
+        statusEl.innerHTML =
+          `Queued &ldquo;${escapeHtml(data.report?.filename || "report")}&rdquo; (${sizeKb} KB) ` +
+          `to ${data.recipients?.total || 0} recipient(s). ` +
+          `Delivery runs in the background; track status under Notifications &rarr; Outbox.`;
+      }
+    } else {
+      showToast(data.error || "Report email failed", "error");
+      if (statusEl) {
+        statusEl.textContent = data.error || "Report email failed";
+        statusEl.style.color = "var(--danger)";
+        if (Array.isArray(data.invalid) && data.invalid.length) {
+          statusEl.textContent += " Invalid: " + data.invalid.map(i => i.value).join(", ");
+        }
+      }
+    }
+  } catch (e) {
+    showToast(`Report email error: ${e.message}`, "error");
+    if (statusEl) {
+      statusEl.textContent = `Report email error: ${e.message}`;
+      statusEl.style.color = "var(--danger)";
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 // ── Network Devices (Phase 3) ──
 async function loadDevices() {
   try {
@@ -1886,7 +1951,21 @@ async function loadNotificationConfig() {
       if (e.port && document.getElementById("cfg-smtp-port")) document.getElementById("cfg-smtp-port").value = e.port;
       if (e.user && document.getElementById("cfg-smtp-user")) document.getElementById("cfg-smtp-user").value = e.user;
       if (e.from_addr && document.getElementById("cfg-smtp-from")) document.getElementById("cfg-smtp-from").value = e.from_addr;
+      if (e.from_name && document.getElementById("cfg-smtp-from-name")) document.getElementById("cfg-smtp-from-name").value = e.from_name;
       if (e.to_addr && document.getElementById("cfg-smtp-to")) document.getElementById("cfg-smtp-to").value = e.to_addr;
+      if (e.cc_addr && document.getElementById("cfg-smtp-cc")) document.getElementById("cfg-smtp-cc").value = e.cc_addr;
+      if (e.bcc_addr && document.getElementById("cfg-smtp-bcc")) document.getElementById("cfg-smtp-bcc").value = e.bcc_addr;
+      if (e.tls_mode && document.getElementById("cfg-smtp-tls")) document.getElementById("cfg-smtp-tls").value = e.tls_mode;
+      const warn = document.getElementById("smtp-auth-warning");
+      if (warn) {
+        if (e.auth_required_but_missing) {
+          warn.textContent = "SMTP authentication required: a username is stored but no password. Outgoing alert and report email will fail until a password is saved.";
+          warn.style.display = "block";
+        } else {
+          warn.textContent = "";
+          warn.style.display = "none";
+        }
+      }
     }
     if (configs.telegram) {
       const t = configs.telegram;
@@ -1911,13 +1990,18 @@ async function saveNotificationProvider(provider) {
   let cfg = {};
   if (provider === "email" || provider === "smtp") {
     provider = "email";
+    const tlsMode = document.getElementById("cfg-smtp-tls")?.value || "starttls";
     cfg = {
       host: document.getElementById("cfg-smtp-host")?.value?.trim() || "",
       port: parseInt(document.getElementById("cfg-smtp-port")?.value || 587, 10),
       user: document.getElementById("cfg-smtp-user")?.value?.trim() || "",
       from_addr: document.getElementById("cfg-smtp-from")?.value?.trim() || "",
+      from_name: document.getElementById("cfg-smtp-from-name")?.value?.trim() || "NetGuard IDS",
       to_addr: document.getElementById("cfg-smtp-to")?.value?.trim() || "",
-      use_tls: true,
+      cc_addr: document.getElementById("cfg-smtp-cc")?.value?.trim() || "",
+      bcc_addr: document.getElementById("cfg-smtp-bcc")?.value?.trim() || "",
+      use_tls: tlsMode !== "none",
+      tls_mode: tlsMode,
     };
     const pass = document.getElementById("cfg-smtp-pass")?.value?.trim();
     if (pass) cfg.password = pass;
@@ -1968,13 +2052,18 @@ async function testNotificationProvider(provider) {
   if (provider === "email" || provider === "smtp") {
     provider = "email";
     recipient = document.getElementById("cfg-smtp-to")?.value?.trim() || undefined;
+    const tlsModeTest = document.getElementById("cfg-smtp-tls")?.value || "starttls";
     customCfg = {
       host: document.getElementById("cfg-smtp-host")?.value?.trim() || "",
       port: parseInt(document.getElementById("cfg-smtp-port")?.value || 587, 10),
       user: document.getElementById("cfg-smtp-user")?.value?.trim() || "",
       from_addr: document.getElementById("cfg-smtp-from")?.value?.trim() || "",
+      from_name: document.getElementById("cfg-smtp-from-name")?.value?.trim() || "NetGuard IDS",
       to_addr: recipient,
-      use_tls: true,
+      cc_addr: document.getElementById("cfg-smtp-cc")?.value?.trim() || "",
+      bcc_addr: document.getElementById("cfg-smtp-bcc")?.value?.trim() || "",
+      use_tls: tlsModeTest !== "none",
+      tls_mode: tlsModeTest,
     };
     const pass = document.getElementById("cfg-smtp-pass")?.value?.trim();
     if (pass) customCfg.password = pass;

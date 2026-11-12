@@ -12,6 +12,7 @@ import time
 import json
 import csv
 import io
+import html
 import logging
 from typing import Any
 
@@ -19,6 +20,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import config
 
 logger = logging.getLogger(__name__)
+
+# Formats that are genuinely produced by this generator. ``pdf`` was previously
+# accepted but silently returned HTML with an ``.html`` extension; it is no
+# longer advertised or accepted.
+SUPPORTED_FORMATS = ("html", "json", "csv")
+
+# Severities usable as CSS class suffixes. Anything else collapses to "medium"
+# so untrusted input cannot inject markup into a class attribute.
+_SAFE_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 
 REPORT_TYPES = {
     "daily": "Daily Network Security Report (24h)",
@@ -33,10 +43,37 @@ REPORT_TYPES = {
 }
 
 
+def _esc(value: Any) -> str:
+    """HTML-escape a value before interpolation. ``None`` becomes an em dash."""
+    if value is None or value == "":
+        return "—"
+    return html.escape(str(value), quote=True)
+
+
+def _safe_sev(value: Any) -> str:
+    """Constrain a severity to a known token for safe CSS class use."""
+    token = str(value or "medium").strip().lower()
+    return token if token in _SAFE_SEVERITIES else "medium"
+
+
+def _csv_safe(value: Any) -> Any:
+    """Neutralise spreadsheet formula injection in CSV exports.
+
+    Excel/LibreOffice will execute cells beginning with ``=``, ``+``, ``-``,
+    ``@``, tab or carriage return. Prefixing with an apostrophe keeps the value
+    readable while preventing formula evaluation.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return value
+    if value[:1] in ("=", "+", "-", "@", "\t", "\r", "\n"):
+        return "'" + value
+    return value
+
+
 class ReportGenerator:
-    """
-    Generates structured, professional executive and technical reports.
-    """
+    """Generates structured, professional executive and technical reports."""
 
     def __init__(self, conn=None):
         self._conn = conn
@@ -54,7 +91,7 @@ class ReportGenerator:
         if report_type not in REPORT_TYPES:
             report_type = "daily"
         fmt = fmt.lower()
-        if fmt not in ("html", "json", "csv", "pdf"):
+        if fmt not in SUPPORTED_FORMATS:
             fmt = "html"
 
         now = time.time()
@@ -72,10 +109,9 @@ class ReportGenerator:
             content = self._render_csv(report_data)
             return "text/csv", f"{base_name}.csv", content
 
-        else:  # html or pdf (standalone printable HTML)
+        else:
             content = self._render_html(report_data)
-            ext = "html" if fmt == "html" else "html"
-            return "text/html", f"{base_name}.{ext}", content
+            return "text/html", f"{base_name}.html", content
 
     def _collect_data(self, report_type: str, start_time: float, end_time: float,
                       case_id: str | None = None) -> dict[str, Any]:
@@ -187,32 +223,32 @@ class ReportGenerator:
         writer = csv.writer(output)
 
         writer.writerow(["# NetGuard IDS Security Report Export"])
-        writer.writerow(["Title", data.get("report_title")])
-        writer.writerow(["Generated At", data.get("generated_at")])
-        writer.writerow(["Window Start", data.get("start_time")])
-        writer.writerow(["Window End", data.get("end_time")])
+        writer.writerow(["Title", _csv_safe(data.get("report_title"))])
+        writer.writerow(["Generated At", _csv_safe(data.get("generated_at"))])
+        writer.writerow(["Window Start", _csv_safe(data.get("start_time"))])
+        writer.writerow(["Window End", _csv_safe(data.get("end_time"))])
         writer.writerow(["Total Alerts", data.get("stats", {}).get("total_alerts", 0)])
         writer.writerow([])
 
         writer.writerow(["--- Rule Breakdown ---"])
         writer.writerow(["Rule Name", "Alert Count"])
         for r_name, count in data.get("rule_breakdown", {}).items():
-            writer.writerow([r_name, count])
+            writer.writerow([_csv_safe(r_name), count])
         writer.writerow([])
 
         writer.writerow(["--- Alerts Log ---"])
         writer.writerow(["ID", "Timestamp", "Rule", "Severity", "Source IP", "Destination IP", "Port", "Protocol", "Detail"])
         for a in data.get("recent_alerts", []):
             writer.writerow([
-                a.get("id"),
-                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a.get("timestamp", 0))),
-                a.get("rule_name"),
-                a.get("severity"),
-                a.get("src_ip"),
-                a.get("dst_ip"),
-                a.get("dst_port"),
-                a.get("protocol"),
-                a.get("detail"),
+                _csv_safe(a.get("id")),
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a.get("timestamp", 0) or 0)),
+                _csv_safe(a.get("rule_name")),
+                _csv_safe(a.get("severity")),
+                _csv_safe(a.get("src_ip")),
+                _csv_safe(a.get("dst_ip")),
+                _csv_safe(a.get("dst_port")),
+                _csv_safe(a.get("protocol")),
+                _csv_safe(a.get("detail")),
             ])
 
         return output.getvalue()
@@ -226,29 +262,29 @@ class ReportGenerator:
         anomalies = data.get("anomalies", [])
 
         rule_rows = "".join(
-            f"<tr><td><code>{r}</code></td><td><strong>{c}</strong></td></tr>"
+            f"<tr><td><code>{_esc(r)}</code></td><td><strong>{_esc(c)}</strong></td></tr>"
             for r, c in rules.items()
         ) or "<tr><td colspan='2' style='color:#64748b'>No alerts recorded in this period.</td></tr>"
 
         alert_rows = "".join(
             f"<tr>"
-            f"<td>{time.strftime('%H:%M:%S', time.localtime(a.get('timestamp', 0)))}</td>"
-            f"<td><span class='badge'>{a.get('rule_name')}</span></td>"
-            f"<td class='sev-{a.get('severity','medium')}'>{a.get('severity','').upper()}</td>"
-            f"<td><code>{a.get('src_ip','—')}</code></td>"
-            f"<td><code>{a.get('dst_ip','—')}:{a.get('dst_port','—')}</code></td>"
-            f"<td>{a.get('detail','')}</td>"
+            f"<td>{_esc(time.strftime('%H:%M:%S', time.localtime(a.get('timestamp', 0) or 0)))}</td>"
+            f"<td><span class='badge'>{_esc(a.get('rule_name'))}</span></td>"
+            f"<td class='sev-{_safe_sev(a.get('severity'))}'>{_esc(_safe_sev(a.get('severity')).upper())}</td>"
+            f"<td><code>{_esc(a.get('src_ip'))}</code></td>"
+            f"<td><code>{_esc(a.get('dst_ip'))}:{_esc(a.get('dst_port'))}</code></td>"
+            f"<td>{_esc(a.get('detail'))}</td>"
             f"</tr>"
             for a in alerts[:50]
         ) or "<tr><td colspan='6' style='color:#64748b;text-align:center'>No alerts in selected window.</td></tr>"
 
         anomaly_rows = "".join(
             f"<tr>"
-            f"<td>{time.strftime('%H:%M:%S', time.localtime(m.get('timestamp', 0)))}</td>"
-            f"<td>{m.get('metric_name')}</td>"
-            f"<td>{m.get('observed_value')} (exp: {m.get('expected_value')})</td>"
-            f"<td>{m.get('deviation_score')}x MAD</td>"
-            f"<td>{m.get('explanation')}</td>"
+            f"<td>{_esc(time.strftime('%H:%M:%S', time.localtime(m.get('timestamp', 0) or 0)))}</td>"
+            f"<td>{_esc(m.get('metric_name'))}</td>"
+            f"<td>{_esc(m.get('observed_value'))} (exp: {_esc(m.get('expected_value'))})</td>"
+            f"<td>{_esc(m.get('deviation_score'))}x MAD</td>"
+            f"<td>{_esc(m.get('explanation'))}</td>"
             f"</tr>"
             for m in anomalies[:10]
         ) or "<tr><td colspan='5' style='color:#64748b;text-align:center'>No baseline anomalies detected.</td></tr>"
@@ -257,7 +293,7 @@ class ReportGenerator:
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>{data.get('report_title')} — NetGuard IDS</title>
+  <title>{_esc(data.get('report_title'))} — NetGuard IDS</title>
   <style>
     body {{
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -295,20 +331,20 @@ class ReportGenerator:
   <div class="container">
     <div class="header">
       <div>
-        <h1>{data.get('report_title')}</h1>
-        <div class="meta">Window: {data.get('start_time')} to {data.get('end_time')} ({data.get('time_window_hours')}h)</div>
+        <h1>{_esc(data.get('report_title'))}</h1>
+        <div class="meta">Window: {_esc(data.get('start_time'))} to {_esc(data.get('end_time'))} ({_esc(data.get('time_window_hours'))}h)</div>
       </div>
       <div style="text-align: right">
         <div style="font-weight: 700; color: #6366f1">NetGuard IDS</div>
-        <div class="meta">Generated: {data.get('generated_at')}</div>
+        <div class="meta">Generated: {_esc(data.get('generated_at'))}</div>
       </div>
     </div>
 
     <div class="kpi-grid">
-      <div class="kpi-card"><div class="kpi-val">{stats.get('total_alerts', 0)}</div><div class="kpi-lbl">Total Alerts</div></div>
-      <div class="kpi-card"><div class="kpi-val" style="color: #ef4444">{sev.get('critical', 0) + sev.get('high', 0)}</div><div class="kpi-lbl">Critical & High</div></div>
-      <div class="kpi-card"><div class="kpi-val">{stats.get('active_flows', 0)}</div><div class="kpi-lbl">Active Flows</div></div>
-      <div class="kpi-card"><div class="kpi-val">{stats.get('devices_seen', 0)}</div><div class="kpi-lbl">Devices Seen</div></div>
+      <div class="kpi-card"><div class="kpi-val">{_esc(stats.get('total_alerts', 0))}</div><div class="kpi-lbl">Total Alerts</div></div>
+      <div class="kpi-card"><div class="kpi-val" style="color: #ef4444">{_esc((sev.get('critical', 0) or 0) + (sev.get('high', 0) or 0))}</div><div class="kpi-lbl">Critical & High</div></div>
+      <div class="kpi-card"><div class="kpi-val">{_esc(stats.get('active_flows', 0))}</div><div class="kpi-lbl">Active Flows</div></div>
+      <div class="kpi-card"><div class="kpi-val">{_esc(stats.get('devices_seen', 0))}</div><div class="kpi-lbl">Devices Seen</div></div>
     </div>
 
     <div class="section-title">Detection Rule Breakdown</div>

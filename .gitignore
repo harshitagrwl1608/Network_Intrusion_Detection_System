@@ -33,6 +33,9 @@ env/
 storage/*.db
 alerts.db
 **/storage/*.db
+# Repository-root runtime directory created when tests/tools run from the repo
+# root (uploaded PCAPs, report attachments). Never commit it.
+/storage/
 
 # --- Dynamic State & Logs ---
 data/arp_table.json
