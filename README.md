@@ -2,7 +2,7 @@
 
 > **A Lightweight, First-Principles Network Intrusion Detection System with Plain-Language SOC Visualization**
 
-[![Status](https://img.shields.io/badge/Tests-854%20Passed-brightgreen.svg?style=flat-square)](ids_project/tests/)
+[![Status](https://img.shields.io/badge/Tests-878%20Passed-brightgreen.svg?style=flat-square)](ids_project/tests/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg?style=flat-square&logo=python)](https://python.org)
 [![Rules](https://img.shields.io/badge/Rules-23%20Evidence--Driven-orange.svg?style=flat-square)](docs/DETECTION_ENGINE.md)
 [![DPI](https://img.shields.io/badge/DPI-HttpParser%20%7C%2018%20Signatures-blueviolet.svg?style=flat-square)](docs/DETECTION_ENGINE.md#12-payload_hit)
@@ -22,7 +22,9 @@ Modern small-office and home networks face sophisticated threats, from automated
 2. **23 Evidence-Driven Detection Rules:** Governed by strict rule admission invariants where every rule provides distinct, justified, tested, and maintainable detection value.
 3. **Application-Aware DPI (`HttpParser`):** Deep packet inspection contextualizes HTTP requests, methods, paths, headers, and form bodies to eliminate false alarms on benign protocol traffic while detecting SQLi, XSS, webshell uploads, and Log4Shell.
 4. **Plain-Language Incident Narratives:** Translates low-level packet heuristics into clear, actionable sentences for everyday network administrators.
-5. **Interactive SOC Dashboard:** Responsive dark-mode dashboard featuring live Server-Sent Events (SSE) streaming, GeoIP origin lookup, MAC vendor identification, and analyst TP/FP feedback loops.
+5. **Interactive 10-Workspace SOC Platform:** Responsive dark-mode dashboard featuring 10 dedicated analyst workspaces (Traffic Explorer with bidirectional 5-tuple flow tracking and PCAP slicing, Threat Hunting, Incident Cases, Isolated PCAP Analysis, 9-Format Reporting, Statistical Baselines with Median Absolute Deviation, and Rule Tuning).
+6. **High-Throughput Parallel Pipeline:** Lock-free concurrent parsing pool with bounded monotonic reorder buffer auto-tuned to hardware capability (`low`, `balanced`, `throughput`), yielding 100% exact alert reconciliation against the sequential reference engine.
+7. **Strict Isolation & Zero Mockups:** Every feature is backed by real persistent database models (SQLite/PostgreSQL) and active REST APIs; offline PCAP replays run inside an isolated sandbox guaranteeing zero contamination of live monitoring data.
 
 ---
 
@@ -87,6 +89,11 @@ Detailed, developer-grade documentation is organized in the [`docs/`](docs/) dir
 | 🛠️ **[docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md)** | Guide for contributors: adding a detection rule, LRU memory bounding, Git branch invariants, and testing gates. |
 | 🔧 **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Solutions for common runtime errors, socket permission setup, PCAPNG conversion, and privacy safeguards. |
 | 📋 **[docs/RELEASE_READINESS_REPORT.md](docs/RELEASE_READINESS_REPORT.md)** | Release candidate audit, architecture verification, 11-gate reporting check, and quality report. |
+| 🛡️ **[docs/DASHBOARD_AND_FORENSICS_GUIDE.md](docs/DASHBOARD_AND_FORENSICS_GUIDE.md)** | SOC Dashboard manual across all 10 workspaces, Traffic Explorer, Investigation Drawer, and REST APIs. |
+| ⚡ **[docs/PARALLEL_PERFORMANCE_GUIDE.md](docs/PARALLEL_PERFORMANCE_GUIDE.md)** | Parallel packet processing pipeline, auto-profile sizing, bounded reorder buffer, and reconciliation proofs. |
+| 📦 **[docs/PCAP_ANALYSIS_AND_RETENTION.md](docs/PCAP_ANALYSIS_AND_RETENTION.md)** | Rotating continuous libpcap ring-buffer, dynamic flow PCAP slicing, and sandboxed offline replay. |
+| 🔔 **[docs/NOTIFICATION_INTEGRATIONS.md](docs/NOTIFICATION_INTEGRATIONS.md)** | Multi-channel alert dispatch (SMTP, Telegram, Webhook with HMAC-SHA256, SMS), outbox queuing & cooldowns. |
+| 🏆 **[docs/UPGRADE_RELEASE_REPORT.md](docs/UPGRADE_RELEASE_REPORT.md)** | Comprehensive certification report of the SOC Dashboard, Forensics & Parallel Performance upgrade. |
 | 🔮 **[docs/AI_ML_AUTONOMOUS_DEFENSE_ROADMAP.md](docs/AI_ML_AUTONOMOUS_DEFENSE_ROADMAP.md)** | *(Future Vision)* Long-term architectural roadmap towards stateful intelligence and autonomous defense. |
 
 ---

@@ -20,6 +20,8 @@ class TestAlertPersistence(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.tmp_dir, "test_alerts.db")
+        self.orig_sqlite = config.SQLITE_PATH
+        self.orig_backend = config.DB_BACKEND
         config.DB_BACKEND = "sqlite"
         config.SQLITE_PATH = self.db_path
         config.ARP_TABLE_PATH = os.path.join(self.tmp_dir, "arp.json")
@@ -28,6 +30,12 @@ class TestAlertPersistence(unittest.TestCase):
         conn.close()
 
     def tearDown(self):
+        config.SQLITE_PATH = self.orig_sqlite
+        config.DB_BACKEND = self.orig_backend
+        if hasattr(config, "ALERT_QUEUE_MAXSIZE"):
+            delattr(config, "ALERT_QUEUE_MAXSIZE")
+        if hasattr(config, "ALERT_SPOOL_MAX_SIZE"):
+            delattr(config, "ALERT_SPOOL_MAX_SIZE")
         if os.path.exists(self.tmp_dir):
             import shutil
             shutil.rmtree(self.tmp_dir, ignore_errors=True)

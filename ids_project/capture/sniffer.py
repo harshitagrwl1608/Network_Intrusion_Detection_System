@@ -37,6 +37,7 @@ import os
 import hashlib
 import struct
 import socket
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -351,40 +352,126 @@ def _extract(pkt, capture_ts: float | None = None) -> dict | None:
     return None  # ignore non-IP, non-ARP packets
 
 
-def start_sniff(interface: str, rule_engine, packet_filter: str = "ip or ip6 or arp"):
+def start_sniff(
+    interface: str,
+    rule_engine,
+    packet_filter: str = "ip or ip6 or arp",
+    metrics: Any = None,
+    count: int = 0,
+    timeout: int | None = None,
+    stop_filter: Any = None,
+    flow_tracker: Any = None,
+    pcap_retention: Any = None,
+):
     """
     Start live packet capture on `interface`.
-    Hands each packet to rule_engine.check() after extraction.
-
-    For live sniff, pkt.time is used as event_timestamp (Scapy sets this
-    from the kernel timestamp at capture time, which is accurate).
-
-    Args:
-        interface:     Network interface name (e.g. "eth0", "wlan0")
-        rule_engine:   RuleEngine instance with a .check(record) method
-        packet_filter: BPF filter string (default captures IPv4, IPv6, and ARP)
+    Wires raw wire byte retention, flow tracking, extraction, and detection.
     """
     if not SCAPY_AVAILABLE:
         raise RuntimeError("Scapy is not installed")
 
+    from capture.metrics import get_active_metrics, set_active_metrics, PacketProcessingMetrics
+    if metrics is None:
+        metrics = get_active_metrics()
+    else:
+        set_active_metrics(metrics)
+
     logger.info(f"Starting capture on interface '{interface}' (filter: '{packet_filter}')")
     logger.info("Press Ctrl+C to stop.")
 
+    if not metrics.is_reporter_running():
+        metrics.start_reporter(interval_s=1.0)
+
+    # Attach flow tracker to rule engine if supported
+    if flow_tracker is not None and hasattr(rule_engine, "set_flow_tracker"):
+        rule_engine.set_flow_tracker(flow_tracker)
+
     def _handle(pkt):
+        t0 = time.perf_counter()
+        metrics.record_callback()
+
+        raw_bytes = None
+        seg_id = None
+        pkt_idx = None
+
+        # 1. Optional raw wire packet retention
+        if pcap_retention is not None and getattr(pcap_retention, "enabled", False):
+            try:
+                raw_bytes = bytes(pkt)
+                seg_id, pkt_idx = pcap_retention.record_packet(
+                    raw_bytes,
+                    capture_ts=float(getattr(pkt, "time", time.time()))
+                )
+            except Exception as exc:
+                logger.debug(f"PCAP retention error: {exc}")
+
+        # 2. Packet extraction
         try:
             # capture_ts=None → _extract() uses pkt.time (kernel timestamp)
             record = _extract(pkt, capture_ts=None)
-            if record:
-                rule_engine.check(record)
-        except Exception as e:
-            logger.error(f"Packet handling error: {e}")
+        except Exception as exc:
+            metrics.record_extraction_exception(exc)
+            logger.error(f"Packet extraction error: {exc}")
+            return
 
-    sniff(
-        iface=interface,
-        prn=_handle,
-        filter=packet_filter,
-        store=False,       # don't buffer packets in memory
-    )
+        if record is None:
+            metrics.record_ignored()
+            return
+
+        metrics.record_extraction_success()
+        metrics.record_engine_submission()
+
+        # 3. Wire bytes / hex and flow identity assignment
+        if raw_bytes is None:
+            try:
+                raw_bytes = bytes(pkt)
+            except Exception:
+                raw_bytes = None
+        if raw_bytes is not None:
+            record["raw_hex"] = raw_bytes.hex()
+
+        if seg_id is not None:
+            record["pcap_segment_id"] = seg_id
+            record["packet_index"] = pkt_idx
+
+        if flow_tracker is not None:
+            try:
+                flow_tracker.process_packet(
+                    record,
+                    pcap_segment_id=seg_id,
+                    packet_index=pkt_idx
+                )
+            except Exception as exc:
+                logger.debug(f"Flow tracking error: {exc}")
+
+        # 4. Stateful RuleEngine evaluation
+        try:
+            rule_engine.check(record)
+            duration = time.perf_counter() - t0
+            metrics.record_check_completed(duration)
+        except Exception as exc:
+            duration = time.perf_counter() - t0
+            metrics.record_engine_exception(exc, duration)
+            logger.error(f"Detection engine check error: {exc}")
+
+    try:
+        sniff_kwargs = {
+            "iface": interface,
+            "prn": _handle,
+            "filter": packet_filter,
+            "store": False,       # don't buffer packets in memory
+        }
+        if count > 0:
+            sniff_kwargs["count"] = count
+        if timeout is not None:
+            sniff_kwargs["timeout"] = timeout
+        if stop_filter is not None:
+            sniff_kwargs["stop_filter"] = stop_filter
+
+        sniff(**sniff_kwargs)
+    finally:
+        metrics.stop_reporter()
+        logger.info(metrics.format_summary())
 
 
 def _parse_tcpdump_endpoint(ep: str):
@@ -919,13 +1006,16 @@ def _fast_extract(pkt_bytes: bytes, capture_ts: float | None = None, linktype: i
     return None
 
 
-def _replay_fast_pcap(pcap_path: str, rule_engine) -> dict | None:
+def _replay_fast_pcap(pcap_path: str, rule_engine, progress_callback=None) -> dict | None:
     """
     High-speed binary PCAP replay using struct unpacking.
     Returns {"processed": int, "total": int} on success, or None to fall back to Scapy.
     """
     try:
         with open(pcap_path, "rb") as f:
+            f.seek(0, 2)
+            file_size = f.tell()
+            f.seek(0, 0)
             gh = f.read(24)
             if len(gh) < 24:
                 return None
@@ -979,6 +1069,19 @@ def _replay_fast_pcap(pcap_path: str, rule_engine) -> dict | None:
                     except Exception:
                         pass
 
+                if progress_callback and total % 50 == 0:
+                    pct = min(99.0, round((f.tell() / max(file_size, 1)) * 100.0, 1))
+                    try:
+                        progress_callback(processed, total, pct)
+                    except Exception:
+                        pass
+
+            if progress_callback:
+                try:
+                    progress_callback(processed, total, 100.0)
+                except Exception:
+                    pass
+
             logger.info(f"Fast replay complete: {processed}/{total} packets processed")
             return {"processed": processed, "total": total}
     except Exception as exc:
@@ -986,7 +1089,8 @@ def _replay_fast_pcap(pcap_path: str, rule_engine) -> dict | None:
         return None
 
 
-def replay_pcap(pcap_path: str, rule_engine, use_fast_parser: bool | None = None):
+def replay_pcap(pcap_path: str, rule_engine, use_fast_parser: bool | None = None,
+                progress_callback=None):
     """
     Replay a saved .pcap or tcpdump text file through the rule engine.
     Automatically detects whether file is binary PCAP or ASCII tcpdump log.
@@ -1021,7 +1125,7 @@ def replay_pcap(pcap_path: str, rule_engine, use_fast_parser: bool | None = None
         use_fast = use_fast_parser
 
     if use_fast:
-        fast_res = _replay_fast_pcap(pcap_path, rule_engine)
+        fast_res = _replay_fast_pcap(pcap_path, rule_engine, progress_callback=progress_callback)
         if fast_res is not None:
             return fast_res
 
@@ -1044,6 +1148,16 @@ def replay_pcap(pcap_path: str, rule_engine, use_fast_parser: bool | None = None
             if record:
                 rule_engine.check(record)
                 processed += 1
+            if progress_callback and total % 50 == 0:
+                try:
+                    progress_callback(processed, total, None)
+                except Exception:
+                    pass
+        if progress_callback:
+            try:
+                progress_callback(processed, total, 100.0)
+            except Exception:
+                pass
     finally:
         reader.close()
     logger.info(f"Replay complete: {processed}/{total} packets processed")

@@ -33,13 +33,16 @@ logger = logging.getLogger("ids.main")
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from storage.db import get_connection, init_db
+from storage.db import get_connection, init_db, register_alert_persistence_hook
 from engine.blocklist import load_blocklist
 from engine.rules import RuleEngine
 from capture.sniffer import start_sniff
 from analysis.aggregator import run_analysis
 from storage.db import prune_old_alerts
-from dashboard.app import app as flask_app
+from dashboard.app import app as flask_app, _baseline_engine
+from forensics.flow_tracker import FlowTracker
+from notifications.outbox import get_outbox_manager, on_alert_persisted
+from analytics.baselines import BaselineCollector
 
 
 # ---------------------------------------------------------------------------
@@ -78,10 +81,10 @@ def analysis_loop(conn):
         time.sleep(config.ANALYSIS_INTERVAL)
 
 
-def sniffer_thread(interface: str, engine: RuleEngine):
+def sniffer_thread(interface: str, engine: RuleEngine, flow_tracker=None):
     """Capture packets in a background thread."""
     try:
-        start_sniff(interface, engine)
+        start_sniff(interface, engine, flow_tracker=flow_tracker)
     except PermissionError:
         logger.critical(
             "Permission denied — packet capture requires root.\n"
@@ -113,11 +116,24 @@ def main():
     # ── 2. Blocklist ──
     blocklist = load_blocklist(config.BLOCKLIST_PATH, config.BLOCKLIST_URL)
 
-    # ── 3. Rule engine ──
+    # ── 3. Rule engine & Flow Tracker ──
+    flow_tracker = FlowTracker(db_conn=conn)
     engine = RuleEngine(conn, blocklist, config)
-    logger.info(f"Rule engine ready ({len(engine.rules)} rules)")
+    engine.set_flow_tracker(flow_tracker)
+    logger.info(f"Rule engine ready ({len(engine.rules)} rules) with forensic FlowTracker")
 
-    # ── 4. Analysis loop thread ──
+    # ── 4. Notifications Outbox ──
+    outbox_mgr = get_outbox_manager(conn=conn)
+    register_alert_persistence_hook(on_alert_persisted)
+    outbox_mgr.start_worker(interval_s=2.0)
+    logger.info("Notification outbox worker started")
+
+    # ── 5. Analytics & Baseline Telemetry Collector ──
+    baseline_collector = BaselineCollector(_baseline_engine, flow_tracker=flow_tracker, conn=conn, interval_s=5.0)
+    baseline_collector.start()
+    logger.info("Statistical baseline collector started")
+
+    # ── 6. Analysis loop thread ──
     t_analysis = threading.Thread(
         target=analysis_loop,
         args=(conn,),
@@ -126,17 +142,17 @@ def main():
     )
     t_analysis.start()
 
-    # ── 5. Sniffer thread ──
+    # ── 7. Sniffer thread ──
     t_sniffer = threading.Thread(
         target=sniffer_thread,
-        args=(config.INTERFACE, engine),
+        args=(config.INTERFACE, engine, flow_tracker),
         name="packet-sniffer",
         daemon=True,
     )
     t_sniffer.start()
     logger.info(f"Packet sniffer started on '{config.INTERFACE}'")
 
-    # ── 6. Flask dashboard (blocking — main thread) ──
+    # ── 8. Flask dashboard (blocking — main thread) ──
     logger.info(f"Starting dashboard at http://localhost:{config.DASHBOARD_PORT}")
     flask_app.run(
         host=config.DASHBOARD_HOST,

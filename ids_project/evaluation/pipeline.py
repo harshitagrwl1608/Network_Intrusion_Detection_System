@@ -91,8 +91,10 @@ def check_disk_safety(require_mount: bool = True) -> bool:
         True iff all safety invariants are satisfied.
     """
     if not os.path.isdir(HDD_DATASETS_DIR):
-        logger.error(f"HDD dataset directory does not exist: {HDD_DATASETS_DIR}")
-        return False
+        if require_mount:
+            logger.error(f"HDD dataset directory does not exist: {HDD_DATASETS_DIR}")
+            return False
+        return True
 
     # --- Mount verification: backing device must match EXPECTED_BACKING_DEVICE or persistent UUID/Label ---
     if require_mount:
@@ -201,7 +203,10 @@ def load_cumulative_budget(require_mount: bool = True) -> dict:
         logger.warning("Disk safety check failed — returning in-memory budget without directory creation.")
         return initial_budget
 
-    os.makedirs(COORDINATION_DIR, exist_ok=True)
+    try:
+        os.makedirs(os.path.dirname(CUMULATIVE_BUDGET_FILE), exist_ok=True)
+    except Exception:
+        pass
     if os.path.isfile(CUMULATIVE_BUDGET_FILE):
         try:
             with open(CUMULATIVE_BUDGET_FILE, "r", encoding="utf-8") as f:

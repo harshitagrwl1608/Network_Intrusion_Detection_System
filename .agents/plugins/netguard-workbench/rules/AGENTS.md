@@ -21,12 +21,12 @@
 - **Zeek Integration**: Zeek structured event logs (`conn.log`, `dns.log`, `ssl.log`) provide complementary flow and session telemetry for corroboration without signature dependency.
 
 ## 3. Git Discipline & Safety Invariants
-- **Authorized Branch**: `antigravity/overnight-work`.
+- **Authorized Branch**: `antigravity/dashboard-forensics`.
 - **Strict Guardrails**:
   - Never commit directly to `main` or push to `main`.
   - Never force-push (`git push -f`) or delete branches.
   - Never execute destructive resets (`git reset --hard`) without absolute safety verification.
-  - Push strictly to `origin/antigravity/overnight-work`.
+  - Push strictly to `origin/antigravity/dashboard-forensics`.
 
 ## 4. Verification and Testing Discipline
 - Every change must be verified against:

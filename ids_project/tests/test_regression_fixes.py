@@ -343,7 +343,7 @@ class TestReplayEventClockE2E(unittest.TestCase):
         )
 
         self.assertGreater(tracking_engine.clock.current_time, 0.0)
-        c = get_connection()
+        c = get_connection(eval_db)
         cur = c.cursor()
         cur.execute("SELECT COUNT(*) FROM alerts WHERE rule_name='PORT_SCAN'")
         cnt = cur.fetchone()[0]
