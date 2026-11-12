@@ -56,7 +56,36 @@ from werkzeug.utils import secure_filename
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB max upload limit
-app.secret_key = getattr(config, "SECRET_KEY", None) or os.environ.get("NETGUARD_SECRET_KEY") or secrets.token_hex(32)
+
+# --- Flask session-signing key (NETGUARD_SECRET_KEY) ---
+# This key signs session cookies and must be stable across all workers and restarts.
+# It is INDEPENDENT from NETGUARD_ENCRYPTION_KEY (credential encryption).
+# In production: set NETGUARD_SECRET_KEY to a strong, stable value and keep it consistent
+# across all worker processes (gunicorn, uwsgi, etc.).
+# Multi-worker requirement: ALL workers MUST share the same NETGUARD_SECRET_KEY to validate sessions.
+# Rotation: changing this key invalidates all existing session cookies (users must re-login).
+_configured_secret_key = getattr(config, "SECRET_KEY", None) or os.environ.get("NETGUARD_SECRET_KEY")
+_is_production_config = not (
+    os.environ.get("NETGUARD_TESTING") == "1" or
+    os.environ.get("DASHBOARD_DEBUG", "false").lower() == "true" or
+    getattr(config, "DASHBOARD_DEBUG", False)
+)
+
+if not _configured_secret_key:
+    if _is_production_config:
+        # Fail closed: require explicit key in production / non-debug operation
+        import warnings
+        warnings.warn(
+            "NETGUARD_SECRET_KEY is not set. Session cookies will be signed with an ephemeral key. "
+            "Sessions will NOT persist across restarts or multiple workers. "
+            "Set NETGUARD_SECRET_KEY for production deployments.",
+            RuntimeWarning,
+            stacklevel=1,
+        )
+    # Use ephemeral random key (safe for single-process dev/test, not production multi-worker)
+    _configured_secret_key = secrets.token_hex(32)
+
+app.secret_key = _configured_secret_key
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",

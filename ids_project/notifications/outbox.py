@@ -59,17 +59,17 @@ class NotificationOutboxManager:
             self.reload_providers_from_db()
 
     def reload_providers_from_db(self):
-        """Load configured notification provider credentials from persistent system settings."""
+        """Load configured notification provider credentials from persistent system settings. Fails closed."""
         if not self._conn:
             return
         from storage.forensics_db import get_system_setting
         for name in ("email", "telegram", "webhook", "sms"):
             try:
-                cfg = get_system_setting(self._conn, f"notification_{name}")
+                cfg = get_system_setting(self._conn, f"notification_{name}", raise_on_error=True)
                 if cfg and isinstance(cfg, dict):
                     self.configure_provider(name, cfg, persist=False)
             except Exception as exc:
-                logger.debug(f"Failed loading provider setting for {name}: {exc}")
+                logger.warning(f"Failed loading/decrypting provider setting for {name} ({exc}). Provider remains unconfigured.")
 
     def configure_provider(self, name: str, cfg: dict, persist: bool = True) -> tuple[bool, str]:
         """Configure or update a notification provider with persistence."""
@@ -126,6 +126,7 @@ class NotificationOutboxManager:
 
         if persist and self._conn:
             from storage.forensics_db import save_system_setting
+            from storage.crypto import CryptoError
             cfg_to_persist = dict(cfg)
             if name_lower == "email" and hasattr(current_p, "password") and current_p.password:
                 if not cfg_to_persist.get("password") or cfg_to_persist.get("password") == "********":
@@ -140,7 +141,14 @@ class NotificationOutboxManager:
                 if not cfg_to_persist.get("auth_token") or cfg_to_persist.get("auth_token") == "********":
                     cfg_to_persist["auth_token"] = current_p.auth_token
 
-            save_system_setting(self._conn, f"notification_{name_lower}", cfg_to_persist)
+            try:
+                save_system_setting(self._conn, f"notification_{name_lower}", cfg_to_persist)
+            except CryptoError as exc:
+                logger.error(f"Failed to persist {name_lower} configuration due to encryption error: {exc}")
+                return False, f"Encryption configuration error: {exc}"
+            except Exception as exc:
+                logger.error(f"Failed to persist {name_lower} configuration: {exc}")
+                return False, f"Failed to persist configuration: {exc}"
 
         return True, f"Configured {name_lower}"
 

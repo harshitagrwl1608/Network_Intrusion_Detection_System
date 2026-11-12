@@ -221,8 +221,8 @@ def test_02_traffic_explorer_cidr_and_kql(browser_env):
 
 
 def test_03_threat_hunting_workspace(browser_env):
-    """Test 4: Threat Hunting presets and hypothesis query execution."""
-    driver, base_url, _ = browser_env
+    """Test 4: Threat Hunting proactive hypothesis execution and result verification."""
+    driver, base_url, db_path = browser_env
     wait = WebDriverWait(driver, 15)
 
     switch_workspace(driver, "hunting")
@@ -230,9 +230,48 @@ def test_03_threat_hunting_workspace(browser_env):
     # Trigger stealth scan hunting preset
     driver.execute_script("applyHuntingPreset('stealth_scan');")
 
-    # Wait for hunting results table to update
+    # Wait for hunting results table to have populated rows, not just be present
     wait.until(EC.presence_of_element_located((By.ID, "hunting-results-table")))
     time.sleep(1)
+
+    # Verify results table has content — check the backend via API call directly
+    results_json = driver.execute_script("""
+        try {
+            const el = document.getElementById('hunting-results-table');
+            const rows = el ? el.querySelectorAll('tbody tr') : [];
+            return {rowCount: rows.length, hasTable: !!el};
+        } catch(e) {
+            return {error: e.toString()};
+        }
+    """)
+    # At minimum, table element must render; may have no results depending on seed data
+    assert results_json and results_json.get("hasTable") is True, \
+        f"hunting-results-table not rendered: {results_json}"
+
+    # Backend API verification: threat hunting endpoint returns 200 with valid JSON
+    # Use synchronous XHR (fetch() in execute_script returns a Promise, not the resolved value)
+    hunting_xhr = driver.execute_script("""
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/api/hunting/search?type=preset&preset=stealth_scan', false);
+        xhr.send();
+        return {status: xhr.status, response: xhr.responseText.substring(0, 1000)};
+    """)
+    assert hunting_xhr["status"] == 200, \
+        f"Hunting API /api/hunting/search returned status {hunting_xhr['status']}: {hunting_xhr.get('response', '')[:200]}"
+
+    # Verify backend returned parseable JSON with expected structure
+    try:
+        hunting_data = json.loads(hunting_xhr["response"])
+        # Must be a dict containing a 'results' key (or at least be a dict)
+        assert isinstance(hunting_data, dict), \
+            f"Hunting response must be dict, got: {type(hunting_data).__name__}"
+        # The API wraps results in a 'results' key
+        assert "results" in hunting_data, \
+            f"Hunting response missing 'results' key, got keys: {list(hunting_data.keys())}"
+    except json.JSONDecodeError as exc:
+        # If response is truncated, still verify non-empty and valid start
+        assert len(hunting_xhr["response"]) > 2, \
+            f"Hunting API returned empty/malformed response: {exc}"
 
     # Take screenshot 04
     shot4_path = os.path.join(SCREENSHOTS_DIR, "04_threat_hunting_kql.png")
@@ -241,14 +280,16 @@ def test_03_threat_hunting_workspace(browser_env):
 
 
 def test_04_pcap_upload_and_replay(browser_env):
-    """Test 5: PCAP Analysis upload, offline job creation, and replay progress."""
-    driver, base_url, _ = browser_env
+    """Test 5: PCAP Analysis upload, isolated replay, and result verification."""
+    driver, base_url, db_path = browser_env
     wait = WebDriverWait(driver, 45)
 
     switch_workspace(driver, "pcap")
 
     pcap_path = os.path.join(PROJECT_DIR, "data", "test_attacks.pcap")
     assert os.path.exists(pcap_path), f"PCAP fixture not found at {pcap_path}"
+    # Verify fixture is non-empty and valid
+    assert os.path.getsize(pcap_path) > 100, "PCAP fixture must be a non-empty file"
 
     file_input = driver.find_element(By.ID, "pcap-file-input")
     driver.execute_script("arguments[0].style.display = 'block';", file_input)
@@ -257,6 +298,45 @@ def test_04_pcap_upload_and_replay(browser_env):
     # Wait for job to appear in jobs table and reach completed state
     wait.until(lambda d: "test_attacks.pcap" in d.find_element(By.ID, "pcap-jobs-tbody").text)
     wait.until(lambda d: "completed" in d.find_element(By.ID, "pcap-jobs-tbody").text.lower())
+
+    # Backend verification: get job details via API
+    jobs_xhr = driver.execute_script("""
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/api/pcap/jobs', false);
+        xhr.send();
+        return {status: xhr.status, response: xhr.responseText};
+    """)
+    assert jobs_xhr["status"] == 200
+    jobs_data = json.loads(jobs_xhr["response"])
+    jobs = jobs_data if isinstance(jobs_data, list) else jobs_data.get("jobs", [])
+    assert len(jobs) > 0, "Expected at least one PCAP job after upload"
+
+    # Verify the completed job is associated with the uploaded file
+    completed_jobs = [j for j in jobs if j.get("status") == "completed"]
+    assert len(completed_jobs) > 0, f"Expected completed job, got statuses: {[j.get('status') for j in jobs]}"
+
+    # Verify the job reports some alerts were generated (test_attacks.pcap must trigger rules)
+    latest_job = completed_jobs[0]
+    job_id = latest_job.get("job_id", "")
+    if job_id:
+        job_detail_xhr = driver.execute_script(f"""
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', '/api/pcap/jobs/{job_id}', false);
+            xhr.send();
+            return {{status: xhr.status, response: xhr.responseText}};
+        """)
+        if job_detail_xhr["status"] == 200:
+            job_detail = json.loads(job_detail_xhr["response"])
+            job = job_detail if isinstance(job_detail, dict) and "job_id" in job_detail else job_detail.get("job", {})
+            # Verify the replay processed packets
+        processed_packets = job.get("processed_packets", 0)
+        job_alert_count = job.get("alert_count", 0)
+        # test_attacks.pcap has 1175 packets — either processed_packets or alert_count must be non-zero
+        assert processed_packets > 0 or job_alert_count > 0, (
+            f"Expected processed_packets>0 or alert_count>0 for completed job; "
+            f"got processed_packets={processed_packets}, alert_count={job_alert_count}, "
+            f"progress={job.get('progress')}, status={job.get('status')}"
+        )
 
     # Take screenshot 05
     shot5_path = os.path.join(SCREENSHOTS_DIR, "05_pcap_analysis_replay.png")

@@ -425,6 +425,10 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
         seq_engine = RuleEngine(None, set(), config)
         seq_engine.set_alert_sink(_seq_sink)
         replay_pcap(pcap_path, seq_engine, use_fast_parser=True)
+        # Flush the sequential engine: stops alert-writer thread and drains all queues.
+        # Without this, the background writer thread leaks into subsequent tests and
+        # contaminates the detection engine state seen by holdout evaluation tests.
+        seq_engine.flush()
 
         # Parallel pipeline run
         par_alerts = []
@@ -442,6 +446,8 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
             reorder_max=200,
         )
         res = pipeline.process_pcap_file(pcap_path)
+        # Flush parallel engine for the same isolation reason.
+        par_engine.flush()
 
         self.assertEqual(len(par_alerts), len(seq_alerts))
         self.assertEqual(par_alerts, seq_alerts, "Parallel execution MUST reconcile 100% with sequential execution!")

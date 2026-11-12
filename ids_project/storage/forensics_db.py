@@ -985,49 +985,66 @@ def _is_postgres() -> bool:
 
 
 def save_system_setting(conn, key: str, value: Any) -> None:
-    """Persist system setting with JSON serialization and secret encryption at rest."""
-    from storage.crypto import encrypt_dict_secrets, encrypt_string, SENSITIVE_KEYS
+    """Persist system setting with JSON serialization and secret encryption at rest. Fails closed."""
+    from storage.crypto import encrypt_dict_secrets, encrypt_string, SENSITIVE_KEYS, CryptoError
     now = time.time()
-    if isinstance(value, dict):
-        existing_raw = None
+    try:
+        if isinstance(value, dict):
+            existing_raw = None
+            try:
+                param = "%s" if _is_postgres() else "?"
+                with _sqlite_lock:
+                    cur = conn.cursor()
+                    cur.execute(f"SELECT value_json FROM system_settings WHERE setting_key = {param}", (key,))
+                    row = cur.fetchone()
+                    cur.close()
+                    if row and row[0]:
+                        existing_raw = json.loads(row[0])
+            except Exception:
+                pass
+            value_to_save = encrypt_dict_secrets(value, existing_raw)
+        elif isinstance(value, str) and (key in SENSITIVE_KEYS or "token" in key or "password" in key or "secret" in key):
+            value_to_save = encrypt_string(value)
+        else:
+            value_to_save = value
+
+        v_json = json.dumps(value_to_save)
+        if _is_postgres():
+            sql = """
+                INSERT INTO system_settings (setting_key, value_json, updated_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (setting_key) DO UPDATE SET
+                    value_json = EXCLUDED.value_json,
+                    updated_at = EXCLUDED.updated_at
+            """
+        else:
+            sql = "INSERT OR REPLACE INTO system_settings (setting_key, value_json, updated_at) VALUES (?, ?, ?)"
+        with _sqlite_lock:
+            cur = conn.cursor()
+            cur.execute(sql, (key, v_json, now))
+            conn.commit()
+            cur.close()
+    except CryptoError as exc:
         try:
-            param = "%s" if _is_postgres() else "?"
-            with _sqlite_lock:
-                cur = conn.cursor()
-                cur.execute(f"SELECT value_json FROM system_settings WHERE setting_key = {param}", (key,))
-                row = cur.fetchone()
-                cur.close()
-                if row and row[0]:
-                    existing_raw = json.loads(row[0])
+            conn.rollback()
         except Exception:
             pass
-        value_to_save = encrypt_dict_secrets(value, existing_raw)
-    elif isinstance(value, str) and (key in SENSITIVE_KEYS or "token" in key or "password" in key or "secret" in key):
-        value_to_save = encrypt_string(value)
-    else:
-        value_to_save = value
-
-    v_json = json.dumps(value_to_save)
-    if _is_postgres():
-        sql = """
-            INSERT INTO system_settings (setting_key, value_json, updated_at)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (setting_key) DO UPDATE SET
-                value_json = EXCLUDED.value_json,
-                updated_at = EXCLUDED.updated_at
-        """
-    else:
-        sql = "INSERT OR REPLACE INTO system_settings (setting_key, value_json, updated_at) VALUES (?, ?, ?)"
-    with _sqlite_lock:
-        cur = conn.cursor()
-        cur.execute(sql, (key, v_json, now))
-        conn.commit()
-        cur.close()
+        logger.error(f"Refusing to persist system_setting '{key}' due to cryptographic error: {exc}")
+        raise
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
 
 
-def get_system_setting(conn, key: str, default: Any = None) -> Any:
-    """Retrieve JSON-deserialized system setting with transparent secret decryption."""
-    from storage.crypto import decrypt_dict_secrets, decrypt_string, ENCRYPTION_PREFIX
+def get_system_setting(conn, key: str, default: Any = None, raise_on_error: bool = False) -> Any:
+    """
+    Retrieve JSON-deserialized system setting with transparent secret decryption.
+    Fails closed: if decryption fails, never returns ciphertext credentials.
+    """
+    from storage.crypto import decrypt_dict_secrets, decrypt_string, ENCRYPTION_PREFIXES, CryptoError
     param = "%s" if _is_postgres() else "?"
     sql = f"SELECT value_json FROM system_settings WHERE setting_key = {param}"
     with _sqlite_lock:
@@ -1041,9 +1058,14 @@ def get_system_setting(conn, key: str, default: Any = None) -> Any:
         raw_val = json.loads(row[0])
         if isinstance(raw_val, dict):
             return decrypt_dict_secrets(raw_val)
-        elif isinstance(raw_val, str) and raw_val.startswith(ENCRYPTION_PREFIX):
+        elif isinstance(raw_val, str) and any(raw_val.startswith(p) for p in ENCRYPTION_PREFIXES):
             return decrypt_string(raw_val)
         return raw_val
+    except CryptoError as exc:
+        logger.warning(f"Failed to decrypt system setting '{key}' (key mismatch or unconfigured): {exc}")
+        if raise_on_error:
+            raise
+        return default
     except Exception:
         return default
 

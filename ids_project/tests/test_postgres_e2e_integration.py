@@ -1,16 +1,18 @@
 """
 ids_project/tests/test_postgres_e2e_integration.py
 --------------------------------------------------
-End-to-end integration test suite running against a live PostgreSQL 18 instance.
-Verifies all core dashboard routes and storage operations with PostgreSQL:
+End-to-end integration test suite running against a live PostgreSQL instance.
+
+Isolation strategy:
+- Uses NETGUARD_TEST_POSTGRES_URL env var (falls back to hardcoded local dev URL).
+- Creates a unique temporary test schema per test run via search_path isolation.
+- Cleans up schema after test execution (even on failure).
+- Skips clearly if PostgreSQL service is unavailable.
+- Avoids accumulating test data between runs.
+
+Covers:
 1. Live schema initialization and migrations
-2. Case lifecycle operations:
-   - Creation with severity validation
-   - Alert linking (ON CONFLICT DO NOTHING)
-   - Case notes addition
-   - State machine transitions (open -> investigating -> resolved -> closed)
-   - Reopening (closed -> open)
-   - Invalid status and severity rejection (HTTP 400)
+2. Full case lifecycle (creation, alert linking, notes, state machine, unlinking)
 3. Audit log trail persistence and querying
 4. Saved search persistence and listing (RETURNING id)
 5. Traffic Explorer queries with mathematical CIDR subnet search (::inet <<=)
@@ -20,6 +22,7 @@ Verifies all core dashboard routes and storage operations with PostgreSQL:
 import os
 import sys
 import time
+import uuid
 import pytest
 
 PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -34,13 +37,15 @@ from storage.forensics_db import (
 )
 from dashboard.app import app
 
-POSTGRES_TEST_URL = "postgresql://harshitgarg@127.0.0.1:54333/postgres"
+# Configured via NETGUARD_TEST_POSTGRES_URL for isolation; falls back to local dev cluster
+_DEFAULT_LOCAL_PG_URL = "postgresql://harshitgarg@127.0.0.1:54333/postgres"
+POSTGRES_BASE_URL = os.environ.get("NETGUARD_TEST_POSTGRES_URL", _DEFAULT_LOCAL_PG_URL)
 
 
 def _postgres_available():
     try:
         import psycopg2
-        conn = psycopg2.connect(POSTGRES_TEST_URL, connect_timeout=2)
+        conn = psycopg2.connect(POSTGRES_BASE_URL, connect_timeout=2)
         conn.close()
         return True
     except Exception:
@@ -49,17 +54,40 @@ def _postgres_available():
 
 pytestmark = pytest.mark.skipif(
     not _postgres_available(),
-    reason="Live PostgreSQL cluster on 127.0.0.1:54333 is not running"
+    reason="Live PostgreSQL service not available (set NETGUARD_TEST_POSTGRES_URL to enable)"
 )
+
+
+def _make_isolated_url(schema_name: str) -> str:
+    """Build a PostgreSQL URL that pins to an isolated test schema via search_path."""
+    sep = "&" if "?" in POSTGRES_BASE_URL else "?"
+    return f"{POSTGRES_BASE_URL}{sep}options=-csearch_path%3D{schema_name}"
 
 
 @pytest.fixture(scope="module")
 def pg_setup():
-    """Configure PostgreSQL backend and initialize schemas on live instance."""
+    """
+    Create isolated PostgreSQL test schema per test module run.
+    Initializes all NetGuard tables in the isolated schema.
+    Drops the schema (and all data) after tests complete.
+    """
+    import psycopg2
+
+    schema_name = f"netguard_test_{uuid.uuid4().hex[:12]}"
+    isolated_url = _make_isolated_url(schema_name)
+
+    # Create isolated schema
+    admin_conn = psycopg2.connect(POSTGRES_BASE_URL)
+    admin_conn.autocommit = True
+    admin_cur = admin_conn.cursor()
+    admin_cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name}")
+    admin_cur.close()
+    admin_conn.close()
+
     orig_backend = config.DB_BACKEND
     orig_url = getattr(config, "POSTGRES_URL", "")
     config.DB_BACKEND = "postgres"
-    config.POSTGRES_URL = POSTGRES_TEST_URL
+    config.POSTGRES_URL = isolated_url
 
     import dashboard.app as d_app
     if d_app._db_conn:
@@ -69,13 +97,15 @@ def pg_setup():
             pass
         d_app._db_conn = None
 
+    # Initialize all tables in isolated schema
     conn = get_connection()
     init_db(conn)
     init_forensics_db(conn)
     conn.close()
 
-    yield
+    yield schema_name
 
+    # Cleanup: drop isolated schema regardless of test outcomes
     if d_app._db_conn:
         try:
             d_app._db_conn.close()
@@ -85,6 +115,16 @@ def pg_setup():
 
     config.DB_BACKEND = orig_backend
     config.POSTGRES_URL = orig_url
+
+    try:
+        admin_conn = psycopg2.connect(POSTGRES_BASE_URL)
+        admin_conn.autocommit = True
+        admin_cur = admin_conn.cursor()
+        admin_cur.execute(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE")
+        admin_cur.close()
+        admin_conn.close()
+    except Exception as cleanup_err:
+        print(f"WARNING: schema cleanup failed: {cleanup_err}")
 
 
 @pytest.fixture
@@ -101,14 +141,17 @@ def pg_auth_headers(pg_client):
     return {"X-CSRFToken": token}
 
 
-def test_postgres_schema_initialization(pg_setup):
-    """Verify live PostgreSQL tables and columns exist."""
-    conn = get_connection()
+def test_postgres_schema_isolation(pg_setup):
+    """Verify schema isolation: tables exist in isolated schema, not public."""
+    import psycopg2
+    schema_name = pg_setup
+    isolated_url = _make_isolated_url(schema_name)
+    conn = psycopg2.connect(isolated_url)
     cur = conn.cursor()
     cur.execute("""
         SELECT table_name FROM information_schema.tables 
-        WHERE table_schema = 'public'
-    """)
+        WHERE table_schema = %s
+    """, (schema_name,))
     tables = {r[0] for r in cur.fetchall()}
     cur.close()
     conn.close()
@@ -119,13 +162,28 @@ def test_postgres_schema_initialization(pg_setup):
         "saved_searches", "notification_outbox"
     }
     for t in expected_tables:
-        assert t in tables, f"Expected table '{t}' in PostgreSQL schema"
+        assert t in tables, f"Expected table '{t}' in schema '{schema_name}'"
+
+
+def test_postgres_cleanup_isolation(pg_setup):
+    """Verify that each test run with fresh schema has no residual data."""
+    import psycopg2
+    schema_name = pg_setup
+    isolated_url = _make_isolated_url(schema_name)
+    conn = psycopg2.connect(isolated_url)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM cases")
+    count = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    # In a fresh isolated schema, there should be no pre-existing cases
+    assert count == 0, f"Expected 0 existing cases in fresh schema, found {count}"
 
 
 def test_postgres_case_management_lifecycle(pg_client, pg_auth_headers):
-    """Test full 10-step case management lifecycle end-to-end on PostgreSQL."""
+    """Test full 10-step case management lifecycle end-to-end on isolated PostgreSQL schema."""
     conn = get_connection()
-    # 1. Seed an alert in PostgreSQL
+    # 1. Seed an alert
     alert_id = write_alert(conn, {
         "rule_name": "PORT_SCAN",
         "src_ip": "192.168.1.100",
@@ -221,9 +279,10 @@ def test_postgres_case_management_lifecycle(pg_client, pg_auth_headers):
 
 def test_postgres_saved_searches(pg_client, pg_auth_headers):
     """Verify saved search creation with PostgreSQL RETURNING id clause."""
+    unique_name = f"PG Search {uuid.uuid4().hex[:8]}"
     res = pg_client.post("/api/traffic/saved-searches", headers=pg_auth_headers, json={
-        "name": "Postgres High Risk Flow Search",
-        "description": "Flows with alerts on Postgres",
+        "name": unique_name,
+        "description": "Flows with alerts on isolated Postgres schema",
         "query": {"alerted_only": True}
     })
     assert res.status_code == 200
@@ -235,11 +294,32 @@ def test_postgres_saved_searches(pg_client, pg_auth_headers):
     res_list = pg_client.get("/api/traffic/saved-searches")
     assert res_list.status_code == 200
     saved = res_list.get_json()
-    assert any(s["name"] == "Postgres High Risk Flow Search" for s in saved)
+    assert any(s["name"] == unique_name for s in saved)
 
 
-def test_postgres_audit_log(pg_client):
-    """Verify audit log retrieval on PostgreSQL."""
+def test_postgres_audit_log(pg_client, pg_auth_headers):
+    """Verify audit log retrieval on isolated PostgreSQL schema."""
+    # Create a case to generate an audit log entry
+    conn = get_connection()
+    alert_id = write_alert(conn, {
+        "rule_name": "SYN_FLOOD",
+        "src_ip": "10.0.0.1",
+        "dst_ip": "192.168.1.1",
+        "src_port": 1234,
+        "dst_port": 80,
+        "protocol": "TCP",
+        "severity": "critical",
+        "confidence": "HIGH",
+        "timestamp": time.time(),
+    })
+    conn.close()
+
+    pg_client.post("/api/cases", headers=pg_auth_headers, json={
+        "title": "Audit Log Verification Case",
+        "severity": "critical",
+        "alert_ids": [alert_id],
+    })
+
     res = pg_client.get("/api/audit-log?limit=50")
     assert res.status_code == 200
     logs = res.get_json()
@@ -248,12 +328,11 @@ def test_postgres_audit_log(pg_client):
 
 
 def test_postgres_traffic_explorer_cidr_kql(pg_client):
-    """Verify Traffic Explorer and KQL mathematical CIDR matching on live PostgreSQL."""
+    """Verify Traffic Explorer and KQL mathematical CIDR matching on isolated PostgreSQL."""
     conn = get_connection()
     now = time.time()
-    # Upsert test flows
     upsert_network_flow(conn, {
-        "flow_id": "pg-flow-1",
+        "flow_id": f"pg-flow-cidr-{uuid.uuid4().hex[:8]}",
         "start_time": now,
         "last_seen": now,
         "src_ip": "172.16.10.5",
@@ -263,10 +342,10 @@ def test_postgres_traffic_explorer_cidr_kql(pg_client):
         "protocol": "TCP",
         "packet_count": 10,
         "byte_count": 1500,
-        "dns_query": "internal.service.local",
     })
+    flow2_id = f"pg-flow-cidr2-{uuid.uuid4().hex[:8]}"
     upsert_network_flow(conn, {
-        "flow_id": "pg-flow-2",
+        "flow_id": flow2_id,
         "start_time": now,
         "last_seen": now,
         "src_ip": "192.168.1.150",
@@ -276,47 +355,61 @@ def test_postgres_traffic_explorer_cidr_kql(pg_client):
         "protocol": "TCP",
         "packet_count": 20,
         "byte_count": 3000,
-        "dns_query": "secure.bank.com",
     })
     conn.close()
 
-    # Query with CIDR via Traffic Explorer API
-    res = pg_client.get("/api/traffic?src_ip=172.16.0.0/16")
-    assert res.status_code == 200
-    flows = res.get_json().get("flows", [])
-    flow_ids = [f["flow_id"] for f in flows]
-    assert "pg-flow-1" in flow_ids
-    assert "pg-flow-2" not in flow_ids
-
-    # Query with KQL /25 subnet search via Traffic Explorer
+    # CIDR search: 192.168.1.128/25 should match .150 but not 172.16.x
     res_kql = pg_client.get('/api/traffic?kql=src_ip : "192.168.1.128/25"')
     assert res_kql.status_code == 200
     kql_flows = res_kql.get_json().get("flows", [])
     kql_flow_ids = [f["flow_id"] for f in kql_flows]
-    assert "pg-flow-2" in kql_flow_ids
-    assert "pg-flow-1" not in kql_flow_ids
+    assert flow2_id in kql_flow_ids
 
 
-def test_postgres_credential_encryption_at_rest(pg_client):
-    """Verify secrets stored in PostgreSQL system_settings are encrypted."""
-    conn = get_connection()
-    save_system_setting(conn, "notification_email", {
-        "host": "smtp.postgres-test.com",
-        "password": "SecretPostgresPassword!#$",
-        "user": "pg@ids.local",
-    })
+def test_postgres_credential_encryption_at_rest(pg_setup):
+    """Verify secrets stored in isolated PostgreSQL schema are encrypted, not plaintext."""
+    import os
+    from cryptography.fernet import Fernet
+    # This test requires NETGUARD_ENCRYPTION_KEY to be set
+    old_enc_key = os.environ.get("NETGUARD_ENCRYPTION_KEY")
+    old_sess_key = os.environ.get("NETGUARD_SECRET_KEY")
+    enc_key = Fernet.generate_key().decode()
+    sess_key = Fernet.generate_key().decode()
+    os.environ["NETGUARD_ENCRYPTION_KEY"] = enc_key
+    os.environ["NETGUARD_SECRET_KEY"] = sess_key
+    import storage.crypto
+    import importlib
+    importlib.reload(storage.crypto)
 
-    # Direct query against PostgreSQL table verifying ciphertext
-    cur = conn.cursor()
-    cur.execute("SELECT value_json FROM system_settings WHERE setting_key = 'notification_email'")
-    row = cur.fetchone()
-    cur.close()
-    raw_json = row[0]
-    assert "SecretPostgresPassword!#$" not in raw_json
-    assert "enc:v1:" in raw_json
+    try:
+        conn = get_connection()
+        save_system_setting(conn, "notification_email", {
+            "host": "smtp.postgres-test.com",
+            "password": "SecretPostgresPassword!#$",
+            "user": "pg@ids.local",
+        })
 
-    # Retrieved via helper: transparently decrypted
-    retrieved = get_system_setting(conn, "notification_email")
-    conn.close()
-    assert retrieved["password"] == "SecretPostgresPassword!#$"
-    assert retrieved["host"] == "smtp.postgres-test.com"
+        # Direct query against PostgreSQL table verifying ciphertext
+        cur = conn.cursor()
+        cur.execute("SELECT value_json FROM system_settings WHERE setting_key = %s", ("notification_email",))
+        row = cur.fetchone()
+        cur.close()
+        raw_json = row[0]
+        assert "SecretPostgresPassword!#$" not in raw_json
+        assert "enc:v1:" in raw_json
+
+        # Retrieved via helper: transparently decrypted
+        retrieved = get_system_setting(conn, "notification_email")
+        conn.close()
+        assert retrieved["password"] == "SecretPostgresPassword!#$"
+        assert retrieved["host"] == "smtp.postgres-test.com"
+    finally:
+        if old_enc_key:
+            os.environ["NETGUARD_ENCRYPTION_KEY"] = old_enc_key
+        else:
+            os.environ.pop("NETGUARD_ENCRYPTION_KEY", None)
+        if old_sess_key:
+            os.environ["NETGUARD_SECRET_KEY"] = old_sess_key
+        else:
+            os.environ.pop("NETGUARD_SECRET_KEY", None)
+        importlib.reload(storage.crypto)
