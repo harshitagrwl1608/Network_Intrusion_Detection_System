@@ -42,10 +42,12 @@ WHITELISTED_FIELDS = {
     "duration": {"type": "float", "column": "duration_s"},
     "packet_count": {"type": "int", "column": "packet_count"},
     "byte_count": {"type": "int", "column": "byte_count"},
-    "dns_query": {"type": "event_field", "column": "dns_query"},
-    "http_host": {"type": "event_field", "column": "http_host"},
-    "http_uri": {"type": "event_field", "column": "http_uri"},
-    "tls_sni": {"type": "event_field", "column": "tls_sni"},
+    "dns_query": {"type": "string", "column": "dns_query"},
+    "http_host": {"type": "string", "column": "http_host"},
+    "http_uri": {"type": "string", "column": "http_uri"},
+    "tls_sni": {"type": "string", "column": "tls_sni"},
+    "payload": {"type": "event_field", "column": "payload_preview"},
+    "payload_preview": {"type": "event_field", "column": "payload_preview"},
     "src_mac": {"type": "mac", "column": "src_mac"},
     "dst_mac": {"type": "mac", "column": "dst_mac"},
     "hostname": {"type": "string", "column": "hostname"},
@@ -57,8 +59,14 @@ VALID_OPERATORS = {
 
 
 # ---------------------------------------------------------------------------
-# Lexer / Tokenizer
+# Exceptions & Tokens
 # ---------------------------------------------------------------------------
+
+class KqlParseError(ValueError):
+    def __init__(self, message: str, pos: Optional[int] = None):
+        super().__init__(message)
+        self.pos = pos
+
 
 class KqlToken:
     def __init__(self, type_: str, value: Any, pos: int):
@@ -71,7 +79,7 @@ class KqlToken:
 
 
 class KqlLexer:
-    """Tokenizes KQL input into a stream of tokens."""
+    """Tokenizes KQL input into a stream of tokens with full input consumption validation."""
 
     TOKEN_SPEC = [
         ("SKIP", r"[ \t\r\n]+"),
@@ -84,12 +92,13 @@ class KqlLexer:
         ("LE", r"<="),
         ("NE", r"!="),
         ("EQ", r"=="),
+        ("IPV6", r"(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F]{0,4}(?:/\d{1,3})?"),
         ("COLON", r":"),
         ("GT", r">"),
         ("LT", r"<"),
         ("STRING_QUOTED", r'"([^"\\]|\\.)*"|\'([^\'\\]|\\.)*\''),
         ("NUMBER", r"-?\d+(\.\d+)?\b"),
-        ("WORD", r"[a-zA-Z0-9_\.:\/\-]+"),
+        ("WORD", r"[a-zA-Z0-9_\.\/\-]+"),
     ]
 
     MASTER_REGEX = re.compile("|".join(f"(?P<{pair[0]}>{pair[1]})" for pair in TOKEN_SPEC))
@@ -116,7 +125,16 @@ class KqlLexer:
         return self.tokens
 
     def _tokenize(self):
+        curr_pos = 0
+        text_len = len(self.text)
         for m in self.MASTER_REGEX.finditer(self.text):
+            start = m.start()
+            if start > curr_pos:
+                unmatched = self.text[curr_pos:start].strip()
+                if unmatched:
+                    raise KqlParseError(f"Unrecognized syntax '{unmatched}' at position {curr_pos}", curr_pos)
+            curr_pos = m.end()
+
             kind = m.lastgroup
             val = m.group()
             pos = m.start()
@@ -131,7 +149,7 @@ class KqlLexer:
                     self.tokens.append(KqlToken("FLOAT", float(val), pos))
                 else:
                     self.tokens.append(KqlToken("INT", int(val), pos))
-            elif kind == "WORD":
+            elif kind in ("WORD", "IPV6"):
                 lower = val.lower()
                 if lower in self.KEYWORDS:
                     self.tokens.append(KqlToken(self.KEYWORDS[lower], val, pos))
@@ -139,6 +157,11 @@ class KqlLexer:
                     self.tokens.append(KqlToken("IDENT", val, pos))
             else:
                 self.tokens.append(KqlToken(kind, val, pos))
+
+        if curr_pos < text_len:
+            unmatched = self.text[curr_pos:text_len].strip()
+            if unmatched:
+                raise KqlParseError(f"Unrecognized syntax '{unmatched}' at position {curr_pos}", curr_pos)
 
         self.tokens.append(KqlToken("EOF", None, len(self.text)))
 
@@ -199,12 +222,6 @@ class NotNode(ASTNode):
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
-
-class KqlParseError(ValueError):
-    def __init__(self, message: str, pos: Optional[int] = None):
-        super().__init__(message)
-        self.pos = pos
-
 
 class KqlParser:
     """
@@ -485,28 +502,26 @@ class KqlCompiler:
             p_val = f"%{val}%" if op in (":", "contains") else str(val)
             self.params.append(p_val)
             sql_op = "LIKE" if op in (":", "contains") else "="
-            return f"flow_id IN (SELECT flow_id FROM packet_events WHERE payload_preview {sql_op} {self.param_placeholder} AND flow_id IS NOT NULL)"
+            return f"flow_id IN (SELECT flow_id FROM packet_events WHERE {col} {sql_op} {self.param_placeholder} AND flow_id IS NOT NULL)"
 
-        # CIDR IP handling
+        # Exact Mathematical CIDR IP handling
         if ftype == "ip" and "/" in str(val):
+            val_str = str(val).strip()
             try:
-                net = ipaddress.ip_network(str(val).strip(), strict=False)
-                prefix_len = net.prefixlen
-                # For standard byte boundaries, optimize via LIKE prefix
-                if net.version == 4 and prefix_len % 8 == 0:
-                    octets = str(net.network_address).split(".")
-                    oct_count = prefix_len // 8
-                    like_prefix = ".".join(octets[:oct_count]) + ".%"
-                    self.params.append(like_prefix)
-                    return f"{col} LIKE {self.param_placeholder}"
+                net = ipaddress.ip_network(val_str, strict=False)
+                self.params.append(str(net))
+                if self.backend == "postgres":
+                    if op == "!=":
+                        return f"NOT ({col}::inet <<= {self.param_placeholder}::inet)"
+                    else:
+                        return f"({col}::inet <<= {self.param_placeholder}::inet)"
                 else:
-                    # For other subnet masks, match prefix of string representation
-                    ip_str = str(net.network_address)
-                    base_prefix = ip_str.rsplit(".", 1)[0] + ".%"
-                    self.params.append(base_prefix)
-                    return f"{col} LIKE {self.param_placeholder}"
-            except Exception:
-                pass
+                    if op == "!=":
+                        return f"NOT cidr_match({col}, {self.param_placeholder})"
+                    else:
+                        return f"cidr_match({col}, {self.param_placeholder})"
+            except ValueError:
+                raise KqlParseError(f"Invalid CIDR subnet '{val_str}' for field '{field}'")
 
         # Operator translation
         validated_val = self._validate_value(field, val)

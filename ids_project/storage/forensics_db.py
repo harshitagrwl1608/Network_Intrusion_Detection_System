@@ -401,6 +401,9 @@ def init_forensics_db(conn):
         cur.close()
 
 
+from storage.db import adapt_sql
+
+
 def _migrate_forensics_columns(conn, cur):
     """Add correlation columns to alerts table if missing."""
     col_type_str = "TEXT"
@@ -415,10 +418,20 @@ def _migrate_forensics_columns(conn, cur):
         ("alerts", "status", col_type_str),
         ("packet_events", "raw_hex", col_type_str),
     ]
+    is_pg = _is_postgres()
     for table, col, ctype in migrations:
         try:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ctype}")
+            if is_pg:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ctype}")
+                conn.commit()
+            else:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ctype}")
         except Exception as exc:
+            if is_pg:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             err = str(exc).lower()
             if "duplicate column" not in err and "already exists" not in err:
                 logger.debug(f"Forensics column migration note ({table}.{col}): {exc}")
@@ -570,16 +583,41 @@ def query_network_flows(conn, filters: dict, page: int = 1, per_page: int = 50) 
     conditions = []
     params = []
 
-    # IP filters (with optional CIDR / prefix match)
+    # IP filters (with exact mathematical CIDR / address / prefix match)
+    is_pg = _is_postgres()
+
+    def _build_ip_clause(col: str, val: str):
+        val_clean = str(val).strip()
+        if "/" in val_clean:
+            try:
+                import ipaddress
+                net = ipaddress.ip_network(val_clean, strict=False)
+                if is_pg:
+                    return f"{col}::inet <<= ?::inet", [str(net)]
+                else:
+                    return f"cidr_match({col}, ?)", [str(net)]
+            except Exception:
+                pass
+        try:
+            import ipaddress
+            ipaddress.ip_address(val_clean)
+            return f"{col} = ?", [val_clean]
+        except Exception:
+            return f"{col} LIKE ?", [f"{val_clean}%"]
+
     if filters.get("src_ip"):
-        conditions.append("src_ip LIKE ?")
-        params.append(f"{filters['src_ip']}%")
+        clause, p = _build_ip_clause("src_ip", filters["src_ip"])
+        conditions.append(clause)
+        params.extend(p)
     if filters.get("dst_ip"):
-        conditions.append("dst_ip LIKE ?")
-        params.append(f"{filters['dst_ip']}%")
+        clause, p = _build_ip_clause("dst_ip", filters["dst_ip"])
+        conditions.append(clause)
+        params.extend(p)
     if filters.get("ip"):
-        conditions.append("(src_ip LIKE ? OR dst_ip LIKE ?)")
-        params.extend([f"{filters['ip']}%", f"{filters['ip']}%"])
+        src_clause, src_p = _build_ip_clause("src_ip", filters["ip"])
+        dst_clause, dst_p = _build_ip_clause("dst_ip", filters["ip"])
+        conditions.append(f"({src_clause} OR {dst_clause})")
+        params.extend(src_p + dst_p)
 
     # Port filters
     if filters.get("src_port"):
@@ -632,10 +670,10 @@ def query_network_flows(conn, filters: dict, page: int = 1, per_page: int = 50) 
 
     with _sqlite_lock:
         cur = conn.cursor()
-        cur.execute(count_sql, params)
+        cur.execute(adapt_sql(count_sql), params)
         total = cur.fetchone()[0]
 
-        cur.execute(query_sql, params + [per_page, offset])
+        cur.execute(adapt_sql(query_sql), params + [per_page, offset])
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
 
@@ -650,7 +688,7 @@ def query_network_flows(conn, filters: dict, page: int = 1, per_page: int = 50) 
 
 def get_flow_by_id(conn, flow_id: str) -> dict | None:
     """Retrieve full detail for a single network flow."""
-    sql = "SELECT * FROM network_flows WHERE flow_id = ?"
+    sql = adapt_sql("SELECT * FROM network_flows WHERE flow_id = ?")
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(sql, (flow_id,))
@@ -708,7 +746,7 @@ def write_packet_event(conn, event: dict):
 
 def get_packet_events_for_flow(conn, flow_id: str, limit: int = 100) -> list[dict]:
     """Retrieve forensic packet events associated with a flow."""
-    sql = "SELECT * FROM packet_events WHERE flow_id = ? ORDER BY timestamp ASC LIMIT ?"
+    sql = adapt_sql("SELECT * FROM packet_events WHERE flow_id = ? ORDER BY timestamp ASC LIMIT ?")
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(sql, (flow_id, limit))
@@ -719,7 +757,7 @@ def get_packet_events_for_flow(conn, flow_id: str, limit: int = 100) -> list[dic
 
 def get_packet_events_for_alert(conn, alert_id: int) -> list[dict]:
     """Retrieve forensic packet events directly linked to an alert."""
-    sql = "SELECT * FROM packet_events WHERE alert_id = ? ORDER BY timestamp ASC"
+    sql = adapt_sql("SELECT * FROM packet_events WHERE alert_id = ? ORDER BY timestamp ASC")
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(sql, (alert_id,))
@@ -737,10 +775,10 @@ def create_case(conn, case_data: dict) -> str:
     import uuid
     case_id = case_data.get("case_id") or f"CASE-{uuid.uuid4().hex[:8].upper()}"
     now = time.time()
-    sql = """
+    sql = adapt_sql("""
         INSERT INTO cases (case_id, title, severity, status, assignee, description, tags, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
+    """)
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(sql, (
@@ -761,7 +799,7 @@ def create_case(conn, case_data: dict) -> str:
 
 def get_case(conn, case_id: str) -> dict | None:
     """Fetch case detail along with attached alerts and notes."""
-    case_sql = "SELECT * FROM cases WHERE case_id = ?"
+    case_sql = adapt_sql("SELECT * FROM cases WHERE case_id = ?")
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(case_sql, (case_id,))
@@ -772,17 +810,17 @@ def get_case(conn, case_id: str) -> dict | None:
         case = dict(row)
 
         # Fetch attached alert IDs and details
-        alerts_sql = """
+        alerts_sql = adapt_sql("""
             SELECT a.* FROM alerts a
             JOIN case_alerts ca ON a.id = ca.alert_id
             WHERE ca.case_id = ?
             ORDER BY a.timestamp ASC
-        """
+        """)
         cur.execute(alerts_sql, (case_id,))
         case["alerts"] = [dict(r) for r in cur.fetchall()]
 
         # Fetch case notes
-        notes_sql = "SELECT * FROM case_notes WHERE case_id = ? ORDER BY created_at ASC"
+        notes_sql = adapt_sql("SELECT * FROM case_notes WHERE case_id = ? ORDER BY created_at ASC")
         cur.execute(notes_sql, (case_id,))
         case["notes"] = [dict(r) for r in cur.fetchall()]
         cur.close()
@@ -792,10 +830,10 @@ def get_case(conn, case_id: str) -> dict | None:
 def list_cases(conn, status: str | None = None, limit: int = 50) -> list[dict]:
     """List cases with optional status filter."""
     if status and status.upper() != "ALL":
-        sql = "SELECT * FROM cases WHERE status = ? ORDER BY updated_at DESC LIMIT ?"
+        sql = adapt_sql("SELECT * FROM cases WHERE status = ? ORDER BY updated_at DESC LIMIT ?")
         args = (status.lower(), limit)
     else:
-        sql = "SELECT * FROM cases ORDER BY updated_at DESC LIMIT ?"
+        sql = adapt_sql("SELECT * FROM cases ORDER BY updated_at DESC LIMIT ?")
         args = (limit,)
     with _sqlite_lock:
         cur = conn.cursor()
@@ -808,9 +846,9 @@ def list_cases(conn, status: str | None = None, limit: int = 50) -> list[dict]:
 def add_alert_to_case(conn, case_id: str, alert_id: int):
     """Associate an alert with an incident case."""
     now = time.time()
-    sql = "INSERT OR IGNORE INTO case_alerts (case_id, alert_id, added_at) VALUES (?, ?, ?)"
-    update_case_sql = "UPDATE cases SET updated_at = ? WHERE case_id = ?"
-    update_alert_sql = "UPDATE alerts SET assigned_case_id = ? WHERE id = ?"
+    sql = adapt_sql("INSERT OR IGNORE INTO case_alerts (case_id, alert_id, added_at) VALUES (?, ?, ?)")
+    update_case_sql = adapt_sql("UPDATE cases SET updated_at = ? WHERE case_id = ?")
+    update_alert_sql = adapt_sql("UPDATE alerts SET assigned_case_id = ? WHERE id = ?")
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(sql, (case_id, alert_id, now))
@@ -823,8 +861,8 @@ def add_alert_to_case(conn, case_id: str, alert_id: int):
 def add_case_note(conn, case_id: str, author: str, note: str):
     """Add an analyst note to a case."""
     now = time.time()
-    sql = "INSERT INTO case_notes (case_id, author, note, created_at) VALUES (?, ?, ?, ?)"
-    update_case_sql = "UPDATE cases SET updated_at = ? WHERE case_id = ?"
+    sql = adapt_sql("INSERT INTO case_notes (case_id, author, note, created_at) VALUES (?, ?, ?, ?)")
+    update_case_sql = adapt_sql("UPDATE cases SET updated_at = ? WHERE case_id = ?")
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(sql, (case_id, author, note, now))
@@ -838,10 +876,10 @@ def update_case_status(conn, case_id: str, status: str, assignee: str | None = N
     now = time.time()
     closed_at = now if status.lower() in ("resolved", "closed") else None
     if assignee:
-        sql = "UPDATE cases SET status = ?, assignee = ?, updated_at = ?, closed_at = ? WHERE case_id = ?"
+        sql = adapt_sql("UPDATE cases SET status = ?, assignee = ?, updated_at = ?, closed_at = ? WHERE case_id = ?")
         args = (status.lower(), assignee, now, closed_at, case_id)
     else:
-        sql = "UPDATE cases SET status = ?, updated_at = ?, closed_at = ? WHERE case_id = ?"
+        sql = adapt_sql("UPDATE cases SET status = ?, updated_at = ?, closed_at = ? WHERE case_id = ?")
         args = (status.lower(), now, closed_at, case_id)
     with _sqlite_lock:
         cur = conn.cursor()
@@ -857,19 +895,24 @@ def update_case_status(conn, case_id: str, status: str, assignee: str | None = N
 def save_search(conn, name: str, description: str, query_params: dict) -> int:
     """Save a forensic search query for one-click re-use."""
     now = time.time()
-    sql = "INSERT INTO saved_searches (name, description, query_params_json, created_at) VALUES (?, ?, ?, ?)"
     with _sqlite_lock:
         cur = conn.cursor()
-        cur.execute(sql, (name, description, json.dumps(query_params), now))
+        if _is_postgres():
+            sql = "INSERT INTO saved_searches (name, description, query_params_json, created_at) VALUES (%s, %s, %s, %s) RETURNING id"
+            cur.execute(sql, (name, description, json.dumps(query_params), now))
+            new_id = cur.fetchone()[0]
+        else:
+            sql = "INSERT INTO saved_searches (name, description, query_params_json, created_at) VALUES (?, ?, ?, ?)"
+            cur.execute(sql, (name, description, json.dumps(query_params), now))
+            new_id = cur.lastrowid
         conn.commit()
-        new_id = cur.lastrowid
         cur.close()
     return new_id
 
 
 def list_saved_searches(conn) -> list[dict]:
     """Return all saved searches."""
-    sql = "SELECT * FROM saved_searches ORDER BY created_at DESC"
+    sql = adapt_sql("SELECT * FROM saved_searches ORDER BY created_at DESC")
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(sql)
@@ -891,10 +934,10 @@ def write_audit_log(conn, user_identity: str, action: str, resource_type: str,
                     resource_id: str = None, details: dict = None, ip_address: str = None):
     """Write an immutable audit trail record."""
     now = time.time()
-    sql = """
+    sql = adapt_sql("""
         INSERT INTO audit_log (timestamp, user_identity, action, resource_type, resource_id, details_json, ip_address)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """
+    """)
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(sql, (
@@ -912,7 +955,7 @@ def write_audit_log(conn, user_identity: str, action: str, resource_type: str,
 
 def read_audit_log(conn, limit: int = 100) -> list[dict]:
     """Retrieve recent audit events."""
-    sql = "SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?"
+    sql = adapt_sql("SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?")
     with _sqlite_lock:
         cur = conn.cursor()
         cur.execute(sql, (limit,))
@@ -930,9 +973,29 @@ def _is_postgres() -> bool:
 
 
 def save_system_setting(conn, key: str, value: Any) -> None:
-    """Persist system setting with JSON serialization."""
+    """Persist system setting with JSON serialization and secret encryption at rest."""
+    from storage.crypto import encrypt_dict_secrets, encrypt_string, SENSITIVE_KEYS
     now = time.time()
-    v_json = json.dumps(value)
+    if isinstance(value, dict):
+        existing_raw = None
+        try:
+            param = "%s" if _is_postgres() else "?"
+            with _sqlite_lock:
+                cur = conn.cursor()
+                cur.execute(f"SELECT value_json FROM system_settings WHERE setting_key = {param}", (key,))
+                row = cur.fetchone()
+                cur.close()
+                if row and row[0]:
+                    existing_raw = json.loads(row[0])
+        except Exception:
+            pass
+        value_to_save = encrypt_dict_secrets(value, existing_raw)
+    elif isinstance(value, str) and (key in SENSITIVE_KEYS or "token" in key or "password" in key or "secret" in key):
+        value_to_save = encrypt_string(value)
+    else:
+        value_to_save = value
+
+    v_json = json.dumps(value_to_save)
     if _is_postgres():
         sql = """
             INSERT INTO system_settings (setting_key, value_json, updated_at)
@@ -951,7 +1014,8 @@ def save_system_setting(conn, key: str, value: Any) -> None:
 
 
 def get_system_setting(conn, key: str, default: Any = None) -> Any:
-    """Retrieve JSON-deserialized system setting."""
+    """Retrieve JSON-deserialized system setting with transparent secret decryption."""
+    from storage.crypto import decrypt_dict_secrets, decrypt_string, ENCRYPTION_PREFIX
     param = "%s" if _is_postgres() else "?"
     sql = f"SELECT value_json FROM system_settings WHERE setting_key = {param}"
     with _sqlite_lock:
@@ -959,16 +1023,15 @@ def get_system_setting(conn, key: str, default: Any = None) -> Any:
         cur.execute(sql, (key,))
         row = cur.fetchone()
         cur.close()
-    if row and row[0]:
-        try:
-            return json.loads(row[0])
-        except Exception:
-            return row[0]
-    return default
-    for r in rows:
-        try:
-            r["details"] = json.loads(r.get("details_json", "{}"))
-        except Exception:
-            r["details"] = {}
-    return rows
+    if not row or row[0] is None:
+        return default
+    try:
+        raw_val = json.loads(row[0])
+        if isinstance(raw_val, dict):
+            return decrypt_dict_secrets(raw_val)
+        elif isinstance(raw_val, str) and raw_val.startswith(ENCRYPTION_PREFIX):
+            return decrypt_string(raw_val)
+        return raw_val
+    except Exception:
+        return default
 

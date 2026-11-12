@@ -33,10 +33,10 @@ import hmac
 # Allow imports from project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from flask import Flask, jsonify, render_template, request, Response, stream_with_context
+from flask import Flask, jsonify, render_template, request, Response, stream_with_context, session, has_request_context
 import config
 from storage.db import (
-    get_connection, init_db,
+    get_connection, init_db, adapt_sql,
     read_recent_alerts, read_alerts_range, read_all_devices,
     read_recent_observations, count_alerts_by_hour,
     count_alerts_by_day, read_alerts_for_date,
@@ -56,6 +56,12 @@ from werkzeug.utils import secure_filename
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB max upload limit
+app.secret_key = getattr(config, "SECRET_KEY", None) or os.environ.get("NETGUARD_SECRET_KEY") or secrets.token_hex(32)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=getattr(config, "SESSION_COOKIE_SECURE", False),
+)
 
 _baseline_engine = BaselineEngine()
 _outbox_manager = NotificationOutboxManager()
@@ -63,6 +69,23 @@ _offline_analyzer = None
 _csrf_token = secrets.token_hex(16)
 _app_start_time = time.time()
 _baseline_collector: BaselineCollector | None = None
+
+
+def db_exec(cur, sql: str, params: tuple | list | None = None):
+    """Execute SQL query with automatic backend dialect adaptation."""
+    adapted = adapt_sql(sql)
+    if params is not None:
+        return cur.execute(adapted, params)
+    return cur.execute(adapted)
+
+
+def get_session_csrf_token() -> str:
+    """Return active session-bound CSRF token, generating if needed."""
+    if has_request_context():
+        if "_csrf_token" not in session:
+            session["_csrf_token"] = secrets.token_hex(16)
+        return session["_csrf_token"]
+    return _csrf_token
 
 
 @app.before_request
@@ -79,7 +102,13 @@ def check_auth_and_csrf():
                 {"WWW-Authenticate": 'Basic realm="NetGuard SOC Dashboard"'}
             )
 
-    # 2. CSRF Token enforcement on state-modifying verbs
+    # 2. Binding security warning when exposed beyond localhost with default credentials
+    bind_host = getattr(config, "DASHBOARD_HOST", "127.0.0.1")
+    if bind_host not in ("127.0.0.1", "localhost", "::1"):
+        if getattr(config, "DASHBOARD_PASSWORD", "netguard") == "netguard":
+            logger.warning("SECURITY WARNING: NetGuard dashboard exposed beyond localhost with default credentials! Please change DASHBOARD_PASSWORD.")
+
+    # 3. CSRF Token enforcement on state-modifying verbs
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
         # In test environments, bypass unless explicitly testing CSRF security
         if not getattr(config, "DASHBOARD_CSRF_ENFORCE_IN_TESTS", False):
@@ -94,7 +123,14 @@ def check_auth_and_csrf():
         elif not token and request.form:
             token = request.form.get("csrf_token")
 
-        if not token or not hmac.compare_digest(token, _csrf_token):
+        valid = False
+        if token:
+            if "_csrf_token" in session and hmac.compare_digest(token, session["_csrf_token"]):
+                valid = True
+            elif _csrf_token and hmac.compare_digest(token, _csrf_token):
+                valid = True
+
+        if not valid:
             return jsonify({"error": "CSRF token missing or invalid"}), 403
 
 
@@ -372,7 +408,7 @@ def _get_alerts_since_id(db, last_id: int) -> list[dict]:
 
 @app.route("/")
 def index():
-    return render_template("index.html", csrf_token=_csrf_token)
+    return render_template("index.html", csrf_token=get_session_csrf_token())
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +468,20 @@ def api_rules():
 @app.route("/api/csrf-token")
 def api_csrf_token():
     """Return active session CSRF token."""
-    return jsonify({"csrf_token": _csrf_token})
+    return jsonify({"csrf_token": get_session_csrf_token()})
+
+
+@app.route("/api/auth/rotate-password", methods=["POST"])
+def api_auth_rotate_password():
+    """Rotate dashboard access password for credential lifecycle."""
+    data = request.get_json(silent=True) or {}
+    new_password = data.get("new_password", "").strip()
+    if not new_password or len(new_password) < 8:
+        return jsonify({"error": "Password must be at least 8 characters long"}), 400
+    setattr(config, "DASHBOARD_PASSWORD", new_password)
+    from storage.forensics_db import save_system_setting
+    save_system_setting(get_db(), "dashboard_password_updated", time.time())
+    return jsonify({"status": "ok", "message": "Password rotated successfully"})
 
 
 @app.route("/api/alerts")
@@ -865,7 +914,7 @@ def api_feedback_reclassify():
     from storage.db import _sqlite_lock
     with _sqlite_lock:
         cur = db.cursor()
-        cur.execute("SELECT rule_name, src_ip, dst_ip FROM alerts WHERE id = ?", (alert_id,))
+        db_exec(cur, "SELECT rule_name, src_ip, dst_ip FROM alerts WHERE id = ?", (alert_id,))
         row = cur.fetchone()
         if not row:
             cur.close()
@@ -884,7 +933,7 @@ def api_feedback_reclassify():
     with _sqlite_lock:
         cur = db.cursor()
         status_val = "closed" if new_class == "false_positive" else "verified"
-        cur.execute("UPDATE alerts SET status = ? WHERE id = ?", (status_val, alert_id))
+        db_exec(cur, "UPDATE alerts SET status = ? WHERE id = ?", (status_val, alert_id))
         db.commit()
         cur.close()
 
@@ -937,19 +986,43 @@ def api_traffic():
         except KqlParseError as kpe:
             return jsonify({"error": f"KQL Syntax Error: {kpe}", "pos": getattr(kpe, "pos", None)}), 400
 
+    is_pg = _is_postgres()
+
+    def _build_traffic_ip_clause(col: str, val_str: str):
+        val_str = val_str.strip()
+        if "/" in val_str:
+            try:
+                import ipaddress
+                net = ipaddress.ip_network(val_str, strict=False)
+                if is_pg:
+                    return f"{col}::inet <<= ?::inet", [str(net)]
+                else:
+                    return f"cidr_match({col}, ?)", [str(net)]
+            except Exception:
+                pass
+        try:
+            import ipaddress
+            ipaddress.ip_address(val_str)
+            return f"{col} = ?", [val_str]
+        except Exception:
+            return f"{col} LIKE ?", [f"%{val_str}%"]
+
     ip_search = request.args.get("search") or request.args.get("ip")
     if ip_search:
-        ip_search = ip_search.strip()
-        conditions.append("(src_ip LIKE ? OR dst_ip LIKE ?)")
-        params.extend([f"%{ip_search}%", f"%{ip_search}%"])
+        src_clause, src_p = _build_traffic_ip_clause("src_ip", ip_search)
+        dst_clause, dst_p = _build_traffic_ip_clause("dst_ip", ip_search)
+        conditions.append(f"({src_clause} OR {dst_clause})")
+        params.extend(src_p + dst_p)
 
     if request.args.get("src_ip"):
-        conditions.append("src_ip = ?")
-        params.append(request.args.get("src_ip").strip())
+        clause, p = _build_traffic_ip_clause("src_ip", request.args.get("src_ip"))
+        conditions.append(clause)
+        params.extend(p)
 
     if request.args.get("dst_ip"):
-        conditions.append("dst_ip = ?")
-        params.append(request.args.get("dst_ip").strip())
+        clause, p = _build_traffic_ip_clause("dst_ip", request.args.get("dst_ip"))
+        conditions.append(clause)
+        params.extend(p)
 
     port = request.args.get("port")
     if port and port.isdigit():
@@ -999,7 +1072,7 @@ def api_traffic():
     with _sqlite_lock:
         cur = db.cursor()
         count_sql = f"SELECT COUNT(*) FROM network_flows {where_clause}"
-        cur.execute(count_sql, params)
+        db_exec(cur, count_sql, params)
         total = cur.fetchone()[0]
 
         offset = (page - 1) * page_size
@@ -1009,7 +1082,7 @@ def api_traffic():
             ORDER BY {sort_by} {order}
             LIMIT ? OFFSET ?
         """
-        cur.execute(query_sql, params + [page_size, offset])
+        db_exec(cur, query_sql, params + [page_size, offset])
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
 
@@ -1091,7 +1164,7 @@ def api_hunting_search():
 
         if search_type == "preset":
             if preset == "high_entropy_dns":
-                cur.execute(
+                db_exec(cur, 
                     """
                     SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
                     FROM alerts
@@ -1101,7 +1174,7 @@ def api_hunting_search():
                     (since, limit)
                 )
                 results.extend([dict(r) for r in cur.fetchall()])
-                cur.execute(
+                db_exec(cur, 
                     """
                     SELECT flow_id as id, timestamp, 'SUSPICIOUS_DNS_QUERY' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol, payload_preview as detail, 'Suspicious traffic indicator' as classification
                     FROM packet_events
@@ -1113,7 +1186,7 @@ def api_hunting_search():
                 results.extend([dict(r) for r in cur.fetchall()])
 
             elif preset == "stealth_scan":
-                cur.execute(
+                db_exec(cur, 
                     """
                     SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
                     FROM alerts
@@ -1123,7 +1196,7 @@ def api_hunting_search():
                     (since, limit)
                 )
                 results.extend([dict(r) for r in cur.fetchall()])
-                cur.execute(
+                db_exec(cur, 
                     """
                     SELECT flow_id as id, last_seen as timestamp, 'STEALTH_PROBE_FLOW' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
                            'TCP connection with stealth flags' as detail, 'Suspicious traffic indicator' as classification
@@ -1136,7 +1209,7 @@ def api_hunting_search():
                 results.extend([dict(r) for r in cur.fetchall()])
 
             elif preset == "icmp_tunnel":
-                cur.execute(
+                db_exec(cur, 
                     """
                     SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
                     FROM alerts
@@ -1146,7 +1219,7 @@ def api_hunting_search():
                     (since, limit)
                 )
                 results.extend([dict(r) for r in cur.fetchall()])
-                cur.execute(
+                db_exec(cur, 
                     """
                     SELECT flow_id as id, last_seen as timestamp, 'LARGE_ICMP_PAYLOAD' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
                            'High byte volume ICMP flow (>500 bytes)' as detail, 'Suspicious traffic indicator' as classification
@@ -1159,7 +1232,7 @@ def api_hunting_search():
                 results.extend([dict(r) for r in cur.fetchall()])
 
             elif preset == "fragment_anomaly":
-                cur.execute(
+                db_exec(cur, 
                     """
                     SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
                     FROM alerts
@@ -1171,7 +1244,7 @@ def api_hunting_search():
                 results.extend([dict(r) for r in cur.fetchall()])
 
             elif preset == "cleartext_on_443":
-                cur.execute(
+                db_exec(cur, 
                     """
                     SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
                     FROM alerts
@@ -1181,7 +1254,7 @@ def api_hunting_search():
                     (since, limit)
                 )
                 results.extend([dict(r) for r in cur.fetchall()])
-                cur.execute(
+                db_exec(cur, 
                     """
                     SELECT flow_id as id, last_seen as timestamp, 'CLEARTEXT_PORT_443' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
                            'TCP traffic to port 443' as detail, 'Suspicious traffic indicator' as classification
@@ -1194,7 +1267,7 @@ def api_hunting_search():
                 results.extend([dict(r) for r in cur.fetchall()])
 
             elif preset == "irc_beaconing":
-                cur.execute(
+                db_exec(cur, 
                     """
                     SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
                     FROM alerts
@@ -1204,7 +1277,7 @@ def api_hunting_search():
                     (since, limit)
                 )
                 results.extend([dict(r) for r in cur.fetchall()])
-                cur.execute(
+                db_exec(cur, 
                     """
                     SELECT flow_id as id, last_seen as timestamp, 'IRC_PORT_FLOW' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
                            'Traffic to standard IRC port (6667)' as detail, 'Suspicious traffic indicator' as classification
@@ -1217,7 +1290,7 @@ def api_hunting_search():
                 results.extend([dict(r) for r in cur.fetchall()])
 
         elif search_type == "rule":
-            cur.execute(
+            db_exec(cur, 
                 """
                 SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
                 FROM alerts
@@ -1229,7 +1302,7 @@ def api_hunting_search():
             results.extend([dict(r) for r in cur.fetchall()])
 
         elif search_type == "ip":
-            cur.execute(
+            db_exec(cur, 
                 """
                 SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
                 FROM alerts
@@ -1239,7 +1312,7 @@ def api_hunting_search():
                 (query, query, since, limit)
             )
             results.extend([dict(r) for r in cur.fetchall()])
-            cur.execute(
+            db_exec(cur, 
                 """
                 SELECT flow_id as id, last_seen as timestamp, 'HOST_SESSION' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
                        'Historical network session' as detail, 'Unclassified observation' as classification
@@ -1253,7 +1326,7 @@ def api_hunting_search():
 
         elif search_type == "port":
             port_num = int(query) if query.isdigit() else 80
-            cur.execute(
+            db_exec(cur, 
                 """
                 SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
                 FROM alerts
@@ -1263,7 +1336,7 @@ def api_hunting_search():
                 (port_num, port_num, since, limit)
             )
             results.extend([dict(r) for r in cur.fetchall()])
-            cur.execute(
+            db_exec(cur, 
                 """
                 SELECT flow_id as id, last_seen as timestamp, 'PORT_SESSION' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
                        'Historical port session' as detail, 'Unclassified observation' as classification
@@ -1277,7 +1350,7 @@ def api_hunting_search():
 
         elif search_type == "domain":
             p = f"%{query}%"
-            cur.execute(
+            db_exec(cur, 
                 """
                 SELECT event_id as id, timestamp, 'SUSPICIOUS_DOMAIN_EVENT' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
                        payload_preview as detail, 'Suspicious traffic indicator' as classification
@@ -1288,7 +1361,7 @@ def api_hunting_search():
                 (p, since, limit)
             )
             results.extend([dict(r) for r in cur.fetchall()])
-            cur.execute(
+            db_exec(cur, 
                 """
                 SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
                 FROM alerts
@@ -1301,7 +1374,7 @@ def api_hunting_search():
 
         elif search_type == "cidr":
             clean_cidr = query.split("/")[0].rsplit(".", 1)[0] + ".%" if "/" in query else f"{query}%"
-            cur.execute(
+            db_exec(cur, 
                 """
                 SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
                 FROM alerts
@@ -1311,7 +1384,7 @@ def api_hunting_search():
                 (clean_cidr, clean_cidr, since, limit)
             )
             results.extend([dict(r) for r in cur.fetchall()])
-            cur.execute(
+            db_exec(cur, 
                 """
                 SELECT flow_id as id, last_seen as timestamp, 'SUBNET_FLOW' as rule_name, src_ip, dst_ip, src_port, dst_port, protocol,
                        'Subnet traffic session' as detail, 'Unclassified observation' as classification
@@ -1325,7 +1398,7 @@ def api_hunting_search():
 
         elif search_type == "string":
             p = f"%{query}%"
-            cur.execute(
+            db_exec(cur, 
                 """
                 SELECT id, timestamp, rule_name, src_ip, dst_ip, src_port, dst_port, protocol, detail, 'Existing IDS alert' as classification
                 FROM alerts
@@ -1338,7 +1411,7 @@ def api_hunting_search():
 
         elif search_type == "anomaly":
             p = f"%{query}%" if query else "%"
-            cur.execute(
+            db_exec(cur, 
                 """
                 SELECT id, timestamp, metric_name as rule_name, '127.0.0.1' as src_ip, '127.0.0.1' as dst_ip, NULL as src_port, NULL as dst_port, 'IP' as protocol,
                        explanation as detail, 'Statistical anomaly' as classification
@@ -1364,7 +1437,7 @@ def api_hunting_search():
                     WHERE {sql_where} AND last_seen >= ?
                     ORDER BY last_seen DESC LIMIT ?
                 """
-                cur.execute(sql, kql_params + [since, limit])
+                db_exec(cur, sql, kql_params + [since, limit])
                 results.extend([dict(r) for r in cur.fetchall()])
             except KqlParseError as e:
                 cur.close()
@@ -1406,17 +1479,17 @@ def api_traffic_detail(flow_id: str):
     from storage.db import _sqlite_lock
     with _sqlite_lock:
         cur = db.cursor()
-        cur.execute("SELECT * FROM network_flows WHERE flow_id = ?", (flow_id,))
+        db_exec(cur, "SELECT * FROM network_flows WHERE flow_id = ?", (flow_id,))
         flow_row = cur.fetchone()
         if not flow_row:
             cur.close()
             return jsonify({"error": "Flow not found"}), 404
         flow = dict(flow_row)
 
-        cur.execute("SELECT * FROM alerts WHERE flow_id = ? ORDER BY timestamp ASC", (flow_id,))
+        db_exec(cur, "SELECT * FROM alerts WHERE flow_id = ? ORDER BY timestamp ASC", (flow_id,))
         alerts = [dict(r) for r in cur.fetchall()]
 
-        cur.execute("SELECT * FROM packet_events WHERE flow_id = ? ORDER BY packet_index ASC LIMIT 100", (flow_id,))
+        db_exec(cur, "SELECT * FROM packet_events WHERE flow_id = ? ORDER BY packet_index ASC LIMIT 100", (flow_id,))
         packet_events = [dict(r) for r in cur.fetchall()]
         cur.close()
 
@@ -1448,7 +1521,7 @@ def api_traffic_pcap(flow_id: str):
     from storage.db import _sqlite_lock
     with _sqlite_lock:
         cur = db.cursor()
-        cur.execute("SELECT timestamp, raw_hex, packet_len FROM packet_events WHERE flow_id = ? AND raw_hex IS NOT NULL ORDER BY packet_index ASC", (flow_id,))
+        db_exec(cur, "SELECT timestamp, raw_hex, packet_len FROM packet_events WHERE flow_id = ? AND raw_hex IS NOT NULL ORDER BY packet_index ASC", (flow_id,))
         rows = cur.fetchall()
         cur.close()
 
@@ -1499,7 +1572,7 @@ def api_traffic_export():
     from storage.db import _sqlite_lock
     with _sqlite_lock:
         cur = db.cursor()
-        cur.execute(sql, params)
+        db_exec(cur, sql, params)
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
 
@@ -1524,6 +1597,7 @@ def api_traffic_export():
 
 
 @app.route("/api/saved-searches", methods=["GET", "POST"])
+@app.route("/api/traffic/saved-searches", methods=["GET", "POST"])
 def api_saved_searches():
     """Manage saved search queries."""
     db = get_db()
@@ -1538,11 +1612,18 @@ def api_saved_searches():
         now = time.time()
         with _sqlite_lock:
             cur = db.cursor()
-            cur.execute(
-                "INSERT INTO saved_searches (name, query_params_json, description, created_at) VALUES (?, ?, ?, ?)",
-                (name, query_json, desc, now)
-            )
-            search_id = cur.lastrowid
+            if _is_postgres():
+                cur.execute(
+                    "INSERT INTO saved_searches (name, query_params_json, description, created_at) VALUES (%s, %s, %s, %s) RETURNING id",
+                    (name, query_json, desc, now)
+                )
+                search_id = cur.fetchone()[0]
+            else:
+                cur.execute(
+                    "INSERT INTO saved_searches (name, query_params_json, description, created_at) VALUES (?, ?, ?, ?)",
+                    (name, query_json, desc, now)
+                )
+                search_id = cur.lastrowid
             db.commit()
             cur.close()
         write_audit_log(db, "analyst", "create_saved_search", "saved_searches", str(search_id), {"name": name})
@@ -1550,7 +1631,7 @@ def api_saved_searches():
 
     with _sqlite_lock:
         cur = db.cursor()
-        cur.execute("SELECT * FROM saved_searches ORDER BY created_at DESC")
+        db_exec(cur, "SELECT * FROM saved_searches ORDER BY created_at DESC")
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
     for r in rows:
@@ -1568,7 +1649,7 @@ def api_delete_saved_search(search_id: int):
     from storage.db import _sqlite_lock
     with _sqlite_lock:
         cur = db.cursor()
-        cur.execute("DELETE FROM saved_searches WHERE id = ?", (search_id,))
+        db_exec(cur, "DELETE FROM saved_searches WHERE id = ?", (search_id,))
         db.commit()
         cur.close()
     write_audit_log(db, "analyst", "delete_saved_search", "saved_searches", str(search_id))
@@ -1734,7 +1815,10 @@ def api_cases():
         if not title:
             return jsonify({"error": "title is required"}), 400
         desc = data.get("description", "").strip()
-        sev = data.get("severity", "medium").lower()
+        valid_severities = {"low", "medium", "high", "critical"}
+        sev = str(data.get("severity", "medium")).lower()
+        if sev not in valid_severities:
+            return jsonify({"error": f"Invalid severity '{sev}'. Must be one of: {', '.join(sorted(valid_severities))}"}), 400
         assigned = data.get("assigned_to", "SOC Analyst").strip()
         alert_ids = data.get("alert_ids", [])
         now = time.time()
@@ -1743,7 +1827,8 @@ def api_cases():
         with _sqlite_lock:
             cur = db.cursor()
             try:
-                cur.execute(
+                db_exec(
+                    cur,
                     """
                     INSERT INTO cases (case_id, title, description, status, severity, assignee, created_at, updated_at)
                     VALUES (?, ?, ?, 'open', ?, ?, ?, ?)
@@ -1787,7 +1872,7 @@ def api_cases():
     """
     with _sqlite_lock:
         cur = db.cursor()
-        cur.execute(sql, params)
+        db_exec(cur, sql, params)
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
 
@@ -1805,6 +1890,50 @@ def api_case_detail(case_id: str):
     from storage.db import _sqlite_lock
     if request.method == "PATCH":
         data = request.get_json(silent=True) or {}
+        valid_statuses = {"open", "investigating", "resolved", "closed"}
+        valid_severities = {"low", "medium", "high", "critical"}
+        allowed_transitions = {
+            "open": {"open", "investigating"},
+            "investigating": {"investigating", "resolved", "closed", "open"},
+            "resolved": {"resolved", "closed", "investigating"},
+            "closed": {"closed", "open", "investigating"},
+        }
+
+        # Validate severity if provided
+        if "severity" in data:
+            sev_val = str(data["severity"]).lower()
+            if sev_val not in valid_severities:
+                return jsonify({"error": f"Invalid severity '{sev_val}'. Must be one of: {', '.join(sorted(valid_severities))}"}), 400
+            data["severity"] = sev_val
+
+        # Validate status and state machine transitions if provided
+        now = time.time()
+        close_ts = None
+        if "status" in data:
+            st_val = str(data["status"]).lower()
+            if st_val not in valid_statuses:
+                return jsonify({"error": f"Invalid status '{st_val}'. Must be one of: {', '.join(sorted(valid_statuses))}"}), 400
+
+            with _sqlite_lock:
+                cur = db.cursor()
+                db_exec(cur, "SELECT status FROM cases WHERE case_id = ?", (case_id,))
+                current_row = cur.fetchone()
+                cur.close()
+            if not current_row:
+                return jsonify({"error": "Case not found"}), 404
+
+            current_status = str(current_row["status"]).lower()
+            if st_val not in allowed_transitions.get(current_status, set()):
+                return jsonify({
+                    "error": f"Invalid status transition from '{current_status}' to '{st_val}'. "
+                             f"Allowed transitions from '{current_status}': {', '.join(sorted(allowed_transitions.get(current_status, set())))}"
+                }), 400
+            data["status"] = st_val
+            if st_val == "closed":
+                close_ts = now
+            elif current_status == "closed" and st_val in ("open", "investigating"):
+                close_ts = 0.0
+
         updates = []
         params = []
         field_map = {"title": "title", "description": "description", "status": "status", "severity": "severity", "assigned_to": "assignee", "assignee": "assignee"}
@@ -1812,14 +1941,20 @@ def api_case_detail(case_id: str):
             if k in field_map:
                 updates.append(f"{field_map[k]} = ?")
                 params.append(v)
+        if close_ts is not None:
+            if close_ts == 0.0:
+                updates.append("closed_at = NULL")
+            else:
+                updates.append("closed_at = ?")
+                params.append(close_ts)
+
         if not updates:
             return jsonify({"status": "no changes"})
         updates.append("updated_at = ?")
-        now = time.time()
         params.extend([now, case_id])
         with _sqlite_lock:
             cur = db.cursor()
-            cur.execute(f"UPDATE cases SET {', '.join(updates)} WHERE case_id = ?", params)
+            db_exec(cur, f"UPDATE cases SET {', '.join(updates)} WHERE case_id = ?", params)
             db.commit()
             cur.close()
         write_audit_log(db, "analyst", "update_case", "cases", case_id, data)
@@ -1827,14 +1962,14 @@ def api_case_detail(case_id: str):
 
     with _sqlite_lock:
         cur = db.cursor()
-        cur.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,))
+        db_exec(cur, "SELECT * FROM cases WHERE case_id = ?", (case_id,))
         case_row = cur.fetchone()
         if not case_row:
             cur.close()
             return jsonify({"error": "Case not found"}), 404
         case = dict(case_row)
 
-        cur.execute("""
+        db_exec(cur, """
             SELECT a.* FROM alerts a
             JOIN case_alerts ca ON a.id = ca.alert_id
             WHERE ca.case_id = ?
@@ -1842,7 +1977,7 @@ def api_case_detail(case_id: str):
         """, (case_id,))
         alerts = [dict(r) for r in cur.fetchall()]
 
-        cur.execute("SELECT * FROM case_notes WHERE case_id = ? ORDER BY created_at ASC", (case_id,))
+        db_exec(cur, "SELECT * FROM case_notes WHERE case_id = ? ORDER BY created_at ASC", (case_id,))
         notes = [dict(r) for r in cur.fetchall()]
         cur.close()
 
@@ -1874,7 +2009,7 @@ def api_case_add_alerts(case_id: str):
                 cur.execute("INSERT INTO case_alerts (case_id, alert_id, added_at) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING", (case_id, int(aid), now))
             else:
                 cur.execute("INSERT OR IGNORE INTO case_alerts (case_id, alert_id, added_at) VALUES (?, ?, ?)", (case_id, int(aid), now))
-        cur.execute("UPDATE cases SET updated_at = ? WHERE case_id = ?", (now, case_id))
+        db_exec(cur, "UPDATE cases SET updated_at = ? WHERE case_id = ?", (now, case_id))
         db.commit()
         cur.close()
     write_audit_log(db, "analyst", "link_alerts_to_case", "cases", case_id, {"alert_ids": alert_ids})
@@ -1894,8 +2029,8 @@ def api_case_add_note(case_id: str):
     from storage.db import _sqlite_lock
     with _sqlite_lock:
         cur = db.cursor()
-        cur.execute("INSERT INTO case_notes (case_id, author, note, created_at) VALUES (?, ?, ?, ?)", (case_id, author, note, now))
-        cur.execute("UPDATE cases SET updated_at = ? WHERE case_id = ?", (now, case_id))
+        db_exec(cur, "INSERT INTO case_notes (case_id, author, note, created_at) VALUES (?, ?, ?, ?)", (case_id, author, note, now))
+        db_exec(cur, "UPDATE cases SET updated_at = ? WHERE case_id = ?", (now, case_id))
         db.commit()
         cur.close()
     write_audit_log(db, author, "add_case_note", "cases", case_id, {"note_len": len(note)})
@@ -2063,7 +2198,7 @@ def api_audit_log():
     from storage.db import _sqlite_lock
     with _sqlite_lock:
         cur = db.cursor()
-        cur.execute("SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?", (limit,))
+        db_exec(cur, "SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?", (limit,))
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
     for r in rows:

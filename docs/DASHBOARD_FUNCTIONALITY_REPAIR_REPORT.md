@@ -170,3 +170,4 @@ Detection behavior and ground-truth benchmark evaluation was executed via `pytho
 - **Authorized Branch**: `antigravity/dashboard-forensics`
 - **Main Branch Invariant**: Never committed or pushed to `main`.
 - **Force Push Invariant**: No destructive resets or force pushes executed.
+

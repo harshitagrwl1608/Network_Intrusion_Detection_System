@@ -74,14 +74,18 @@ def test_parse_kql_to_sql_sqlite():
 def test_parse_kql_to_sql_cidr():
     query = 'src_ip : "192.168.1.0/24"'
     sql, params = parse_kql_to_sql(query, dialect="sqlite")
-    assert "src_ip LIKE ?" in sql
-    assert params == ["192.168.1.%"]
+    assert "cidr_match(src_ip, ?)" in sql
+    assert params == ["192.168.1.0/24"]
+
+    sql_pg, params_pg = parse_kql_to_sql(query, dialect="postgres")
+    assert "(src_ip::inet <<= %s::inet)" in sql_pg
+    assert params_pg == ["192.168.1.0/24"]
 
 
 def test_parse_kql_to_sql_contains_and_startswith():
     query = 'dns_query contains "evil" and protocol startswith "TC"'
     sql, params = parse_kql_to_sql(query, dialect="sqlite")
-    assert "packet_events" in sql
+    assert "dns_query LIKE ?" in sql
     assert "protocol LIKE ?" in sql
     assert params == ["%evil%", "TC%"]
 

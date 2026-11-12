@@ -126,8 +126,21 @@ class NotificationOutboxManager:
 
         if persist and self._conn:
             from storage.forensics_db import save_system_setting
-            # Persist masked or sanitized dict
-            save_system_setting(self._conn, f"notification_{name_lower}", cfg)
+            cfg_to_persist = dict(cfg)
+            if name_lower == "email" and hasattr(current_p, "password") and current_p.password:
+                if not cfg_to_persist.get("password") or cfg_to_persist.get("password") == "********":
+                    cfg_to_persist["password"] = current_p.password
+            elif name_lower == "telegram" and hasattr(current_p, "bot_token") and current_p.bot_token:
+                if not cfg_to_persist.get("bot_token") or cfg_to_persist.get("bot_token") == "********":
+                    cfg_to_persist["bot_token"] = current_p.bot_token
+            elif name_lower == "webhook" and hasattr(current_p, "secret") and current_p.secret:
+                if not cfg_to_persist.get("secret") or cfg_to_persist.get("secret") == "********":
+                    cfg_to_persist["secret"] = current_p.secret
+            elif name_lower == "sms" and hasattr(current_p, "auth_token") and current_p.auth_token:
+                if not cfg_to_persist.get("auth_token") or cfg_to_persist.get("auth_token") == "********":
+                    cfg_to_persist["auth_token"] = current_p.auth_token
+
+            save_system_setting(self._conn, f"notification_{name_lower}", cfg_to_persist)
 
         return True, f"Configured {name_lower}"
 

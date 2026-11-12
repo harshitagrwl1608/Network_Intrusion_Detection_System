@@ -144,15 +144,12 @@ class ReverseDNSResolver:
         self._executor.submit(self._worker_resolve, ip_clean)
 
     def _worker_resolve(self, ip: str) -> None:
-        """Worker thread entrypoint performing socket PTR lookup with strict timeout."""
+        """Worker thread entrypoint performing socket PTR lookup without process-wide timeout mutation."""
         hostname = None
         success = False
         now = time.time()
 
-        # Save previous default timeout and enforce quick resolver timeout
-        prev_timeout = socket.getdefaulttimeout()
         try:
-            socket.setdefaulttimeout(self.timeout_s)
             res = socket.gethostbyaddr(ip)
             if res and res[0]:
                 hostname = res[0]
@@ -160,8 +157,6 @@ class ReverseDNSResolver:
         except (socket.herror, socket.gaierror, socket.timeout, OSError) as exc:
             logger.debug(f"Reverse DNS failed for {ip}: {exc}")
             success = False
-        finally:
-            socket.setdefaulttimeout(prev_timeout)
 
         expires_at = now + (self.positive_ttl_s if success else self.negative_ttl_s)
 

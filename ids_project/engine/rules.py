@@ -7372,6 +7372,15 @@ class RuleEngine:
                         self._stats["device_writes"] += 1
                     except Exception as e:
                         logger.error(f"Device write error: {e}")
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        conn = None
                 else:
                     self._stats["devices_dropped"] += 1
                 self._device_queue.task_done()

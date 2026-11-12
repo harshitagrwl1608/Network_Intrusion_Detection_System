@@ -137,6 +137,19 @@ CREATE TABLE IF NOT EXISTS feedback (
 # Connection factory
 # ---------------------------------------------------------------------------
 
+def _py_cidr_match(ip_str, cidr_str) -> bool:
+    """Exact mathematical CIDR matching UDF for SQLite."""
+    if not ip_str or not cidr_str:
+        return False
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(str(ip_str).strip())
+        net = ipaddress.ip_network(str(cidr_str).strip(), strict=False)
+        return ip in net
+    except Exception:
+        return False
+
+
 def get_connection(db_path: str | None = None):
     """Return a DB connection based on configured backend or an explicitly specified path.
     
@@ -146,21 +159,38 @@ def get_connection(db_path: str | None = None):
     if db_path is not None:
         d = os.path.dirname(db_path) or "."
         os.makedirs(d, exist_ok=True)
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = sqlite3.connect(db_path, timeout=60.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA busy_timeout = 60000")
+        except Exception:
+            pass
+        try:
+            conn.create_function("cidr_match", 2, _py_cidr_match)
+        except Exception:
+            pass
         return conn
 
     if config.DB_BACKEND == "postgres":
         try:
             import psycopg2
-            return psycopg2.connect(config.POSTGRES_URL)
+            import psycopg2.extras
+            return psycopg2.connect(config.POSTGRES_URL, cursor_factory=psycopg2.extras.DictCursor)
         except ImportError:
             raise RuntimeError("psycopg2 not installed. Run: pip install psycopg2-binary")
     else:
         d = os.path.dirname(config.SQLITE_PATH) or "."
         os.makedirs(d, exist_ok=True)
-        conn = sqlite3.connect(config.SQLITE_PATH, check_same_thread=False)
+        conn = sqlite3.connect(config.SQLITE_PATH, timeout=60.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA busy_timeout = 60000")
+        except Exception:
+            pass
+        try:
+            conn.create_function("cidr_match", 2, _py_cidr_match)
+        except Exception:
+            pass
         return conn
 
 
@@ -187,8 +217,24 @@ def init_db(conn):
         _log.getLogger(__name__).warning(f"Forensics DB init note: {exc}")
 
 
+def adapt_sql(sql: str) -> str:
+    """
+    Adapt a SQL query string containing SQLite conventions for the active DB backend.
+    - Replaces parameter placeholder '?' with '%s' on PostgreSQL.
+    - Converts 'INSERT OR IGNORE INTO' to 'INSERT INTO ... ON CONFLICT DO NOTHING' on PostgreSQL.
+    """
+    if getattr(config, "DB_BACKEND", "sqlite").lower() == "postgres":
+        s = sql.replace("?", "%s")
+        if "INSERT OR IGNORE INTO " in s:
+            s = s.replace("INSERT OR IGNORE INTO ", "INSERT INTO ") + " ON CONFLICT DO NOTHING"
+        return s
+    return sql
+
+
 def _migrate_columns(conn, cur):
     """Add new columns to existing databases without dropping data."""
+    is_pg = getattr(config, "DB_BACKEND", "sqlite").lower() == "postgres"
+    real_type = "DOUBLE PRECISION" if is_pg else "REAL"
     migrations = [
         # GeoIP
         ("alerts",       "country",       "TEXT"),
@@ -201,14 +247,23 @@ def _migrate_columns(conn, cur):
         ("alerts",       "protocol",      "TEXT"),
         ("alerts",       "confidence",    "TEXT"),
         ("alerts",       "evidence_json", "TEXT"),
-        ("alerts",       "window_start",  "REAL"),
-        ("alerts",       "window_end",    "REAL"),
+        ("alerts",       "window_start",  real_type),
+        ("alerts",       "window_end",    real_type),
         ("alerts",       "idempotency_key", "TEXT"),
     ]
     for table, col, col_type in migrations:
         try:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+            if is_pg:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
+                conn.commit()
+            else:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
         except Exception as exc:
+            if is_pg:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             err_msg = str(exc).lower()
             if "duplicate column" not in err_msg and "already exists" not in err_msg:
                 import logging as _log
@@ -302,8 +357,14 @@ def write_alert(conn, alert: dict):
     )
     with _sqlite_lock:
         cur = conn.cursor()
-        cur.execute(sql, values)
-        alert_id = getattr(cur, "lastrowid", None)
+        if config.DB_BACKEND == "postgres":
+            sql_pg = sql.strip() + " RETURNING id"
+            cur.execute(sql_pg, values)
+            row = cur.fetchone()
+            alert_id = row[0] if row else None
+        else:
+            cur.execute(sql, values)
+            alert_id = getattr(cur, "lastrowid", None)
         conn.commit()
         cur.close()
 
@@ -312,6 +373,7 @@ def write_alert(conn, alert: dict):
             hook(conn, alert, alert_id)
         except Exception:
             pass
+    return alert_id
 
 
 def read_recent_alerts(conn, minutes: int = 60) -> list[dict]:

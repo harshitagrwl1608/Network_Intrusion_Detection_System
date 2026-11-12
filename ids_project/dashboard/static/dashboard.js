@@ -19,6 +19,7 @@ let _calYear = new Date().getFullYear();
 let _calMonth = new Date().getMonth() + 1;
 let _calSelectedDay = null;
 let _calDayData = {};
+let _currentCaseId = null;
 let _csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || "";
 
 async function initCsrf() {
@@ -815,10 +816,12 @@ function renderFlowRows(tbody, flows) {
       ? `<span class="severity-badge sev-high">${f.alert_count} Alerts</span>`
       : `<span style="font-size:0.7rem;color:var(--text-muted);">Clean</span>`;
 
-    const srcDns = _dnsCache[f.src_ip];
-    const dstDns = _dnsCache[f.dst_ip];
-    const srcHost = srcDns && !srcDns.startsWith("[") ? `<div class="dns-host" style="font-size:0.68rem;color:#818cf8;">${escapeHtml(srcDns)}</div>` : "";
-    const dstHost = dstDns && !dstDns.startsWith("[") ? `<div class="dns-host" style="font-size:0.68rem;color:#818cf8;">${escapeHtml(dstDns)}</div>` : "";
+    const srcEntry = _dnsCache[f.src_ip];
+    const dstEntry = _dnsCache[f.dst_ip];
+    const srcDns = typeof srcEntry === "object" ? srcEntry?.hostname : srcEntry;
+    const dstDns = typeof dstEntry === "object" ? dstEntry?.hostname : dstEntry;
+    const srcHost = srcDns && typeof srcDns === "string" && !srcDns.startsWith("[") ? `<div class="dns-host" style="font-size:0.68rem;color:#818cf8;">${escapeHtml(srcDns)}</div>` : "";
+    const dstHost = dstDns && typeof dstDns === "string" && !dstDns.startsWith("[") ? `<div class="dns-host" style="font-size:0.68rem;color:#818cf8;">${escapeHtml(dstDns)}</div>` : "";
 
     return `
       <tr style="cursor:pointer;" onclick="openFlowDrawer('${f.flow_id}')">
@@ -848,8 +851,9 @@ function renderFlowRows(tbody, flows) {
 function updateFlowDnsLabels() {
   document.querySelectorAll("#traffic-tbody .ip-cell[data-ip]").forEach(el => {
     const ip = el.getAttribute("data-ip");
-    const host = _dnsCache[ip];
-    if (host && !host.startsWith("[")) {
+    const entry = _dnsCache[ip];
+    const host = typeof entry === "object" ? entry?.hostname : entry;
+    if (host && typeof host === "string" && !host.startsWith("[")) {
       let hostEl = el.parentElement.querySelector(".dns-host");
       if (!hostEl) {
         hostEl = document.createElement("div");
@@ -1344,8 +1348,8 @@ function startPcapJobPolling(jobId) {
 
     try {
       const res = await fetch(`/api/pcap/jobs/${jobId}`).then(r => r.json());
-      if (res.job) {
-        const job = res.job;
+      const job = res.job || res;
+      if (job && job.status) {
         loadPcapJobs();
         if (job.status === "completed") {
           clearInterval(_pcapPollInterval);

@@ -130,20 +130,20 @@ class OfflinePcapAnalyzer:
             "created_at": now,
         }
 
-        from storage.db import get_connection, _sqlite_lock
+        from storage.db import get_connection, _sqlite_lock, adapt_sql
         try:
             conn = get_connection()
             with _sqlite_lock:
                 cur = conn.cursor()
                 cur.execute(
-                    """
+                    adapt_sql("""
                     INSERT INTO pcap_jobs (
                         job_id, filename, file_path, file_size, sha256, format,
                         status, progress, total_packets, processed_packets, alert_count,
                         duration_s, start_time, end_time, result_summary_json, error_message, created_at
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+                    """),
                     (
                         job_record["job_id"], job_record["filename"], job_record["file_path"],
                         job_record["file_size"], job_record["sha256"], job_record["format"],
@@ -296,13 +296,13 @@ class OfflinePcapAnalyzer:
             if job_id in self._active_jobs:
                 self._active_jobs[job_id].update(kwargs)
 
-        from storage.db import get_connection, _sqlite_lock
+        from storage.db import get_connection, _sqlite_lock, adapt_sql
         try:
             conn = get_connection()
             with _sqlite_lock:
                 set_clauses = [f"{k} = ?" for k in kwargs.keys()]
                 values = list(kwargs.values()) + [job_id]
-                sql = f"UPDATE pcap_jobs SET {', '.join(set_clauses)} WHERE job_id = ?"
+                sql = adapt_sql(f"UPDATE pcap_jobs SET {', '.join(set_clauses)} WHERE job_id = ?")
                 cur = conn.cursor()
                 cur.execute(sql, values)
                 conn.commit()
@@ -319,12 +319,12 @@ class OfflinePcapAnalyzer:
                 res = self._active_jobs[job_id].copy()
 
         if res is None:
-            from storage.db import get_connection, _sqlite_lock
+            from storage.db import get_connection, _sqlite_lock, adapt_sql
             try:
                 conn = get_connection()
                 with _sqlite_lock:
                     cur = conn.cursor()
-                    cur.execute("SELECT * FROM pcap_jobs WHERE job_id = ?", (job_id,))
+                    cur.execute(adapt_sql("SELECT * FROM pcap_jobs WHERE job_id = ?"), (job_id,))
                     row = cur.fetchone()
                     cur.close()
                     res = dict(row) if row else None
@@ -351,8 +351,9 @@ class OfflinePcapAnalyzer:
         """List historical PCAP analysis jobs."""
         if not self._main_conn:
             return list(self._active_jobs.values())
+        from storage.db import adapt_sql
         cur = self._main_conn.cursor()
-        cur.execute("SELECT * FROM pcap_jobs ORDER BY created_at DESC LIMIT ?", (limit,))
+        cur.execute(adapt_sql("SELECT * FROM pcap_jobs ORDER BY created_at DESC LIMIT ?"), (limit,))
         rows = [dict(r) for r in cur.fetchall()]
         cur.close()
         return rows
@@ -381,12 +382,12 @@ class OfflinePcapAnalyzer:
             if job_id in self._active_jobs:
                 del self._active_jobs[job_id]
 
-            from storage.db import get_connection, _sqlite_lock
+            from storage.db import get_connection, _sqlite_lock, adapt_sql
             try:
                 conn = get_connection()
                 with _sqlite_lock:
                     cur = conn.cursor()
-                    cur.execute("DELETE FROM pcap_jobs WHERE job_id = ?", (job_id,))
+                    cur.execute(adapt_sql("DELETE FROM pcap_jobs WHERE job_id = ?"), (job_id,))
                     conn.commit()
                     cur.close()
                 conn.close()

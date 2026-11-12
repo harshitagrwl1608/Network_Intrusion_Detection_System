@@ -308,7 +308,9 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
         })
         self.assertEqual(note_resp.status_code, 200)
 
-        # Transition status
+        # Transition status via state machine: open -> investigating -> resolved
+        step1 = self.client.patch(f"/api/cases/{case_id}", json={"status": "investigating"})
+        self.assertEqual(step1.status_code, 200)
         patch_resp = self.client.patch(f"/api/cases/{case_id}", json={
             "status": "resolved",
         })

@@ -153,3 +153,58 @@ def test_case_lifecycle_full(client, auth_headers, seed_test_alert):
     logs = res_audit.get_json()
     case_actions = [l for l in logs if l.get("resource_id") == case_id]
     assert len(case_actions) >= 1
+
+
+def test_case_invalid_transitions_and_severity(client, auth_headers):
+    """Verify that invalid severities and illegal status transitions return HTTP 400."""
+    # Invalid severity on creation
+    res_bad_sev = client.post("/api/cases", headers=auth_headers, json={
+        "title": "Invalid Severity Case",
+        "severity": "catastrophic",
+    })
+    assert res_bad_sev.status_code == 400
+    assert "Invalid severity" in res_bad_sev.get_json()["error"]
+
+    # Valid creation
+    res_create = client.post("/api/cases", headers=auth_headers, json={
+        "title": "State Machine Case",
+        "severity": "medium",
+    })
+    assert res_create.status_code in (200, 201)
+    case_id = res_create.get_json()["case_id"]
+
+    # Illegal direct jump: open -> closed (must be investigated first)
+    res_illegal_close = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "closed"})
+    assert res_illegal_close.status_code == 400
+    assert "Invalid status transition" in res_illegal_close.get_json()["error"]
+
+    # Illegal direct jump: open -> resolved
+    res_illegal_resolve = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "resolved"})
+    assert res_illegal_resolve.status_code == 400
+    assert "Invalid status transition" in res_illegal_resolve.get_json()["error"]
+
+    # Invalid status string
+    res_bad_status = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "pending"})
+    assert res_bad_status.status_code == 400
+    assert "Invalid status" in res_bad_status.get_json()["error"]
+
+    # Invalid severity on patch
+    res_bad_patch_sev = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"severity": "super_urgent"})
+    assert res_bad_patch_sev.status_code == 400
+    assert "Invalid severity" in res_bad_patch_sev.get_json()["error"]
+
+    # Legal transition: open -> investigating
+    res_ok_inv = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "investigating"})
+    assert res_ok_inv.status_code == 200
+
+    # Legal transition: investigating -> resolved
+    res_ok_res = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "resolved"})
+    assert res_ok_res.status_code == 200
+
+    # Legal transition: resolved -> closed
+    res_ok_close = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "closed"})
+    assert res_ok_close.status_code == 200
+
+    # Legal reopen: closed -> open
+    res_reopen = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "open"})
+    assert res_reopen.status_code == 200
