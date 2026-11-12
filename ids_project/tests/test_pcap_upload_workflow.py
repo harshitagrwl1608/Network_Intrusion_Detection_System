@@ -56,32 +56,39 @@ def client():
         yield client
 
 
-def test_pcap_upload_rejected_without_file(client):
-    res = client.post("/api/pcap/upload", data={}, content_type="multipart/form-data")
+@pytest.fixture
+def auth_headers(client):
+    res = client.get("/api/csrf-token")
+    token = res.get_json()["csrf_token"]
+    return {"X-CSRFToken": token}
+
+
+def test_pcap_upload_rejected_without_file(client, auth_headers):
+    res = client.post("/api/pcap/upload", headers=auth_headers, data={}, content_type="multipart/form-data")
     assert res.status_code == 400
     assert "No file uploaded" in res.get_json()["error"]
 
 
-def test_pcap_upload_rejected_invalid_extension(client):
+def test_pcap_upload_rejected_invalid_extension(client, auth_headers):
     data = {
         "file": (io.BytesIO(b"dummy data"), "capture.exe")
     }
-    res = client.post("/api/pcap/upload", data=data, content_type="multipart/form-data")
+    res = client.post("/api/pcap/upload", headers=auth_headers, data=data, content_type="multipart/form-data")
     assert res.status_code == 400
     assert "Invalid extension" in res.get_json()["error"]
 
 
-def test_pcap_upload_rejected_corrupt_magic_bytes(client):
+def test_pcap_upload_rejected_corrupt_magic_bytes(client, auth_headers):
     corrupt_data = b"NOT_A_REAL_PCAP_HEADER_DATA_STREAM"
     data = {
         "file": (io.BytesIO(corrupt_data), "corrupt.pcap")
     }
-    res = client.post("/api/pcap/upload", data=data, content_type="multipart/form-data")
+    res = client.post("/api/pcap/upload", headers=auth_headers, data=data, content_type="multipart/form-data")
     assert res.status_code == 400
     assert "Invalid PCAP" in res.get_json()["error"] or "magic header" in res.get_json()["error"].lower()
 
 
-def test_pcap_upload_valid_magic_bytes_queued(client):
+def test_pcap_upload_valid_magic_bytes_queued(client, auth_headers):
     # Standard PCAP global header magic number: 0xd4c3b2a1 (little endian)
     pcap_header = (
         b"\xd4\xc3\xb2\xa1"  # magic_number
@@ -95,7 +102,7 @@ def test_pcap_upload_valid_magic_bytes_queued(client):
     data = {
         "file": (io.BytesIO(pcap_header), "valid_empty.pcap")
     }
-    res = client.post("/api/pcap/upload", data=data, content_type="multipart/form-data")
+    res = client.post("/api/pcap/upload", headers=auth_headers, data=data, content_type="multipart/form-data")
     assert res.status_code in (200, 202)
     resp = res.get_json()
     assert "job_id" in resp

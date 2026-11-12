@@ -1305,10 +1305,10 @@ function handlePcapFileUpload(file) {
           if (progBar) progBar.style.width = "100%";
           if (pctLabel) pctLabel.textContent = "Queued";
           showToast(`Capture queued for isolated replay (Job: ${res.job_id})`, "success");
+          loadPcapJobs();
+          startPcapJobPolling(res.job_id);
           setTimeout(() => {
             if (progContainer) progContainer.style.display = "none";
-            loadPcapJobs();
-            startPcapJobPolling(res.job_id);
           }, 800);
           return;
         }

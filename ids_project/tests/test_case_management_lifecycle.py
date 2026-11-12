@@ -141,14 +141,36 @@ def test_case_lifecycle_full(client, auth_headers, seed_test_alert):
     assert res_get3.get_json()["case"]["status"] == "investigating"
 
     # 5. Status Transition: Investigating -> Resolved -> Closed
-    res_trans2 = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "closed"})
-    assert res_trans2.status_code == 200
+    res_trans_res = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "resolved"})
+    assert res_trans_res.status_code == 200
+
+    res_trans_close = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "closed"})
+    assert res_trans_close.status_code == 200
 
     res_get4 = client.get(f"/api/cases/{case_id}")
     assert res_get4.get_json()["case"]["status"] == "closed"
 
-    # 6. Audit Trail Verification
-    res_audit = client.get("/api/audit-log?limit=10")
+    # 6. Reopen: Closed -> Open
+    res_reopen = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "open"})
+    assert res_reopen.status_code == 200
+
+    # 7. Unlink alert and re-link alert
+    res_unlink = client.delete(f"/api/cases/{case_id}/alerts/{aid}", headers=auth_headers)
+    assert res_unlink.status_code == 200
+    assert res_unlink.get_json()["unlinked_alert_id"] == aid
+
+    # Verify alert unlinked
+    res_get5 = client.get(f"/api/cases/{case_id}")
+    assert len(res_get5.get_json()["alerts"]) == 0
+
+    # Re-link alert
+    res_relink = client.post(f"/api/cases/{case_id}/alerts", headers=auth_headers, json={"alert_ids": [aid]})
+    assert res_relink.status_code == 200
+    res_get6 = client.get(f"/api/cases/{case_id}")
+    assert len(res_get6.get_json()["alerts"]) == 1
+
+    # 8. Audit Trail Verification
+    res_audit = client.get("/api/audit-log?limit=20")
     assert res_audit.status_code == 200
     logs = res_audit.get_json()
     case_actions = [l for l in logs if l.get("resource_id") == case_id]
@@ -197,6 +219,11 @@ def test_case_invalid_transitions_and_severity(client, auth_headers):
     res_ok_inv = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "investigating"})
     assert res_ok_inv.status_code == 200
 
+    # Illegal direct jump: investigating -> closed (must be resolved first per documented state machine)
+    res_inv_close = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "closed"})
+    assert res_inv_close.status_code == 400
+    assert "Invalid status transition" in res_inv_close.get_json()["error"]
+
     # Legal transition: investigating -> resolved
     res_ok_res = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "resolved"})
     assert res_ok_res.status_code == 200
@@ -208,3 +235,23 @@ def test_case_invalid_transitions_and_severity(client, auth_headers):
     # Legal reopen: closed -> open
     res_reopen = client.patch(f"/api/cases/{case_id}", headers=auth_headers, json={"status": "open"})
     assert res_reopen.status_code == 200
+
+    # Nonexistent alert ID on creation (must fail 404)
+    res_bad_alert_create = client.post("/api/cases", headers=auth_headers, json={
+        "title": "Nonexistent Alert Case",
+        "severity": "low",
+        "alert_ids": [999999],
+    })
+    assert res_bad_alert_create.status_code == 404
+
+    # Nonexistent alert ID on linking (must fail 404)
+    res_bad_link = client.post(f"/api/cases/{case_id}/alerts", headers=auth_headers, json={"alert_ids": [999999]})
+    assert res_bad_link.status_code == 404
+
+    # Nonexistent case ID on alert linking (must fail 404)
+    res_missing_case_link = client.post("/api/cases/CASE-NONEXISTENT/alerts", headers=auth_headers, json={"alert_ids": [1]})
+    assert res_missing_case_link.status_code == 404
+
+    # Nonexistent case ID on note addition (must fail 404)
+    res_missing_case_note = client.post("/api/cases/CASE-NONEXISTENT/notes", headers=auth_headers, json={"note": "ghost note"})
+    assert res_missing_case_note.status_code == 404

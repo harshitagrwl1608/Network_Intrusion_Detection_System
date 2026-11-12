@@ -35,7 +35,7 @@ import config
 from storage.db import init_db, get_connection
 from storage.forensics_db import init_forensics_db
 import dashboard.app as app_mod
-from dashboard.app import app, _csrf_token
+from dashboard.app import app
 
 
 class TestPcapUploadSecurityAndCsrf(unittest.TestCase):
@@ -47,6 +47,8 @@ class TestPcapUploadSecurityAndCsrf(unittest.TestCase):
         self.orig_backend = config.DB_BACKEND
         self.orig_auth = getattr(config, "DASHBOARD_AUTH_ENABLED", False)
         self.orig_csrf = getattr(config, "DASHBOARD_CSRF_ENABLED", True)
+        self.orig_user = getattr(config, "DASHBOARD_USERNAME", "admin")
+        self.orig_pass = getattr(config, "DASHBOARD_PASSWORD", None)
 
         config.DB_BACKEND = "sqlite"
         config.SQLITE_PATH = self.db_path
@@ -59,6 +61,8 @@ class TestPcapUploadSecurityAndCsrf(unittest.TestCase):
 
         app.config["TESTING"] = False  # Enable real middleware evaluation
         self.client = app.test_client()
+        token_res = self.client.get("/api/csrf-token").get_json()
+        self.csrf_token = token_res["csrf_token"]
 
     def tearDown(self):
         self.conn.close()
@@ -69,12 +73,14 @@ class TestPcapUploadSecurityAndCsrf(unittest.TestCase):
         config.DB_BACKEND = self.orig_backend
         config.DASHBOARD_AUTH_ENABLED = self.orig_auth
         config.DASHBOARD_CSRF_ENABLED = self.orig_csrf
+        config.DASHBOARD_USERNAME = self.orig_user
+        config.DASHBOARD_PASSWORD = self.orig_pass
         if os.path.exists(self.tmp_dir):
             shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_pcap_upload_validation_and_rejection(self):
         """Verify invalid extension and corrupted magic bytes are rejected."""
-        headers = {"X-CSRFToken": _csrf_token}
+        headers = {"X-CSRFToken": self.csrf_token}
 
         # 1. Invalid file extension (.sh)
         data = {"file": (io.BytesIO(b"#!/bin/bash\necho test\n"), "malicious.sh")}
@@ -123,7 +129,7 @@ class TestPcapUploadSecurityAndCsrf(unittest.TestCase):
         resp_valid = self.client.post(
             "/api/saved-searches",
             json={"name": "valid_search", "query": {}},
-            headers={"X-CSRFToken": _csrf_token}
+            headers={"X-CSRFToken": self.csrf_token}
         )
         self.assertEqual(resp_valid.status_code, 200)
         self.assertEqual(resp_valid.get_json()["status"], "ok")

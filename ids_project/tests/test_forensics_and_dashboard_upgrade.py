@@ -48,6 +48,9 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
         self.conn = get_connection()
         init_db(self.conn)
         self.client = app.test_client()
+        token_res = self.client.get("/api/csrf-token").get_json()
+        self.csrf_token = token_res["csrf_token"]
+        self.csrf_headers = {"X-CSRFToken": self.csrf_token}
 
     def tearDown(self):
         try:
@@ -191,7 +194,7 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
 
     def test_05_saved_searches_lifecycle(self):
         """Verify saved search creation, retrieval, and deletion."""
-        create_resp = self.client.post("/api/saved-searches", json={
+        create_resp = self.client.post("/api/saved-searches", headers=self.csrf_headers, json={
             "name": "Outbound Port 445 Probes",
             "query": {"dst_port": 445, "direction": "outbound"},
             "description": "SMB hunting filter",
@@ -204,7 +207,7 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
         items = list_resp.get_json()
         self.assertTrue(any(s["id"] == search_id and s["name"] == "Outbound Port 445 Probes" for s in items))
 
-        del_resp = self.client.delete(f"/api/saved-searches/{search_id}")
+        del_resp = self.client.delete(f"/api/saved-searches/{search_id}", headers=self.csrf_headers)
         self.assertEqual(del_resp.status_code, 200)
 
         list_after = self.client.get("/api/saved-searches").get_json()
@@ -283,7 +286,7 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
         cur.close()
 
         # Create case
-        create_resp = self.client.post("/api/cases", json={
+        create_resp = self.client.post("/api/cases", headers=self.csrf_headers, json={
             "title": "Botnet Infection Investigation",
             "severity": "high",
             "assigned_to": "Analyst Bob",
@@ -302,16 +305,16 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
         self.assertEqual(cdata["alerts"][0]["rule_name"], "IRC_C2_BEACONING")
 
         # Add analyst note
-        note_resp = self.client.post(f"/api/cases/{case_id}/notes", json={
+        note_resp = self.client.post(f"/api/cases/{case_id}/notes", headers=self.csrf_headers, json={
             "author": "Analyst Bob",
             "note": "Host isolated from LAN via firewall rule.",
         })
         self.assertEqual(note_resp.status_code, 200)
 
         # Transition status via state machine: open -> investigating -> resolved
-        step1 = self.client.patch(f"/api/cases/{case_id}", json={"status": "investigating"})
+        step1 = self.client.patch(f"/api/cases/{case_id}", headers=self.csrf_headers, json={"status": "investigating"})
         self.assertEqual(step1.status_code, 200)
-        patch_resp = self.client.patch(f"/api/cases/{case_id}", json={
+        patch_resp = self.client.patch(f"/api/cases/{case_id}", headers=self.csrf_headers, json={
             "status": "resolved",
         })
         self.assertEqual(patch_resp.status_code, 200)
@@ -348,7 +351,7 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
         self.assertFalse(q_low, "Low severity alert should be suppressed by default notification filter.")
 
         # Test provider dispatch endpoint
-        test_resp = self.client.post("/api/notifications/test", json={"provider": "webhook"})
+        test_resp = self.client.post("/api/notifications/test", headers=self.csrf_headers, json={"provider": "webhook"})
         self.assertEqual(test_resp.status_code, 200)
 
     def test_10_multi_format_report_generation(self):
@@ -387,7 +390,7 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
         cur.close()
 
         # 1. Initial classification: true_positive
-        self.client.post("/api/feedback", json={
+        self.client.post("/api/feedback", headers=self.csrf_headers, json={
             "alert_id": aid, "classification": "true_positive", "analyst_note": "Initial review"
         })
         stats1 = feedback_stats(self.conn)
@@ -395,7 +398,7 @@ class TestForensicsAndDashboardUpgrade(unittest.TestCase):
         self.assertEqual(stats1["TCP_FLAG_ANOMALY"]["false_positive"], 0)
 
         # 2. Reclassification: false_positive
-        reclass_resp = self.client.post("/api/feedback/reclassify", json={
+        reclass_resp = self.client.post("/api/feedback/reclassify", headers=self.csrf_headers, json={
             "alert_id": aid, "new_classification": "false_positive", "analyst_note": "Corrected: legitimate test tool"
         })
         self.assertEqual(reclass_resp.status_code, 200)

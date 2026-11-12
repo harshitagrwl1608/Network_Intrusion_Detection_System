@@ -94,6 +94,13 @@ def pg_client(pg_setup):
         yield client
 
 
+@pytest.fixture
+def pg_auth_headers(pg_client):
+    res = pg_client.get("/api/csrf-token")
+    token = res.get_json()["csrf_token"]
+    return {"X-CSRFToken": token}
+
+
 def test_postgres_schema_initialization(pg_setup):
     """Verify live PostgreSQL tables and columns exist."""
     conn = get_connection()
@@ -115,7 +122,7 @@ def test_postgres_schema_initialization(pg_setup):
         assert t in tables, f"Expected table '{t}' in PostgreSQL schema"
 
 
-def test_postgres_case_management_lifecycle(pg_client):
+def test_postgres_case_management_lifecycle(pg_client, pg_auth_headers):
     """Test full 10-step case management lifecycle end-to-end on PostgreSQL."""
     conn = get_connection()
     # 1. Seed an alert in PostgreSQL
@@ -134,7 +141,7 @@ def test_postgres_case_management_lifecycle(pg_client):
     assert alert_id > 0
 
     # 2. Case Creation via API
-    res = pg_client.post("/api/cases", json={
+    res = pg_client.post("/api/cases", headers=pg_auth_headers, json={
         "title": "PostgreSQL Incident Investigation",
         "severity": "high",
         "description": "Verifying case tracking on live PostgreSQL 18",
@@ -157,11 +164,11 @@ def test_postgres_case_management_lifecycle(pg_client):
     assert detail["alerts"][0]["id"] == alert_id
 
     # 4. Link additional alert (tests ON CONFLICT DO NOTHING on case_alerts)
-    res_link = pg_client.post(f"/api/cases/{case_id}/alerts", json={"alert_ids": [alert_id]})
+    res_link = pg_client.post(f"/api/cases/{case_id}/alerts", headers=pg_auth_headers, json={"alert_ids": [alert_id]})
     assert res_link.status_code == 200
 
     # 5. Add Case Note
-    res_note = pg_client.post(f"/api/cases/{case_id}/notes", json={
+    res_note = pg_client.post(f"/api/cases/{case_id}/notes", headers=pg_auth_headers, json={
         "note": "Investigated PostgreSQL forensic records; no lateral movement.",
         "author": "PG Analyst"
     })
@@ -172,33 +179,49 @@ def test_postgres_case_management_lifecycle(pg_client):
     assert len(res_get2.get_json()["notes"]) >= 1
 
     # 6. Invalid Status Transition: open -> closed directly (Must fail 400)
-    res_bad_trans = pg_client.patch(f"/api/cases/{case_id}", json={"status": "closed"})
+    res_bad_trans = pg_client.patch(f"/api/cases/{case_id}", headers=pg_auth_headers, json={"status": "closed"})
     assert res_bad_trans.status_code == 400
 
     # 7. Valid Transition: open -> investigating
-    res_inv = pg_client.patch(f"/api/cases/{case_id}", json={"status": "investigating"})
+    res_inv = pg_client.patch(f"/api/cases/{case_id}", headers=pg_auth_headers, json={"status": "investigating"})
     assert res_inv.status_code == 200
 
-    # 8. Valid Transition: investigating -> resolved
-    res_res = pg_client.patch(f"/api/cases/{case_id}", json={"status": "resolved"})
+    # 8. Invalid Transition: investigating -> closed directly (Must fail 400)
+    res_inv_close = pg_client.patch(f"/api/cases/{case_id}", headers=pg_auth_headers, json={"status": "closed"})
+    assert res_inv_close.status_code == 400
+
+    # 9. Valid Transition: investigating -> resolved
+    res_res = pg_client.patch(f"/api/cases/{case_id}", headers=pg_auth_headers, json={"status": "resolved"})
     assert res_res.status_code == 200
 
-    # 9. Valid Transition: resolved -> closed
-    res_close = pg_client.patch(f"/api/cases/{case_id}", json={"status": "closed"})
+    # 10. Valid Transition: resolved -> closed
+    res_close = pg_client.patch(f"/api/cases/{case_id}", headers=pg_auth_headers, json={"status": "closed"})
     assert res_close.status_code == 200
     res_get3 = pg_client.get(f"/api/cases/{case_id}")
     assert res_get3.get_json()["case"]["status"] == "closed"
 
-    # 10. Valid Reopen: closed -> open
-    res_reopen = pg_client.patch(f"/api/cases/{case_id}", json={"status": "open"})
+    # 11. Valid Reopen: closed -> open
+    res_reopen = pg_client.patch(f"/api/cases/{case_id}", headers=pg_auth_headers, json={"status": "open"})
     assert res_reopen.status_code == 200
     res_get4 = pg_client.get(f"/api/cases/{case_id}")
     assert res_get4.get_json()["case"]["status"] == "open"
 
+    # 12. Nonexistent alert ID and case ID validation
+    res_bad_aid = pg_client.post(f"/api/cases/{case_id}/alerts", headers=pg_auth_headers, json={"alert_ids": [999999]})
+    assert res_bad_aid.status_code == 404
 
-def test_postgres_saved_searches(pg_client):
+    res_bad_case = pg_client.post("/api/cases/CASE-NONEXISTENT/notes", headers=pg_auth_headers, json={"note": "ghost"})
+    assert res_bad_case.status_code == 404
+
+    # 13. Alert Unlink and Re-link
+    res_unlink = pg_client.delete(f"/api/cases/{case_id}/alerts/{alert_id}", headers=pg_auth_headers)
+    assert res_unlink.status_code == 200
+    assert res_unlink.get_json()["unlinked_alert_id"] == alert_id
+
+
+def test_postgres_saved_searches(pg_client, pg_auth_headers):
     """Verify saved search creation with PostgreSQL RETURNING id clause."""
-    res = pg_client.post("/api/traffic/saved-searches", json={
+    res = pg_client.post("/api/traffic/saved-searches", headers=pg_auth_headers, json={
         "name": "Postgres High Risk Flow Search",
         "description": "Flows with alerts on Postgres",
         "query": {"alerted_only": True}

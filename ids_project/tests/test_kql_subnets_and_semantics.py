@@ -51,6 +51,14 @@ def test_sqlite_udf_mathematical_cidr_accuracy():
     assert _py_cidr_match("2001:db9::1", "2001:db8::/32") is False
     assert _py_cidr_match("fe80::1ff:fe23:4567", "fe80::/64") is True
 
+    # IPv6 non-byte / non-nibble-aligned prefixes (/52, /57, /120)
+    assert _py_cidr_match("2001:db8:0:0f00::1", "2001:db8::/52") is True
+    assert _py_cidr_match("2001:db8:0:f000::1", "2001:db8::/52") is False
+    assert _py_cidr_match("2001:db8:0:007f::1", "2001:db8::/57") is True
+    assert _py_cidr_match("2001:db8:0:0080::1", "2001:db8::/57") is False
+    assert _py_cidr_match("2001:db8::ff", "2001:db8::/120") is True
+    assert _py_cidr_match("2001:db8::100", "2001:db8::/120") is False
+
 
 def test_sqlite_in_database_cidr_query():
     """Verify cidr_match UDF registered in live SQLite connection filters rows correctly."""
@@ -107,6 +115,34 @@ def test_kql_cidr_compilation_sqlite_and_postgres():
         sql_pg, params_pg = parse_kql_to_sql(query, backend="postgres")
         assert "(src_ip::inet <<= %s::inet)" in sql_pg
         assert params_pg == [cidr]
+
+
+def test_kql_single_ip_and_invalid_cidr():
+    """Verify single IPv4/IPv6 address exact matching and invalid CIDR rejection."""
+    # Single IPv4 exact match
+    sql_v4, params_v4 = parse_kql_to_sql('src_ip: "192.168.1.50"', backend="sqlite")
+    assert "src_ip = ?" in sql_v4
+    assert params_v4 == ["192.168.1.50"]
+
+    # Single IPv6 exact match
+    sql_v6, params_v6 = parse_kql_to_sql('dst_ip == "2001:db8::cafe"', backend="postgres")
+    assert "dst_ip = %s" in sql_v6
+    assert params_v6 == ["2001:db8::cafe"]
+
+    # Non-byte aligned IPv6 compilation
+    sql_57, params_57 = parse_kql_to_sql('src_ip: "2001:db8::/57"', backend="sqlite")
+    assert "cidr_match(src_ip, ?)" in sql_57
+    assert params_57 == ["2001:db8::/57"]
+
+    # Invalid CIDRs must raise KqlParseError
+    with pytest.raises(KqlParseError):
+        parse_kql_to_sql('src_ip: "999.999.999.999/24"')
+
+    with pytest.raises(KqlParseError):
+        parse_kql_to_sql('src_ip: "192.168.1.1/33"')
+
+    with pytest.raises(KqlParseError):
+        parse_kql_to_sql('src_ip: "2001:db8::/129"')
 
 
 def test_kql_cidr_negative_matching():

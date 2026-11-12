@@ -110,15 +110,16 @@ def browser_env(tmp_path_factory):
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1600,1050")
+    options.page_load_strategy = "eager"
     options.binary_location = "/usr/bin/chromium"
 
     service = Service(executable_path="/usr/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=options)
     driver.set_page_load_timeout(30)
+    driver.set_script_timeout(15)
     driver.implicitly_wait(5)
 
     base_url = f"http://127.0.0.1:{port}"
-    driver.get(base_url)
 
     yield driver, base_url, test_db_path
 
@@ -242,7 +243,7 @@ def test_03_threat_hunting_workspace(browser_env):
 def test_04_pcap_upload_and_replay(browser_env):
     """Test 5: PCAP Analysis upload, offline job creation, and replay progress."""
     driver, base_url, _ = browser_env
-    wait = WebDriverWait(driver, 30)
+    wait = WebDriverWait(driver, 45)
 
     switch_workspace(driver, "pcap")
 

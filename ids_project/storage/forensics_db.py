@@ -851,6 +851,14 @@ def add_alert_to_case(conn, case_id: str, alert_id: int):
     update_alert_sql = adapt_sql("UPDATE alerts SET assigned_case_id = ? WHERE id = ?")
     with _sqlite_lock:
         cur = conn.cursor()
+        cur.execute(adapt_sql("SELECT case_id FROM cases WHERE case_id = ?"), (case_id,))
+        if not cur.fetchone():
+            cur.close()
+            raise ValueError(f"Case '{case_id}' does not exist")
+        cur.execute(adapt_sql("SELECT id FROM alerts WHERE id = ?"), (alert_id,))
+        if not cur.fetchone():
+            cur.close()
+            raise ValueError(f"Alert '{alert_id}' does not exist")
         cur.execute(sql, (case_id, alert_id, now))
         cur.execute(update_case_sql, (now, case_id))
         cur.execute(update_alert_sql, (case_id, alert_id))
@@ -865,6 +873,10 @@ def add_case_note(conn, case_id: str, author: str, note: str):
     update_case_sql = adapt_sql("UPDATE cases SET updated_at = ? WHERE case_id = ?")
     with _sqlite_lock:
         cur = conn.cursor()
+        cur.execute(adapt_sql("SELECT case_id FROM cases WHERE case_id = ?"), (case_id,))
+        if not cur.fetchone():
+            cur.close()
+            raise ValueError(f"Case '{case_id}' does not exist")
         cur.execute(sql, (case_id, author, note, now))
         cur.execute(update_case_sql, (now, case_id))
         conn.commit()

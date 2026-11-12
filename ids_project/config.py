@@ -136,8 +136,9 @@ DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", 5000))
 DASHBOARD_DEBUG = os.getenv("DASHBOARD_DEBUG", "false").lower() == "true"
 DASHBOARD_AUTH_ENABLED = os.getenv("DASHBOARD_AUTH_ENABLED", "false").lower() == "true"
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
-DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "netguard")
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", None)
 DASHBOARD_CSRF_ENABLED = os.getenv("DASHBOARD_CSRF_ENABLED", "true").lower() == "true"
+SECRET_KEY = os.getenv("NETGUARD_SECRET_KEY", os.getenv("SECRET_KEY", None))
 
 # --- History & Retention ---
 # How many days of alerts to keep in the database (older rows are pruned).

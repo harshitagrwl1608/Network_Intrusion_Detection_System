@@ -69,13 +69,14 @@ def test_reverse_dns_timeout_bounding():
 
 
 def test_reverse_dns_batch_api(client):
+    csrf_token = client.get("/api/csrf-token").get_json()["csrf_token"]
     with patch("analytics.reverse_dns.ReverseDNSResolver.resolve_batch") as mock_batch:
         mock_batch.return_value = {
             "8.8.8.8": "dns.google",
             "1.1.1.1": "one.one.one.one",
             "192.168.1.1": None,
         }
-        res = client.post("/api/dns/reverse", json={"ips": ["8.8.8.8", "1.1.1.1", "192.168.1.1"]})
+        res = client.post("/api/dns/reverse", headers={"X-CSRFToken": csrf_token}, json={"ips": ["8.8.8.8", "1.1.1.1", "192.168.1.1"]})
         assert res.status_code == 200
         data = res.get_json()
         assert "results" in data

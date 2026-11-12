@@ -110,6 +110,9 @@ def run_standalone_replay(pcap_path: str, blocklist_path: str = None,
     Ensures every execution path uses a replay-aware event clock.
     """
     c = cfg or config
+    orig_sqlite = getattr(c, "SQLITE_PATH", "alerts.db")
+    orig_arp = getattr(c, "ARP_TABLE_PATH", "arp_table.json")
+
     if db_path:
         c.SQLITE_PATH = db_path
         logging.info(f"Using evaluation DB: {db_path}")
@@ -121,33 +124,41 @@ def run_standalone_replay(pcap_path: str, blocklist_path: str = None,
     conn = get_connection()
     init_db(conn)
 
-    bl_path = blocklist_path or c.BLOCKLIST_PATH
-    bl_url  = c.BLOCKLIST_URL if not blocklist_path else None
+    try:
+        bl_path = blocklist_path or c.BLOCKLIST_PATH
+        bl_url  = c.BLOCKLIST_URL if not blocklist_path else None
 
-    if not os.path.exists(bl_path):
-        if bl_url:
-            logging.info(f"Blocklist missing at '{bl_path}' — will download from URL")
-            blocklist = load_blocklist(bl_path, url=bl_url)
+        if not os.path.exists(bl_path):
+            if bl_url:
+                logging.info(f"Blocklist missing at '{bl_path}' — will download from URL")
+                blocklist = load_blocklist(bl_path, url=bl_url)
+            else:
+                logging.warning(
+                    f"Blocklist not found at '{bl_path}' and no download URL configured. "
+                    "BLOCKLIST rule will be DISABLED for this replay. "
+                    "Pass --blocklist <path> or set BLOCKLIST_URL in config to enable it."
+                )
+                blocklist = BlocklistData(exact=set(), networks=[])
         else:
-            logging.warning(
-                f"Blocklist not found at '{bl_path}' and no download URL configured. "
-                "BLOCKLIST rule will be DISABLED for this replay. "
-                "Pass --blocklist <path> or set BLOCKLIST_URL in config to enable it."
-            )
-            blocklist = BlocklistData(exact=set(), networks=[])
-    else:
-        blocklist = load_blocklist(bl_path, url=bl_url)
+            blocklist = load_blocklist(bl_path, url=bl_url)
 
-    tracking_engine = create_replay_engine(conn, blocklist, c)
-    logging.info(f"Replaying: {pcap_path}")
-    # Keep Scapy (and its host-interface discovery) out of engine-factory
-    # imports. This module's clock/factory is also used by isolated tests.
-    from capture.sniffer import replay_pcap
-    replay_pcap(pcap_path, tracking_engine)
-    tracking_engine.flush()
-    logging.info("Replay complete. Alerts written to database.")
-    print(f"Done. Alerts are in: {c.SQLITE_PATH}")
-    return tracking_engine
+        tracking_engine = create_replay_engine(conn, blocklist, c)
+        logging.info(f"Replaying: {pcap_path}")
+        # Keep Scapy (and its host-interface discovery) out of engine-factory
+        # imports. This module's clock/factory is also used by isolated tests.
+        from capture.sniffer import replay_pcap
+        replay_pcap(pcap_path, tracking_engine)
+        tracking_engine.flush()
+        logging.info("Replay complete. Alerts written to database.")
+        print(f"Done. Alerts are in: {c.SQLITE_PATH}")
+        return tracking_engine
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        c.SQLITE_PATH = orig_sqlite
+        c.ARP_TABLE_PATH = orig_arp
 
 
 def main():

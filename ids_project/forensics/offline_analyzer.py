@@ -349,14 +349,20 @@ class OfflinePcapAnalyzer:
 
     def list_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
         """List historical PCAP analysis jobs."""
-        if not self._main_conn:
-            return list(self._active_jobs.values())
-        from storage.db import adapt_sql
-        cur = self._main_conn.cursor()
-        cur.execute(adapt_sql("SELECT * FROM pcap_jobs ORDER BY created_at DESC LIMIT ?"), (limit,))
-        rows = [dict(r) for r in cur.fetchall()]
-        cur.close()
-        return rows
+        from storage.db import get_connection, _sqlite_lock, adapt_sql
+        try:
+            conn = get_connection()
+            with _sqlite_lock:
+                cur = conn.cursor()
+                cur.execute(adapt_sql("SELECT * FROM pcap_jobs ORDER BY created_at DESC LIMIT ?"), (limit,))
+                rows = [dict(r) for r in cur.fetchall()]
+                cur.close()
+            conn.close()
+            return rows
+        except Exception as exc:
+            logger.debug(f"list_jobs error: {exc}")
+            with self._lock:
+                return list(self._active_jobs.values())
 
     def cleanup_job(self, job_id: str) -> bool:
         """Purge temporary storage files, isolated DB, and uploaded capture for a completed/failed job."""

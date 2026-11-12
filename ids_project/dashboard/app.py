@@ -63,10 +63,14 @@ app.config.update(
     SESSION_COOKIE_SECURE=getattr(config, "SESSION_COOKIE_SECURE", False),
 )
 
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+if os.environ.get("NETGUARD_HTTPS", "false").lower() == "true":
+    app.config["SESSION_COOKIE_SECURE"] = True
+
 _baseline_engine = BaselineEngine()
 _outbox_manager = NotificationOutboxManager()
 _offline_analyzer = None
-_csrf_token = secrets.token_hex(16)
 _app_start_time = time.time()
 _baseline_collector: BaselineCollector | None = None
 
@@ -83,20 +87,25 @@ def get_session_csrf_token() -> str:
     """Return active session-bound CSRF token, generating if needed."""
     if has_request_context():
         if "_csrf_token" not in session:
-            session["_csrf_token"] = secrets.token_hex(16)
+            session["_csrf_token"] = secrets.token_hex(32)
         return session["_csrf_token"]
-    return _csrf_token
+    return ""
 
 
 @app.before_request
 def check_auth_and_csrf():
-    """Enforce Basic Authentication and CSRF token validation on state-changing requests."""
+    """Enforce Basic Authentication and session-bound CSRF token validation on state-changing requests."""
     # 1. Basic Authentication check
     if getattr(config, "DASHBOARD_AUTH_ENABLED", False):
-        auth = request.authorization
         expected_user = getattr(config, "DASHBOARD_USERNAME", "admin")
-        expected_pass = getattr(config, "DASHBOARD_PASSWORD", "netguard")
-        if not auth or auth.username != expected_user or auth.password != expected_pass:
+        expected_pass = getattr(config, "DASHBOARD_PASSWORD", None) or os.environ.get("DASHBOARD_PASSWORD")
+        if not expected_pass or expected_pass == "netguard":
+            logger.critical("SECURITY VIOLATION: DASHBOARD_AUTH_ENABLED requires DASHBOARD_PASSWORD to be explicitly configured and cannot be default 'netguard'. Failing closed.")
+            return Response(
+                "Configuration error: DASHBOARD_PASSWORD must be explicitly configured with a non-default password when authentication is enabled.", 500
+            )
+        auth = request.authorization
+        if not auth or auth.username != expected_user or not hmac.compare_digest(auth.password, expected_pass):
             return Response(
                 "Unauthorized: NetGuard SOC credentials required", 401,
                 {"WWW-Authenticate": 'Basic realm="NetGuard SOC Dashboard"'}
@@ -105,15 +114,12 @@ def check_auth_and_csrf():
     # 2. Binding security warning when exposed beyond localhost with default credentials
     bind_host = getattr(config, "DASHBOARD_HOST", "127.0.0.1")
     if bind_host not in ("127.0.0.1", "localhost", "::1"):
-        if getattr(config, "DASHBOARD_PASSWORD", "netguard") == "netguard":
-            logger.warning("SECURITY WARNING: NetGuard dashboard exposed beyond localhost with default credentials! Please change DASHBOARD_PASSWORD.")
+        secret_env = os.environ.get("NETGUARD_SECRET_KEY") or getattr(config, "SECRET_KEY", None)
+        if not secret_env or secret_env == "netguard-soc-default-master-key-seed-32b":
+            logger.critical("SECURITY WARNING: NetGuard dashboard exposed beyond localhost (%s) without an explicit strong SECRET_KEY.", bind_host)
 
-    # 3. CSRF Token enforcement on state-modifying verbs
+    # 3. Session-bound CSRF Token enforcement on state-modifying verbs
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
-        # In test environments, bypass unless explicitly testing CSRF security
-        if not getattr(config, "DASHBOARD_CSRF_ENFORCE_IN_TESTS", False):
-            if app.config.get("TESTING") or "PYTEST_CURRENT_TEST" in os.environ:
-                return
         if not getattr(config, "DASHBOARD_CSRF_ENABLED", True):
             return
 
@@ -124,10 +130,8 @@ def check_auth_and_csrf():
             token = request.form.get("csrf_token")
 
         valid = False
-        if token:
-            if "_csrf_token" in session and hmac.compare_digest(token, session["_csrf_token"]):
-                valid = True
-            elif _csrf_token and hmac.compare_digest(token, _csrf_token):
+        if token and "_csrf_token" in session:
+            if hmac.compare_digest(str(token), str(session["_csrf_token"])):
                 valid = True
 
         if not valid:
@@ -141,8 +145,11 @@ def request_entity_too_large(error):
 
 def get_offline_analyzer():
     global _offline_analyzer
+    db = get_db()
     if _offline_analyzer is None:
-        _offline_analyzer = OfflinePcapAnalyzer(main_conn=get_db())
+        _offline_analyzer = OfflinePcapAnalyzer(main_conn=db)
+    else:
+        _offline_analyzer._main_conn = db
     return _offline_analyzer
 
 
@@ -1821,12 +1828,29 @@ def api_cases():
             return jsonify({"error": f"Invalid severity '{sev}'. Must be one of: {', '.join(sorted(valid_severities))}"}), 400
         assigned = data.get("assigned_to", "SOC Analyst").strip()
         alert_ids = data.get("alert_ids", [])
+        clean_aids = []
+        if alert_ids:
+            try:
+                clean_aids = [int(x) for x in alert_ids]
+            except (ValueError, TypeError):
+                return jsonify({"error": "Invalid alert_ids: all must be integers"}), 400
+
         now = time.time()
         case_id = f"CASE-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
         with _sqlite_lock:
             cur = db.cursor()
             try:
+                if clean_aids:
+                    param = "%s" if _is_postgres() else "?"
+                    placeholders = ",".join([param] * len(clean_aids))
+                    cur.execute(f"SELECT id FROM alerts WHERE id IN ({placeholders})", clean_aids)
+                    found = {r[0] for r in cur.fetchall()}
+                    missing = set(clean_aids) - found
+                    if missing:
+                        cur.close()
+                        return jsonify({"error": f"Alert IDs not found: {sorted(missing)}"}), 404
+
                 db_exec(
                     cur,
                     """
@@ -1835,7 +1859,7 @@ def api_cases():
                     """,
                     (case_id, title, desc, sev, assigned, now, now)
                 )
-                for aid in alert_ids:
+                for aid in set(clean_aids):
                     if _is_postgres():
                         cur.execute("INSERT INTO case_alerts (case_id, alert_id, added_at) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING", (case_id, int(aid), now))
                     else:
@@ -1847,7 +1871,7 @@ def api_cases():
                 return jsonify({"error": f"Database error creating case: {e}"}), 500
             cur.close()
 
-        write_audit_log(db, assigned, "create_case", "cases", case_id, {"title": title, "alert_count": len(alert_ids)})
+        write_audit_log(db, assigned, "create_case", "cases", case_id, {"title": title, "alert_count": len(clean_aids)})
         return jsonify({"status": "ok", "case_id": case_id, "title": title})
 
     status_filter = request.args.get("status")
@@ -1894,9 +1918,9 @@ def api_case_detail(case_id: str):
         valid_severities = {"low", "medium", "high", "critical"}
         allowed_transitions = {
             "open": {"open", "investigating"},
-            "investigating": {"investigating", "resolved", "closed", "open"},
+            "investigating": {"investigating", "resolved", "open"},
             "resolved": {"resolved", "closed", "investigating"},
-            "closed": {"closed", "open", "investigating"},
+            "closed": {"closed", "open"},
         }
 
         # Validate severity if provided
@@ -1999,12 +2023,33 @@ def api_case_add_alerts(case_id: str):
     alert_ids = data.get("alert_ids", [])
     if not alert_ids:
         return jsonify({"error": "alert_ids list required"}), 400
+    try:
+        clean_aids = [int(x) for x in alert_ids]
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid alert_ids: all must be integers"}), 400
+
     db = get_db()
     now = time.time()
     from storage.db import _sqlite_lock
     with _sqlite_lock:
         cur = db.cursor()
-        for aid in alert_ids:
+        # 1. Verify case exists
+        db_exec(cur, "SELECT case_id FROM cases WHERE case_id = ?", (case_id,))
+        if not cur.fetchone():
+            cur.close()
+            return jsonify({"error": "Case not found"}), 404
+
+        # 2. Verify all alerts exist
+        param = "%s" if _is_postgres() else "?"
+        placeholders = ",".join([param] * len(clean_aids))
+        cur.execute(f"SELECT id FROM alerts WHERE id IN ({placeholders})", clean_aids)
+        found = {r[0] for r in cur.fetchall()}
+        missing = set(clean_aids) - found
+        if missing:
+            cur.close()
+            return jsonify({"error": f"Alert IDs not found: {sorted(missing)}"}), 404
+
+        for aid in set(clean_aids):
             if _is_postgres():
                 cur.execute("INSERT INTO case_alerts (case_id, alert_id, added_at) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING", (case_id, int(aid), now))
             else:
@@ -2012,8 +2057,28 @@ def api_case_add_alerts(case_id: str):
         db_exec(cur, "UPDATE cases SET updated_at = ? WHERE case_id = ?", (now, case_id))
         db.commit()
         cur.close()
-    write_audit_log(db, "analyst", "link_alerts_to_case", "cases", case_id, {"alert_ids": alert_ids})
-    return jsonify({"status": "ok", "linked_count": len(alert_ids)})
+    write_audit_log(db, "analyst", "link_alerts_to_case", "cases", case_id, {"alert_ids": clean_aids})
+    return jsonify({"status": "ok", "linked_count": len(clean_aids)})
+
+
+@app.route("/api/cases/<case_id>/alerts/<int:alert_id>", methods=["DELETE"])
+def api_case_remove_alert(case_id: str, alert_id: int):
+    """Unlink an alert association from a case."""
+    db = get_db()
+    now = time.time()
+    from storage.db import _sqlite_lock
+    with _sqlite_lock:
+        cur = db.cursor()
+        db_exec(cur, "SELECT case_id FROM cases WHERE case_id = ?", (case_id,))
+        if not cur.fetchone():
+            cur.close()
+            return jsonify({"error": "Case not found"}), 404
+        db_exec(cur, "DELETE FROM case_alerts WHERE case_id = ? AND alert_id = ?", (case_id, alert_id))
+        db_exec(cur, "UPDATE cases SET updated_at = ? WHERE case_id = ?", (now, case_id))
+        db.commit()
+        cur.close()
+    write_audit_log(db, "analyst", "unlink_alert_from_case", "cases", case_id, {"alert_id": alert_id})
+    return jsonify({"status": "ok", "unlinked_alert_id": alert_id})
 
 
 @app.route("/api/cases/<case_id>/notes", methods=["POST"])
@@ -2029,6 +2094,10 @@ def api_case_add_note(case_id: str):
     from storage.db import _sqlite_lock
     with _sqlite_lock:
         cur = db.cursor()
+        db_exec(cur, "SELECT case_id FROM cases WHERE case_id = ?", (case_id,))
+        if not cur.fetchone():
+            cur.close()
+            return jsonify({"error": "Case not found"}), 404
         db_exec(cur, "INSERT INTO case_notes (case_id, author, note, created_at) VALUES (?, ?, ?, ?)", (case_id, author, note, now))
         db_exec(cur, "UPDATE cases SET updated_at = ? WHERE case_id = ?", (now, case_id))
         db.commit()
