@@ -47,6 +47,14 @@ Artefacts:
 | `oisf_defrag_recursion` | OISF | PCAP | `efda8ae464a66b22e702880b4196014b6e9ca18ee1bc2097f7a903deaad06f4a` | 10,001 / 760,100 | MIT | 0 alerts; parser-stress fixture, no spurious alerts |
 | `oisf_defrag_af_confusion` | OISF | PCAP | `68b362406904a64b1349d080af3b837f0420973908553cdf9378d001e87ea1ab` | 16,384 / 1,605,656 | MIT | 0 alerts; parser-stress fixture, no spurious alerts |
 
+**Capture-level classification correction.** Of the 12 supplementary captures,
+2 attack-labelled captures produced target-rule signals (Rbot and the truncated
+Hajime prefix). `oisf_irc` produced an IRC rule signal but is a protocol fixture,
+not a malware-labelled capture, so it is reported separately and is not counted
+as an attack true positive. Two captures were partial, six were sub-threshold,
+and one was unassessed. These are capture-level observations, not flow-level
+true positives.
+
 **Interpretation limits.** Verdicts recorded by
 `classify_capture_level_signal()` are coarse: they ask whether *any* declared
 target rule fired anywhere in the capture. They are not flow-level precision or
