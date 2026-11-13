@@ -15,6 +15,7 @@ Verifies:
 """
 
 import os
+import shutil
 import sys
 import time
 import json
@@ -32,13 +33,44 @@ from storage.db import get_connection, init_db, write_alert
 from storage.forensics_db import init_forensics_db, upsert_network_flow, save_system_setting
 from dashboard.app import app
 
+# Browser acceptance requires Selenium plus a real Chrome/Chromium binary. Skip
+# cleanly (with an explicit reason) instead of erroring at import on machines or
+# CI images that do not provide them; the module still runs wherever a browser
+# is installed.
+pytest.importorskip("selenium", reason="selenium is not installed")
+
+_CHROME_CANDIDATES = (
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/opt/google/chrome/chrome",
+)
+
+
+def _find_chrome_binary() -> str | None:
+    for candidate in _CHROME_CANDIDATES:
+        if os.path.exists(candidate):
+            return candidate
+    for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+if _find_chrome_binary() is None:
+    pytest.skip(
+        "No Chrome/Chromium binary found; browser acceptance tests require one",
+        allow_module_level=True,
+    )
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-
 
 SCREENSHOTS_DIR = os.path.join(PROJECT_DIR, "..", "docs", "screenshots")
 
@@ -111,9 +143,12 @@ def browser_env(tmp_path_factory):
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1600,1050")
     options.page_load_strategy = "eager"
-    options.binary_location = "/usr/bin/chromium"
+    options.binary_location = _find_chrome_binary()
 
-    service = Service(executable_path="/usr/bin/chromedriver")
+    # Prefer a system chromedriver when present; otherwise let Selenium Manager
+    # resolve a matching driver automatically.
+    driver_path = shutil.which("chromedriver") or "/usr/bin/chromedriver"
+    service = Service(executable_path=driver_path) if os.path.exists(driver_path) else Service()
     driver = webdriver.Chrome(service=service, options=options)
     driver.set_page_load_timeout(30)
     driver.set_script_timeout(15)

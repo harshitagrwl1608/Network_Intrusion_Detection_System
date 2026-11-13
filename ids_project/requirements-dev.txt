@@ -1,0 +1,4 @@
+# Test-only dependencies (not needed to run the IDS itself).
+-r requirements.txt
+pytest>=8.0.0
+selenium>=4.20.0   # browser acceptance tests; they skip when no Chrome is available
