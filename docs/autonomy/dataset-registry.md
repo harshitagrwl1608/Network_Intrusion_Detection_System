@@ -20,6 +20,42 @@ This registry tracks all discovered, ingested, evaluated, and candidate security
 | **NetGuard Synthetic Attack Suite** | NetGuard IDS Project | `ids_project/evaluation/generate_test_pcap.py` | PCAP | Generated dynamically / deterministic | 38 attack scenarios, 38,000+ packets | SYN flood, stealth scan, ARP spoof, shellcode, SQLi, XSS, exfil | MIT / Internal | All 19 Rules (100% coverage benchmark) |
 | **NetGuard Synthetic Benign Baseline** | NetGuard IDS Project | `ids_project/evaluation/generate_test_pcap.py` | PCAP | Generated dynamically / deterministic | 50,000+ packets | Benign web, DNS, NTP, SSH, HTTPS, ARP traffic | MIT / Internal | Benign suppression verification (0 FP benchmark) |
 
+### 2.1 Supplementary evaluation — 2026-11-12/13
+
+Twelve previously unevaluated public captures were acquired (206.3 MiB total,
+2 GiB ceiling) and replayed through the **unmodified** detection engine. The run
+was read-only with respect to rules, thresholds, weights, feature extraction,
+flow construction and evaluation logic. Detector revision:
+`a4843be53cb6c0a6d9315774abae62c92185bb01`.
+
+Artefacts:
+`/run/media/harshitgarg/Data1/NetGuard-datasets/evaluations/20261112T175050Z_supplementary/`
+(`results.json`, `results.csv`, `evals/`, `OVERNIGHT_DATASET_EVALUATION_REPORT.md`).
+
+| Dataset Identifier | Publisher | Format | SHA-256 | Packets / Bytes | License | Outcome |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `ctu13_rbot_20110812` (Botnet-44) | Stratosphere / CTU | PCAP | `41880c3a3acfa5ef794abc7b9142b4b41670419c74900e1e953b4a0e75fe55ee` | 495,056 / 128,575,191 | CC-BY | 1,100 alerts (`IRC_C2_BEACONING`, `SLOW_PORT_SCAN`, `PORT_SCAN`, `TCP_FLAG_ANOMALY`, `BRUTE_FORCE`) |
+| `ctu13_rbot_dos_icmp_20110815` (Botnet-45) | Stratosphere / CTU | PCAP | `2617578aed17045e6491fbe5ab7c02d338cabaab21e7ee9ebfb7853046b6e295` | 28,826 / 30,672,708 | CC-BY | 5 alerts; `ICMP_FLOOD`/`ICMP_SWEEP` did **not** fire — threshold/window review needed |
+| `ctu13_fastflux_20110815` (Botnet-46) | Stratosphere / CTU | PCAP | `716f7c43df5df7dff5b14b0cbe4767ca85a656769864fa66b6eda59764316efc` | 45,853 / 30,941,919 | CC-BY | 15 alerts; `DNS_ANOMALY` did **not** fire — fast-flux visibility gap |
+| `ctu13_sogou_20110816` (Botnet-48) | Stratosphere / CTU | PCAP | `ff5c18adaa6a4681df1db43d0eac10d05e65d51931d5380ca54ceff0d005d2c5` | 20,663 / 18,868,213 | CC-BY | 0 alerts — genuine coverage gap |
+| `iot23_malware_21_1` (Torii) | Stratosphere / CTU | PCAP | `40b6928cedcda03fe5ded8a9994ec007a6d784028f37cbc00bbe3a26a7893023` | 50,277 / 4,063,997 | CC BY 4.0 | 0 alerts — genuine coverage gap |
+| `iot23_malware_9_1_5000` (Linux.Hajime, 5000-packet prefix) | Stratosphere / CTU | PCAP | `a761dcd52ede71a0f9a60272964e7392c25d9b6805f29735de7852b85bcb6ab6` | 5,000 / 551,929 | CC BY 4.0 | 7 alerts (`PORT_SCAN`, `SLOW_PORT_SCAN`); truncated publisher slice |
+| `oisf_irc` | OISF | PCAP | `8ca4ba1f69ce98c0dcff65dcb7dc21003b02c5d51cdac585c90b1e0e9494fb61` | 48 / 9,221 | MIT | 1 IRC alert; protocol fixture, not a malware label |
+| `oisf_telnet_01` | OISF | PCAP | `ae870805f1e5f6a2621b1f6e1e0229b47cc96d917f42c215acbcfcd46f9d72fc` | 92 / 9,244 | MIT | 0 alerts; protocol fixture, not a brute-force label |
+| `oisf_dns_over_http2_limit` | OISF | PCAP | `627a44d0585b2db3ee1f60fc3bebfa722ca338610af834ea514728e0ba40db58` | 50 / 135,313 | MIT | 0 alerts; DoH over TCP/443 is outside the port-53 observation surface |
+| `oisf_entropy_03` | OISF | PCAP | `aeb150e479106c7539581a25cb6048f2a27742d302ad1b96026a3fe4931deb52` | 255 / 130,854 | MIT | 0 alerts; correct negative control for high-entropy payloads |
+| `oisf_defrag_recursion` | OISF | PCAP | `efda8ae464a66b22e702880b4196014b6e9ca18ee1bc2097f7a903deaad06f4a` | 10,001 / 760,100 | MIT | 0 alerts; parser-stress fixture, no spurious alerts |
+| `oisf_defrag_af_confusion` | OISF | PCAP | `68b362406904a64b1349d080af3b837f0420973908553cdf9378d001e87ea1ab` | 16,384 / 1,605,656 | MIT | 0 alerts; parser-stress fixture, no spurious alerts |
+
+**Interpretation limits.** Verdicts recorded by
+`classify_capture_level_signal()` are coarse: they ask whether *any* declared
+target rule fired anywhere in the capture. They are not flow-level precision or
+recall, and small protocol fixtures must not be read as detection failures.
+No flow-level labels were downloaded in this cycle, so no precision/recall
+figure is claimed. The sealed HNS holdout
+(`CTU-IoT-Malware-Capture-1-1`) was excluded by name and path and was not read,
+replayed, moved or re-hashed.
+
 ---
 
 ## 3. Discovered Candidate Datasets
@@ -38,6 +74,10 @@ This registry tracks all discovered, ingested, evaluated, and candidate security
 ---
 
 ## 4. 19-Rule Cross-Coverage Matrix (NetGuard IDS Rules vs External Datasets)
+
+> Historical label: the "19-rule" framing records the rule count at the time this
+> matrix was built. NetGuard no longer has a rule-count limit or target; new rules
+> must justify themselves on distinct detection value, not on raising the number.
 
 | # | NetGuard Rule Name | Class in Engine | Primary Threat Behavior | CIC-IDS 2017/2018 | Malware-Traffic Analysis.net | Aposemat IoT-23 | MACCDC / CCDC | Wireshark Samples |
 | :-: | :--- | :--- | :--- | :-: | :-: | :-: | :-: | :-: |

@@ -1,0 +1,55 @@
+{
+  "primary_model": "opencode/deepseek-v4.1-flash-free",
+  "fallback_models": [
+    "opencode/minimax-m3.1-flash-free"
+  ],
+  "additional_models": [
+    "opencode/glm-5.3-flash-free"
+  ],
+  "probe": {
+    "agent": "plan",
+    "prompt": "Reply with exactly: NETGUARD_PROBE_OK",
+    "success_token": "NETGUARD_PROBE_OK",
+    "timeout_s": 240,
+    "max_attempts": 1,
+    "transient_retries": 2,
+    "transient_backoff_s": 20,
+    "cwd": "/tmp/opencode",
+    "command": null
+  },
+  "checkpoint_interval_s": 600,
+  "poll_interval_s": 5,
+  "log_files": [],
+  "db": {
+    "enabled": true,
+    "path": "~/.local/share/opencode/opencode.db",
+    "poll_interval_s": 5,
+    "start_from_now": true
+  },
+  "state_dir": "~/.local/state/netguard-watchdog",
+  "watch_dir": "~/NetGuard-overnight-handoff",
+  "shutdown": {
+    "enabled": false,
+    "commands": [
+      [
+        "systemctl",
+        "poweroff",
+        "--no-block"
+      ],
+      [
+        "loginctl",
+        "poweroff"
+      ]
+    ],
+    "stop_opencode": true,
+    "opencode_stop_command": [
+      "opencode",
+      "service",
+      "stop"
+    ],
+    "pre_shutdown_commands": [],
+    "grace_seconds": 20
+  },
+  "checkpoint_command": null,
+  "_comment": "Copy to ~/.config/opencode/netguard-watchdog.json and set shutdown.enabled=true only if you accept that the machine will power off when the fallback model also fails."
+}
