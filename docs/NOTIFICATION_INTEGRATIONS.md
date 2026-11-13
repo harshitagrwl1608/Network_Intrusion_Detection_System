@@ -37,7 +37,7 @@ flowchart TD
 | Non-blocking | Alerts are enqueued in the detection path; delivery happens on a worker thread. |
 | Cooldown | `(rule_name, dst_ip)` pairs are suppressed for `cooldown_s` (default 300 s). |
 | Severity gate | Default floor is `high`; override with `NOTIFICATION_MIN_SEVERITY`. |
-| Claim-based delivery | A row is atomically moved `pending` → `sending` before transmission, so two workers or a restart cannot double-send. |
+| Claim-based delivery | A row is atomically moved `pending` → `sending` before transmission, preventing concurrent workers from claiming it. A crash after SMTP accepts a message but before `sent` is committed can still lead to a duplicate after stale-claim recovery; delivery is at-least-once across that window. |
 | Stale-claim recovery | A `sending` row older than `STALE_CLAIM_SECONDS` (300 s) is returned to `pending`. |
 | Error classification | Authentication and recipient errors are **not** retried; timeouts, disconnects and 4xx/5xx transient codes are retried. |
 | Bounded retries | Default 3 attempts with exponential backoff, capped at 3600 s, with per-row jitter. |
