@@ -19,8 +19,19 @@ Security note:
 """
 
 import os
+import sys
+
 import pytest
 from cryptography.fernet import Fernet
+
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_DIR not in sys.path:
+    sys.path.insert(0, PROJECT_DIR)
+
+# Baseline for ``engine.rules.TRUSTED_HOSTS``.  The set is empty at import time;
+# RuleEngine instances populate it from config.TRUSTED_HOSTS (which includes the
+# configured gateway).  Captured once so per-test cleanup can restore it.
+_TRUSTED_HOSTS_BASELINE: set = set()
 
 
 def _generate_distinct_keys():
@@ -72,3 +83,34 @@ def set_test_crypto_keys():
     # Note: we do NOT clear the keys after the session because other test cleanup
     # may still need them (e.g., teardown fixtures). The process ends after the
     # test session anyway, so there is no security concern about leaving them set.
+
+
+@pytest.fixture(autouse=True)
+def isolate_engine_trusted_hosts():
+    """Restore ``engine.rules.TRUSTED_HOSTS`` to its session baseline after every test.
+
+    ``RuleEngine.__init__`` copies ``config.TRUSTED_HOSTS`` into the
+    module-global ``engine.rules.TRUSTED_HOSTS`` set.  ``config`` seeds that set
+    with the configured gateway (``GATEWAY_IP``, default ``192.168.1.1``), so any
+    test that constructs an engine silently marks the gateway as trusted for the
+    remainder of the session.  Detection tests that legitimately expect an alert
+    from that address then fail depending on collection order (for example the
+    TCP zero-window responder-role test, whose advertiser is ``192.168.1.1``).
+
+    Class-scoped setup (``setUpClass``) runs outside the per-test fixture window,
+    so the restore target is the fixed session baseline
+    (``_TRUSTED_HOSTS_BASELINE``) rather than the value seen at test start.
+    Restoring the baseline keeps every test hermetic without changing production
+    behaviour or weakening any assertion.
+    """
+    try:
+        import engine.rules as rules_mod
+    except Exception:  # pragma: no cover - engine unavailable in this context
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        rules_mod.TRUSTED_HOSTS.clear()
+        rules_mod.TRUSTED_HOSTS.update(_TRUSTED_HOSTS_BASELINE)
