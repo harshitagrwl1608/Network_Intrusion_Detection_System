@@ -499,7 +499,7 @@ class TestOutboxReportDelivery:
             }
             raw = server.messages[0].data.decode("utf-8", "replace")
             assert "Cc: lead@example.com" in raw
-            assert "\\nBcc:" not in raw
+            assert "\nBcc:" not in raw
             assert "audit@example.com" not in raw
 
     def test_missing_attachment_still_sends_covering_email(self, workdir):
