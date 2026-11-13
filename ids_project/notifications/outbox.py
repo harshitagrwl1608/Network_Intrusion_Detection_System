@@ -586,8 +586,11 @@ class NotificationOutboxManager:
             return ok, msg, extra
 
         kind = str(payload.get("kind") or "")
-        cc_raw = payload.get("cc") or ""
-        bcc_raw = payload.get("bcc") or ""
+        # Alert jobs do not snapshot CC/BCC because they should use the
+        # provider's current notification-settings defaults. Report jobs store
+        # explicit per-report values (including empty strings) in the payload.
+        cc_raw = payload.get("cc")
+        bcc_raw = payload.get("bcc")
 
         try:
             if kind == "alert":
