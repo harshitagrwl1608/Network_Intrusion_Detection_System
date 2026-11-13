@@ -201,8 +201,66 @@ verified end to end.
 * `a4843be` — `feat(notifications): reliable email delivery and Generate & Email reports`
   (15 files, +3544 / −106; includes both new test modules and the fake SMTP
   server)
-* Follow-up commit — documentation, dataset registry update, watchdog tool and
-  this report.
+* `e2b59e5` — documentation, dataset registry update, watchdog tool and this report.
+* `3671fb7` — CI compatibility and test-hermeticity fixes (see below).
 
 PR: opened against `main`, **not merged**. All metrics in this report come from
 the commands above; no number was estimated.
+
+---
+
+## 8. CI follow-up: why the `test` check was red
+
+The PR's `test` check reported failure, but the identical failure exists on
+`main` (run 43252756947 on `6d580c6`) and on every earlier run. The job log
+showed the suite dying during collection, not during detection tests:
+
+| Signature | Count on `main` |
+|---|---|
+| `ModuleNotFoundError: No module named 'pytest'` | 23 |
+| `NameError: name 'Any' is not defined` | 59 |
+
+Three distinct causes, none of them a regression from this PR:
+
+1. **Missing `Any` import (product bug).** `ids_project/engine/rules.py`
+   annotated `_normalize_port(port: Any)` without importing `Any`. Python
+   3.11–3.13 evaluate annotations when the `def` executes, so *importing the
+   engine* raised `NameError`. Python 3.14 (used locally) defers annotation
+   evaluation via PEP 649, which is why the bug never showed up in local runs.
+   Every test module that imports the engine failed. Fixed with
+   `from typing import Any` — no rule, threshold, weight or feature logic
+   changed.
+2. **Wrong test runner.** CI ran `python -m unittest discover`, but the suite is
+   pytest-based and pytest was not installed. CI now installs pytest and runs
+   `python -m pytest ids_project/tests -q`.
+3. **Order-dependent test failures (test-hygiene bug).** Two detection tests
+   passed alone but failed in a full run:
+   `test_regression_fixes.py::TestDetectionEnvironmentParsing::test_string_port_telemetry_compatibility_across_rules`
+   and
+   `test_tcp_zero_window.py::TestTcpZeroWindowRule::test_zero_window_alert_reports_responder_role_from_handshake`.
+   `RuleEngine.__init__` copies `config.TRUSTED_HOSTS` — seeded with the
+   configured gateway, default `192.168.1.1` — into the module-global
+   `engine.rules.TRUSTED_HOSTS`. Any test that built an engine therefore marked
+   the gateway as trusted for the remainder of the session, suppressing alerts
+   whose source/advertiser was `192.168.1.1`. `setUpClass` in
+   `test_memory_and_lru_bounds.py` was the first leak. A conftest autouse
+   fixture now restores the set to its session baseline after every test; no
+   assertion was weakened or removed.
+
+Two evaluation-DB MCP tests were also made hermetic: they required a
+developer-populated, gitignored `ids_project/storage/alerts.db`, so they now
+create a throwaway database under `tmp_path`.
+
+Local verification after the fixes (Python 3.14.8, the only interpreter
+available on this host):
+
+```
+python3 -m pytest ids_project/tests -q   -> 1078 passed, 630 subtests passed
+python3 ids_project/evaluation/run_eval.py -> exit 0
+```
+
+Residual risk disclosed honestly: the host has no Python 3.11 interpreter, so
+the fixes were verified for *importability* under 3.11 semantics via
+`typing.get_type_hints()` rather than by executing the suite on 3.11. Any
+remaining 3.11-only behaviour difference will surface in the CI check itself.
+
