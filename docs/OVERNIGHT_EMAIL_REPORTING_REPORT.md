@@ -3,7 +3,6 @@
 **Branch:** `opencode/overnight-email-and-reporting` (based on `origin/main`
 `6d580c6`, merge commit `Merge dashboard-forensics into main`)
 **Status:** implementation complete; PR open, **not merged**
-**Companion tool:** `scripts/ops/model_failover_watchdog.py`
 
 ---
 
@@ -18,7 +17,7 @@
 | No secrets, PCAPs, databases, caches or benchmark outputs committed | Verified by staged-diff scan; test byproducts removed; `/storage/` added to `.gitignore` |
 | Email work only — no new Telegram work | Telegram/SMS/webhook code paths untouched except shared outbox plumbing |
 | Report formats: HTML/JSON/CSV only | `SUPPORTED_FORMATS = ("html", "json", "csv")`; `pdf` requests degrade to real HTML |
-| Detection code frozen | `git status --porcelain -- ids_project/engine ids_project/detection ids_project/capture ids_project/evaluation` empty for the whole sprint |
+| Detection behavior frozen | No rule, threshold, weight, feature-extraction, flow-construction or evaluation-logic changes. One missing `typing.Any` import was added in `engine/rules.py` for Python 3.11 import compatibility. |
 | Datasets stored outside the repo, ≤ 2 GiB | 206.3 MiB on `/run/media/harshitgarg/Data1`, ≥ 100 GiB free maintained |
 | No live-network replay | Only file-based replay through the existing offline path |
 | No real SMTP credentials in tests | Local in-process fake SMTP server only |
@@ -103,33 +102,15 @@ cannot return.
   * Notification settings: display name, Cc, Bcc, transport security, and a
     warning when a username has no stored password.
 
-### 3.5 Watchdog
-
-`scripts/ops/model_failover_watchdog.py` + `docs/OPERATIONS_MODEL_FAILOVER_WATCHDOG.md`.
-Independent supervisor that reads provider errors from OpenCode's session
-database, attempts the authorised fallback exactly once, and either continues or
-performs a single graceful shutdown. Model output never reaches a shell. See the
-dedicated document for configuration and limitations.
-
 ---
 
 ## 4. Test evidence
 
 | Suite | Result |
 |---|---|
-| `pytest ids_project/tests` (branch) | **1074 passed**, 630 subtests, **4 failed** |
-| Baseline (`origin/main`) | 986 passed, 630 subtests, 4 failed |
+| Latest GitHub Actions run (PR head, Python 3.11) | **1058 passed, 15 skipped**, 630 subtests passed |
+| Synthetic evaluation (`run_eval.py`) | Completed successfully; 42 labelled scenarios detected, 0 benign false positives |
 | New tests | `test_email_pipeline.py` (49), `test_report_email.py` (39) = **+88** |
-
-The four failures are byte-identical to the pre-existing baseline and are **not**
-caused by this work:
-
-1. `test_regression_fixes.py::TestDetectionEnvironmentParsing::test_string_port_telemetry_compatibility_across_rules`
-2. `test_tcp_zero_window.py::TestTcpZeroWindowRule::test_zero_window_alert_reports_responder_role_from_handshake`
-3. `test_workbench.py::test_eval_db_mcp_server_summary_and_stats`
-4. `test_workbench.py::test_eval_db_mcp_server_sql_injection_defense`
-
-No failing test was disabled, skipped or removed.
 
 Notable test coverage added:
 
@@ -152,8 +133,10 @@ Notable test coverage added:
 through the unmodified engine at detector revision
 `a4843be53cb6c0a6d9315774abae62c92185bb01`.
 
-Headline: 3 capture-level true positives, 2 partial, 6 sub-threshold, 1
-unassessed. The three actionable findings:
+Headline: 2 attack-labelled capture-level signals (Rbot and the Hajime prefix),
+1 separate protocol-fixture signal (`oisf_irc`, which is not malware ground truth),
+2 partial, 6 sub-threshold and 1 unassessed. These are coarse capture-level
+signals, not flow-level true positives. The actionable findings:
 
 1. `ICMP_FLOOD`/`ICMP_SWEEP` did not fire on a publisher-labelled Rbot ICMP-DoS
    capture (28,826 packets).
@@ -181,18 +164,9 @@ it. They are recorded as follow-up work.
 * Consequences: the first dataset pass completed only 1 of 12 captures, and the
   in-flight download failed on resume with DNS errors. The remaining 11 captures
   were re-run and merged; no capture was scored twice.
-* The watchdog stayed resident across the suspend, checkpointed on resume, and
-  never left `IDLE`.
 * Because of the gap, the "six-hour" sprint window does not correspond to six
   hours of wall-clock work; the report above describes only work that actually
   ran.
-
-### Known limitation
-
-The watchdog's real `systemctl poweroff` path could not be executed because
-`sudo -n` requires a password on this host. Dry-run and unit-level verification
-passed; `CanPowerOff` was confirmed. This is disclosed rather than claimed as
-verified end to end.
 
 ---
 
@@ -201,7 +175,7 @@ verified end to end.
 * `a4843be` — `feat(notifications): reliable email delivery and Generate & Email reports`
   (15 files, +3544 / −106; includes both new test modules and the fake SMTP
   server)
-* `e2b59e5` — documentation, dataset registry update, watchdog tool and this report.
+* `e2b59e5` — documentation, dataset registry update and this report.
 * `3671fb7` — CI compatibility and test-hermeticity fixes (see section 8).
 * `b9e1d2c` — declare `cryptography`, add dev requirements, make browser tests
   skippable (see section 8).
@@ -283,28 +257,21 @@ Repository-wide scan now reports zero unbound typing names in annotations.
    both code paths accept. Verified with Wireshark tooling present and with
    `PATH` emptied.
 
-### Verification
+### Final verification
 
-Both interpreters were exercised. Python 3.11.18 was installed in userspace
-(`uv python install 3.11`) with exactly the packages CI installs, so the CI
-environment is reproduced locally rather than inferred:
+The latest GitHub Actions run for the PR head is run **#148** (`43362164201`).
+Its Python 3.11 test job completed successfully:
 
 ```
-# Python 3.11.18 (CI target), runtime requirements + pytest, no Selenium
-python -m pytest ids_project/tests -q      -> 1072 passed, 1 skipped, 630 subtests (exit 0)
-python ids_project/evaluation/run_eval.py  -> exit 0
+python -m pytest ids_project/tests -q
+1058 passed, 15 skipped, 630 subtests passed
 
-# Python 3.14.8 (developer default, Selenium + Chromium present)
-python3 -m pytest ids_project/tests -q     -> 1078 passed, 630 subtests (exit 0)
-python3 ids_project/evaluation/run_eval.py -> exit 0
+python ids_project/evaluation/run_eval.py
+exit 0
 ```
 
-The single skip is the browser acceptance module, which requires a desktop
-Chrome binary; it is installed for local development via
-`ids_project/requirements-dev.txt`.
-
-Final GitHub Actions result for the PR head: the `test` check completed with
-**success** (job `131675892697`), after failing on every commit before this
-sequence — including `main`. The pull request remains **open and unmerged**.
+The CI run is the release-gating result. The 15 skipped tests are reported as
+skipped by the CI job and are not represented as passing. The workflow completed
+with `success`; the pull request is still open pending review and merge.
 
 
