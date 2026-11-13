@@ -29,6 +29,7 @@ import struct
 import sys
 import time
 from collections import Counter, defaultdict
+from typing import Any, Tuple
 
 # Default external and local paths
 DEFAULT_PCAP = "/run/media/harshitgarg/Data1/NetGuard-datasets/published_ground_truth_ctu48_1/2019-02-28-19-15-13-192.168.1.200.pcap"

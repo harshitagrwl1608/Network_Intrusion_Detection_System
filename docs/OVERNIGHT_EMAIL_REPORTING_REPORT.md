@@ -202,7 +202,10 @@ verified end to end.
   (15 files, +3544 / −106; includes both new test modules and the fake SMTP
   server)
 * `e2b59e5` — documentation, dataset registry update, watchdog tool and this report.
-* `3671fb7` — CI compatibility and test-hermeticity fixes (see below).
+* `3671fb7` — CI compatibility and test-hermeticity fixes (see section 8).
+* `b9e1d2c` — declare `cryptography`, add dev requirements, make browser tests
+  skippable (see section 8).
+* Final docs commit — Python 3.11 verification evidence.
 
 PR: opened against `main`, **not merged**. All metrics in this report come from
 the commands above; no number was estimated.
@@ -251,16 +254,43 @@ Two evaluation-DB MCP tests were also made hermetic: they required a
 developer-populated, gitignored `ids_project/storage/alerts.db`, so they now
 create a throwaway database under `tmp_path`.
 
-Local verification after the fixes (Python 3.14.8, the only interpreter
-available on this host):
+The first CI run after switching to pytest then exposed two more pre-existing
+gaps that `unittest discover` had hidden:
+
+4. **Undeclared runtime dependency.** `storage/crypto.py` imports
+   `cryptography` (Fernet/PBKDF2) for credential encryption, but it was absent
+   from `ids_project/requirements.txt`, so a clean install could not use the
+   encrypted-storage paths either. Declared `cryptography>=42.0.0` and added
+   `ids_project/requirements-dev.txt` for test-only packages.
+5. **Hard browser dependency.** `test_browser_acceptance.py` imported Selenium
+   unconditionally and pinned `/usr/bin/chromium` and `/usr/bin/chromedriver`.
+   It now uses `pytest.importorskip("selenium")`, skips the module with an
+   explicit reason when no Chrome/Chromium binary exists, and resolves both
+   binaries dynamically. It still runs in full on this host (6 passed).
+
+A second missing annotation import was found by static scan of the whole repo
+(`scripts/audits/ctu48_1_ground_truth_audit_v3_1.py` used `Tuple` and `Any`
+without importing them, which broke three collection modules on 3.11).
+Repository-wide scan now reports zero unbound typing names in annotations.
+
+### Verification
+
+Both interpreters were exercised. Python 3.11.18 was installed in userspace
+(`uv python install 3.11`) with exactly the packages CI installs, so the CI
+environment is reproduced locally rather than inferred:
 
 ```
-python3 -m pytest ids_project/tests -q   -> 1078 passed, 630 subtests passed
+# Python 3.11.18 (CI target), runtime requirements + pytest, no Selenium
+python -m pytest ids_project/tests -q      -> 1072 passed, 1 skipped, 630 subtests (exit 0)
+python ids_project/evaluation/run_eval.py  -> exit 0
+
+# Python 3.14.8 (developer default, Selenium + Chromium present)
+python3 -m pytest ids_project/tests -q     -> 1078 passed, 630 subtests (exit 0)
 python3 ids_project/evaluation/run_eval.py -> exit 0
 ```
 
-Residual risk disclosed honestly: the host has no Python 3.11 interpreter, so
-the fixes were verified for *importability* under 3.11 semantics via
-`typing.get_type_hints()` rather than by executing the suite on 3.11. Any
-remaining 3.11-only behaviour difference will surface in the CI check itself.
+The single skip is the browser acceptance module, which requires a desktop
+Chrome binary; it is installed for local development via
+`ids_project/requirements-dev.txt`.
+
 
