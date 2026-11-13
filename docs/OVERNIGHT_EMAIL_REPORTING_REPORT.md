@@ -77,8 +77,9 @@ cannot return.
 * New bounded `notification_outbox.payload_json` column (≤ 64 KB) so rich HTML is
   rendered at delivery time rather than persisted.
 * Claim-based delivery: atomic `pending` → `sending` before transmission, with
-  stale-claim recovery after 300 s. Two workers (or a restart mid-send) can no
-  longer double-send.
+  stale-claim recovery after 300 s. Two workers cannot claim the same pending row. A crash after SMTP accepts a
+  message but before the database records `sent` can still lead to a duplicate
+  after stale-claim recovery; delivery is at-least-once across that failure window.
 * Permanent vs transient classification only for email; non-email providers keep
   their historical retry behaviour.
 * Durable report jobs (`enqueue_report_email`) with attachment reference, delay,
@@ -110,7 +111,7 @@ cannot return.
 |---|---|
 | Latest GitHub Actions run (PR head, Python 3.11) | **1058 passed, 15 skipped**, 630 subtests passed |
 | Synthetic evaluation (`run_eval.py`) | Completed successfully; 42 labelled scenarios detected, 0 benign false positives |
-| New tests | `test_email_pipeline.py` (49), `test_report_email.py` (39) = **+88** |
+| New tests | `test_email_pipeline.py` (49), `test_report_email.py` (40) = **+89** |
 
 Notable test coverage added:
 
