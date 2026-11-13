@@ -417,6 +417,10 @@ def _migrate_forensics_columns(conn, cur):
         ("alerts", "acknowledged", col_type_int),
         ("alerts", "status", col_type_str),
         ("packet_events", "raw_hex", col_type_str),
+        # Bounded, structured notification payload. Holds either a compact
+        # alert snapshot or a report/attachment *reference* so that delivery
+        # workers can render rich HTML without storing blobs in the database.
+        ("notification_outbox", "payload_json", col_type_str),
     ]
     is_pg = _is_postgres()
     for table, col, ctype in migrations:

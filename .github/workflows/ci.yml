@@ -23,10 +23,16 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         if [ -f ids_project/requirements.txt ]; then pip install -r ids_project/requirements.txt; fi
+        # The suite is pytest-based; unittest discovery cannot collect it.
+        # `pytest` is a test-only dependency (see ids_project/requirements-dev.txt).
+        # Selenium is intentionally NOT installed here: the browser acceptance
+        # test skips itself when Selenium or Chrome is unavailable, and running a
+        # real browser in CI is covered separately from the deterministic suite.
+        python -m pip install pytest
 
     - name: Run unit test suite
       run: |
-        python -m unittest discover ids_project/tests
+        python -m pytest ids_project/tests -q
 
     - name: Run automated evaluation runner
       run: |

@@ -114,8 +114,10 @@ The dashboard backend (`ids_project/dashboard/app.py`) provides authenticated RE
 - `POST /api/cases/<case_id>/notes`: Append an analyst note to the case history.
 
 ### Multi-Format Reports
-- `GET /api/reports/types`: List available report templates and metadata.
+- `GET /api/reports/types`: List available report templates, formats (`html`, `json`, `csv`), and whether email is configured.
 - `GET /api/reports/generate?type=<type>&hours=<hours>&format=html|json|csv`: Download dynamically generated compliance or executive reports.
+- `POST /api/reports/email`: Generate a report and queue it for email delivery (`type`, `format`, `hours`, `to`, `cc`, `bcc`). Returns `202` with the queued job, attachment size and SHA-256.
+- `GET /api/reports/outbox`: Recent report-delivery jobs with status, retry count, errors and outbox counters.
 
 ### Detection Health & Feedback
 - `POST /api/feedback/reclassify`: Reclassify an alert (`true_positive` vs. `false_positive`) with an analyst rationale, updating rule metrics without double-counting.

@@ -137,6 +137,10 @@ class TestBaselineAndNotifications(unittest.TestCase):
         outbox._providers["email"].send = mock_email
         outbox._providers["email"].host = "smtp.example.com"
         outbox._providers["email"].recipient = "analyst@example.com"
+        # A sender must be configured explicitly. The SMTP provider no longer
+        # falls back to "netguard-ids@localhost", which previously masked
+        # missing configuration and produced 530 Authentication Required.
+        outbox._providers["email"].from_addr = "netguard@example.com"
         outbox._providers["telegram"].send = mock_telegram
         outbox._providers["telegram"].bot_token = "fake-token"
         outbox._providers["telegram"].chat_id = "12345"

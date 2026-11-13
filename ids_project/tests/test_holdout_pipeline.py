@@ -57,6 +57,19 @@ VALID_MINIMAL_PCAP_HEADER = (
     b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00"
 )
 
+# The same global header plus one packet record.  capinfos accepts a header-only
+# file, but the pure-Python fallback in `validate_pcap_structure` (used when
+# capinfos/tshark are not installed, e.g. on a CI runner) rejects a capture with
+# no packet records.  Tests that assert a file is structurally valid must use a
+# capture that both code paths accept.
+VALID_MINIMAL_PCAP = VALID_MINIMAL_PCAP_HEADER + (
+    b"\x00\x00\x00\x00"   # ts_sec
+    b"\x00\x00\x00\x00"   # ts_usec
+    b"\x04\x00\x00\x00"   # incl_len = 4
+    b"\x04\x00\x00\x00"   # orig_len = 4
+    b"\xde\xad\xbe\xef"   # 4 bytes of link-layer payload
+)
+
 
 def _make_quarantined_pcap(
     source_path: str,
@@ -241,7 +254,7 @@ def test_verify_holdout_quarantine_failures():
 def test_enforce_quarantine_permissions():
     """Verify enforce_quarantine_permissions sets 0o444 read-only mode and structural check passes."""
     with tempfile.NamedTemporaryFile("wb", delete=False) as f:
-        f.write(VALID_MINIMAL_PCAP_HEADER)
+        f.write(VALID_MINIMAL_PCAP)
         path = f.name
 
     try:
@@ -553,7 +566,7 @@ def test_run_blind_holdout_evaluation_rejects_arbitrary_local_pcap():
     with tempfile.TemporaryDirectory() as q_dir, tempfile.TemporaryDirectory() as other_dir:
         outside_pcap = os.path.join(other_dir, "outside.pcap")
         with open(outside_pcap, "wb") as f:
-            f.write(VALID_MINIMAL_PCAP_HEADER)
+            f.write(VALID_MINIMAL_PCAP)
         enforce_quarantine_permissions(outside_pcap)
 
         with pytest.raises(ValueError) as exc:

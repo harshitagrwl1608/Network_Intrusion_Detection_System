@@ -657,9 +657,40 @@ def test_pcap_mcp_server_external_dataset_access():
     assert len(res_hash.get("sha256", "")) == 64
 
 
-def test_eval_db_mcp_server_summary_and_stats():
+def _make_eval_db(tmp_path):
+    """Create a throwaway evaluation database for the MCP tests.
+
+    The MCP tests must not depend on a developer-populated
+    ``ids_project/storage/alerts.db``: that file is gitignored and absent from a
+    clean checkout, which made these tests fail for reasons unrelated to the
+    server being tested.
+    """
+    import sqlite3
+
+    db_path = os.path.join(str(tmp_path), "eval.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE alerts ("
+        "id INTEGER PRIMARY KEY, timestamp REAL, rule_name TEXT, severity TEXT, "
+        "src_ip TEXT, dst_ip TEXT, evidence_json TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO alerts "
+        "(timestamp, rule_name, severity, src_ip, dst_ip, evidence_json) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            (1000.0, "PORT_SCAN", "high", "192.0.2.10", "192.0.2.50", '{"ports": 12}'),
+            (1001.0, "SYN_FLOOD", "critical", "192.0.2.11", "192.0.2.50", "{}"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_eval_db_mcp_server_summary_and_stats(tmp_path):
     script_path = os.path.join(SCRIPTS_DIR, "eval_db_mcp_server.py")
-    test_db = os.path.join(PROJECT_ROOT, "ids_project", "storage", "alerts.db")
+    test_db = _make_eval_db(tmp_path)
 
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
@@ -686,10 +717,10 @@ def test_eval_db_mcp_server_summary_and_stats():
     assert "alerts" in summary["tables"]
 
 
-def test_eval_db_mcp_server_sql_injection_defense():
+def test_eval_db_mcp_server_sql_injection_defense(tmp_path):
     """Verifies that evaluation DB server sanitizes identifiers and prevents arbitrary SQL injection."""
     script_path = os.path.join(SCRIPTS_DIR, "eval_db_mcp_server.py")
-    test_db = os.path.join(PROJECT_ROOT, "ids_project", "storage", "alerts.db")
+    test_db = _make_eval_db(tmp_path)
 
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize"},

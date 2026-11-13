@@ -189,6 +189,28 @@ The table below lists every configurable parameter, its default value, the envir
 
 ---
 
+## Notifications & Report Delivery
+
+See [NOTIFICATION_INTEGRATIONS.md](NOTIFICATION_INTEGRATIONS.md) for behaviour,
+delivery states and troubleshooting. Environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `NOTIFICATION_MIN_SEVERITY` | `high` | Minimum severity that creates a notification job (`low`/`medium`/`high`/`critical`) |
+| `NETGUARD_DASHBOARD_URL` | unset | Validated public dashboard URL embedded in alert/report emails |
+| `SMTP_HOST` | unset | SMTP relay hostname |
+| `SMTP_PORT` | `587` | SMTP port; `465` selects implicit TLS |
+| `SMTP_USER` / `SMTP_PASSWORD` | unset | Credentials; a username without a password fails closed |
+| `SMTP_FROM` | unset | Sender address (required; no implicit fallback) |
+| `SMTP_FROM_NAME` | `NetGuard IDS` | Sender display name |
+| `SMTP_TO` / `SMTP_CC` / `SMTP_BCC` | unset | Default recipients (max 25 per field, 50 total) |
+| `REPORT_ARTIFACT_DIR` | `<db dir>/report_artifacts` | Directory for generated report attachments |
+
+Report emails support `html`, `json` and `csv` only, with a 25 MiB attachment
+ceiling. There is no PDF export.
+
+---
+
 ## Example `.env` File
 
 ```dotenv

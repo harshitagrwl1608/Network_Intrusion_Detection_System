@@ -667,6 +667,29 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
               Generate &amp; Download Report
             </button>
+
+            <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);">
+              <div style="font-size:0.8rem;font-weight:600;color:#e2e8f0;margin-bottom:10px;">
+                Deliver by Email
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="report-email-to">To</label>
+                <input type="text" id="report-email-to" class="form-input" placeholder="analyst@example.com, soc@example.com" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="report-email-cc">Cc (optional)</label>
+                <input type="text" id="report-email-cc" class="form-input" placeholder="manager@example.com" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="report-email-bcc">Bcc (optional)</label>
+                <input type="text" id="report-email-bcc" class="form-input" placeholder="archive@example.com" />
+              </div>
+              <button class="btn-secondary" id="report-email-btn" style="width:100%;justify-content:center;padding:10px;" onclick="triggerReportEmail()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><polyline points="4 6 12 13 20 6"/></svg>
+                Generate &amp; Email Report
+              </button>
+              <div id="report-email-status" style="margin-top:10px;font-size:0.72rem;line-height:1.5;color:var(--text-muted);"></div>
+            </div>
           </div>
           <div style="background:rgba(15,23,42,0.4);border:1px solid var(--border);border-radius:var(--radius);padding:20px;">
             <h4 style="font-size:0.9rem;font-weight:600;color:#f1f5f9;margin-bottom:8px;" id="report-desc-title">Daily Network Security Report</h4>
@@ -806,10 +829,34 @@
                 <input type="email" id="cfg-smtp-from" class="form-input" placeholder="netguard-alerts@example.com" />
               </div>
               <div class="form-group">
-                <label class="form-label" for="cfg-smtp-to">Recipient Address (To)</label>
-                <input type="email" id="cfg-smtp-to" class="form-input" placeholder="analyst@example.com" />
+                <label class="form-label" for="cfg-smtp-from-name">Sender Display Name</label>
+                <input type="text" id="cfg-smtp-from-name" class="form-input" placeholder="NetGuard IDS" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-smtp-to">Recipient Addresses (To)</label>
+                <input type="text" id="cfg-smtp-to" class="form-input" placeholder="analyst@example.com, soc@example.com" />
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-smtp-cc">Cc (optional)</label>
+                <input type="text" id="cfg-smtp-cc" class="form-input" placeholder="manager@example.com" />
+              </div>
+              <div class="form-group" style="grid-column:1/-1;">
+                <label class="form-label" for="cfg-smtp-bcc">Bcc (optional)</label>
+                <input type="text" id="cfg-smtp-bcc" class="form-input" placeholder="audit-archive@example.com" />
+                <span style="font-size:0.68rem;color:var(--text-muted);margin-top:3px;display:block;">
+                  Separate multiple addresses with commas, semicolons, or newlines. Bcc recipients never appear in message headers.
+                </span>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cfg-smtp-tls">Transport Security</label>
+                <select id="cfg-smtp-tls" class="form-select">
+                  <option value="starttls">STARTTLS (port 587 / 25)</option>
+                  <option value="ssl">Implicit TLS (port 465)</option>
+                  <option value="none">None (local relay only)</option>
+                </select>
               </div>
             </div>
+            <div id="smtp-auth-warning" style="display:none;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.35);border-radius:6px;padding:10px 12px;margin-top:10px;font-size:0.74rem;color:#fca5a5;line-height:1.5;"></div>
             <div style="display:flex;gap:10px;margin-top:10px;">
               <button class="btn-primary" onclick="saveNotificationProvider('email')">Save Email Settings</button>
               <button class="btn-secondary" onclick="testNotificationProvider('email')">Dispatch Test Email</button>
