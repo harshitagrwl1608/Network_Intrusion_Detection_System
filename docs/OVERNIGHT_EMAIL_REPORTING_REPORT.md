@@ -205,7 +205,8 @@ verified end to end.
 * `3671fb7` — CI compatibility and test-hermeticity fixes (see section 8).
 * `b9e1d2c` — declare `cryptography`, add dev requirements, make browser tests
   skippable (see section 8).
-* Final docs commit — Python 3.11 verification evidence.
+* `1cab419` — holdout test no longer depends on capinfos/tshark (see section 8).
+* Final docs commit — CI green evidence.
 
 PR: opened against `main`, **not merged**. All metrics in this report come from
 the commands above; no number was estimated.
@@ -273,6 +274,15 @@ A second missing annotation import was found by static scan of the whole repo
 without importing them, which broke three collection modules on 3.11).
 Repository-wide scan now reports zero unbound typing names in annotations.
 
+6. **Test depended on optional system tools.**
+   `test_enforce_quarantine_permissions` wrote a header-only 24-byte PCAP and
+   expected quarantine validation to accept it. That holds only when
+   `capinfos`/`tshark` are installed; the pure-Python fallback correctly rejects
+   a capture with no packet records, so the test failed on a clean CI runner.
+   The test now writes a minimal capture that includes one packet record, which
+   both code paths accept. Verified with Wireshark tooling present and with
+   `PATH` emptied.
+
 ### Verification
 
 Both interpreters were exercised. Python 3.11.18 was installed in userspace
@@ -292,5 +302,9 @@ python3 ids_project/evaluation/run_eval.py -> exit 0
 The single skip is the browser acceptance module, which requires a desktop
 Chrome binary; it is installed for local development via
 `ids_project/requirements-dev.txt`.
+
+Final GitHub Actions result for the PR head: the `test` check completed with
+**success** (job `131675892697`), after failing on every commit before this
+sequence — including `main`. The pull request remains **open and unmerged**.
 
 
