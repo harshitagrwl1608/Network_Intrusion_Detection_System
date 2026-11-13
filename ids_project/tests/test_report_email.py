@@ -465,6 +465,43 @@ class TestOutboxReportDelivery:
             raw = server.messages[0].data.decode("utf-8", "replace")
             assert "\nBcc:" not in raw
 
+    def test_alert_email_uses_configured_cc_and_bcc_defaults(self, workdir):
+        manager = NotificationOutboxManager(conn=workdir["conn"])
+        with FakeSmtpServer() as server:
+            _configure_email(
+                manager, server.host, server.port,
+                cc_addr="lead@example.com", bcc_addr="audit@example.com",
+            )
+            enqueued = manager.enqueue_alert(
+                {
+                    "severity": "high",
+                    "rule_name": "PORT_SCAN",
+                    "detail": "Multiple destination ports contacted.",
+                    "src_ip": "192.0.2.10",
+                    "dst_ip": "198.51.100.20",
+                    "protocol": "TCP",
+                },
+                enabled_providers=["email"],
+            )
+            assert enqueued == 1
+
+            cur = workdir["conn"].cursor()
+            cur.execute(
+                "SELECT id FROM notification_outbox WHERE rule_name = 'PORT_SCAN' ORDER BY id DESC LIMIT 1"
+            )
+            job_id = cur.fetchone()[0]
+            cur.close()
+
+            assert manager.process_pending_outbox(max_items=5) == 1
+            assert _outbox_row(workdir["conn"], job_id)["status"] == "sent"
+            assert set(server.messages[0].rcpt_to) == {
+                "soc@example.com", "lead@example.com", "audit@example.com",
+            }
+            raw = server.messages[0].data.decode("utf-8", "replace")
+            assert "Cc: lead@example.com" in raw
+            assert "\\nBcc:" not in raw
+            assert "audit@example.com" not in raw
+
     def test_missing_attachment_still_sends_covering_email(self, workdir):
         manager = NotificationOutboxManager(conn=workdir["conn"])
         with FakeSmtpServer() as server:
